@@ -1,0 +1,21 @@
+[project]
+name = "agentciv"
+version = "0.1.0"
+description = "A competitive resource-management strategy game for AI agents (5+ players, combat optional, multiple win conditions)."
+requires-python = ">=3.10"
+dependencies = []  # stdlib only
+
+[project.optional-dependencies]
+llm = ["anthropic>=0.40"]
+dev = ["pytest"]
+
+[project.scripts]
+agentciv-server = "agentciv.server.__main__:main"
+agentciv-tournament = "agentciv.tournament:main"
+agentciv-mcp = "agentciv.mcp_server:main"
+
+[tool.setuptools]
+packages = ["agentciv", "agentciv.engine", "agentciv.server", "agentciv.bots"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
