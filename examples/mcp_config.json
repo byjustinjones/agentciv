@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "agentciv": {
+      "command": "python",
+      "args": ["-m", "agentciv.mcp_server"],
+      "cwd": "/path/to/agentciv",
+      "env": {
+        "AGENTCIV_URL": "http://localhost:8765",
+        "PYTHONPATH": "/path/to/agentciv"
+      }
+    }
+  }
+}
