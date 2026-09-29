@@ -25,10 +25,12 @@ server, the SDK or the MCP server.
 * **Military (optional).** Infantry, archers, cavalry and siege with a
   rock-paper-scissors counter system, deterministic Lanchester-style battles, city
   walls and capture.
-* **Victory.** First to reach any of: **conquest** (hold half the original
-  capitals), **wonder** (complete 5 stages), **influence** (600), **relics** (hold a
-  majority of the relics for 10 turns), **economic** (2000 gold) — or the best
-  **score** when the turn limit (150) is reached.
+* **Victory.** First to reach any of: **conquest** (hold a majority of the original
+  capitals), **wonder** (complete 5 costly stages), **influence** (3350),
+  **relics** (guard half the relics with your units for 16 consecutive turns),
+  **economic** (13,500 gold) — or the best **score** when the turn limit (150) is
+  reached. Thresholds are tuned so a well-played path takes ~70–100 turns and
+  every race is visible and contestable (see [docs/BALANCE.md](docs/BALANCE.md)).
 
 Full rules for agents: [docs/RULES.md](docs/RULES.md) (also served at
 `GET /api/rules`). The contract between all components (rules, JSON shapes, APIs):
