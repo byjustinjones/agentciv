@@ -9,11 +9,12 @@ Quick start::
     errors = g.submit_orders(a, [{"type": "claim", "at": [5, 4]}])
     events = g.step()
     view = g.player_view(a)
+    results = g.diplomacy(a, [{"type": "propose", "to": b, "give": {"wood": 20}, "get": {"gold": 15}}])
 
 See docs/DESIGN.md (contract) and docs/RULES.md (agent guide).
 """
-from . import constants
+from . import constants, deals
 from .game import Game, GameConfig
 from .rules import rules_json
 
-__all__ = ["Game", "GameConfig", "rules_json", "constants"]
+__all__ = ["Game", "GameConfig", "rules_json", "constants", "deals"]

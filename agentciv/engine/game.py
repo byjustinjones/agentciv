@@ -6,6 +6,7 @@ See docs/DESIGN.md for the rules. Public API (§11)::
     pid = g.add_player("Alpha")
     g.start()
     errors = g.submit_orders(pid, [...])
+    results = g.diplomacy(pid, [...])   # live barter (§13), any time
     events = g.step()
     g.player_view(pid); g.spectator_view(); g.finished; g.result
 
@@ -19,6 +20,7 @@ from dataclasses import dataclass
 
 from . import combat
 from . import constants as C
+from . import deals as D
 from . import market as M
 from . import views
 from .mapgen import generate_map
@@ -94,9 +96,21 @@ class Game:
         # diplomacy
         self.treaties: dict[tuple, int] = {}
         self.treaty_proposals: list = []
-        self.trade_offers: list = []
-        self._trade_counter = 0
         self.messages: list = []
+        # barter & deals (§13, agentciv.engine.deals)
+        self.deals: dict[str, dict] = {}        # every deal ever made, by id
+        self.open_deals: dict[str, dict] = {}   # open ones (same dicts)
+        self.deal_log: list = []                # public log of executed deals
+        self.contracts: list = []               # active contracts, creation order
+        self.diplomacy_seq = 0
+        self.diplomacy_log: list = []           # {"turn","seq","pid","action","via"}
+        self._deal_counter = 0
+        self._contract_counter = 0
+        self._recent_deals: dict[str, list] = {}
+        self._recent_all: list = []
+        self._dip_feed: list = []
+        self._dip_counts: dict[str, list] = {}
+        self._dip_counts_turn = -1
         # market
         self.pools: dict[str, list] = {}
         self.pool_init: dict[str, tuple] = {}
@@ -197,6 +211,24 @@ class Game:
         self._submitted[pid] = True
         return errors
 
+    def diplomacy(self, pid: str, actions) -> list:
+        """Apply diplomacy actions (propose, counter, accept, reject,
+        withdraw, say — §13) immediately. Returns one result per action,
+        ``{"index", "ok", "deal"?, "error"?}``. Never raises."""
+        try:
+            return D.run_actions(self, pid, actions)
+        except Exception as e:  # pragma: no cover - defensive
+            return [{"index": -1, "ok": False, "error": f"could not process diplomacy ({type(e).__name__})"}]
+
+    def inbox(self, pid: str, since: int = 0) -> dict:
+        """``{"seq", "items"}``: diplomacy events visible to ``pid`` with
+        ``seq > since`` (excluding its own actions)."""
+        try:
+            since = int(since)
+        except (TypeError, ValueError):
+            since = 0
+        return D.inbox(self, pid, since)
+
     def player_view(self, pid: str) -> dict:
         if self.player(pid) is None:
             raise KeyError(f"unknown player {pid!r}")
@@ -244,12 +276,6 @@ class Game:
 
     def hostile(self, a: str, b: str) -> bool:
         return a != b and self._pair(a, b) not in self.treaties
-
-    def trade_offer(self, oid: str) -> dict | None:
-        for off in self.trade_offers:
-            if off["id"] == oid and off["expires_turn"] >= self.turn:
-                return off
-        return None
 
     def treaty_proposal(self, frm: str, to: str) -> dict | None:
         for pr in self.treaty_proposals:
@@ -377,10 +403,11 @@ class Game:
         """Resolve the current turn. Returns the events generated."""
         if self.status != "running":
             return []
-        self._events = []
+        # self._events already holds the events of diplomacy actions sent
+        # through the channel during this turn (they belong to this turn)
         orders = {p.id: list(self._orders.get(p.id, [])) for p in self.players if p.alive}
         self._phase_diplomacy(orders)
-        self._phase_trades(orders)
+        self._phase_treaties(orders)
         self._phase_market(orders)
         self._phase_actions(orders)
         self._phase_movement(orders)
@@ -392,13 +419,36 @@ class Game:
         return [{k: v for k, v in e.items() if k != "_vis"} for e in self.last_events]
 
     # ---------------------------------------------------------------- 1
+    def _rotated(self) -> list:
+        """Living players, starting with a player that rotates every turn."""
+        alive = self._alive_in_order()
+        if not alive:
+            return alive
+        k = self.turn % len(alive)
+        return alive[k:] + alive[:k]
+
     def _phase_diplomacy(self, orders: dict) -> None:
+        """Diplomacy actions inside orders (propose/counter/accept/reject/
+        withdraw/say and the legacy offer_trade/accept_trade/message),
+        round-robin from the rotating player, exactly as if sent through
+        ``diplomacy()`` at that moment."""
+        order = self._rotated()
+        lists = {p.id: [o for o in orders[p.id] if "action" in o] for p in order}
+        longest = max((len(v) for v in lists.values()), default=0)
+        for k in range(longest):
+            for p in order:
+                lst = lists[p.id]
+                if k >= len(lst) or not p.alive:
+                    continue
+                o = lst[k]
+                res = D.apply_action(self, p.id, o["action"], via="orders")
+                if not res["ok"]:
+                    self._fail(p.id, o, res["error"])
+
+    # ---------------------------------------------------------------- 2
+    def _phase_treaties(self, orders: dict) -> None:
         t = self.turn
         broken = set()
-        for p in self._alive_in_order():
-            for o in orders[p.id]:
-                if o["type"] == "message":
-                    self.messages.append({"turn": t, "from": p.id, "to": o["to"], "text": o["text"]})
         for p in self._alive_in_order():
             for o in orders[p.id]:
                 if o["type"] != "break_treaty":
@@ -447,56 +497,6 @@ class Game:
                     self.treaty_proposals.append({"from": p.id, "to": to, "turns": o["turns"], "turn": t})
                     self._emit("treaty_proposed", vis=[p.id, to], **{"from": p.id, "to": to, "turns": o["turns"]})
         self._move_restricted = set(self.treaties) | broken
-
-    # ---------------------------------------------------------------- 2
-    def _rotated(self) -> list:
-        """Living players, starting with a player that rotates every turn."""
-        alive = self._alive_in_order()
-        if not alive:
-            return alive
-        k = self.turn % len(alive)
-        return alive[k:] + alive[:k]
-
-    def _phase_trades(self, orders: dict) -> None:
-        t = self.turn
-        for p in self._rotated():
-            for o in orders[p.id]:
-                if o["type"] != "accept_trade":
-                    continue
-                off = self.trade_offer(o["offer_id"])
-                if off is None or off["to"] != p.id or off["turn"] >= t:
-                    self._fail(p.id, o, f"trade offer {o['offer_id']} is not open")
-                    continue
-                frm = self._by_id.get(off["from"])
-                if frm is None or not frm.alive:
-                    self._fail(p.id, o, "the offering player is gone")
-                    continue
-                if not _can_pay(frm.resources, off["give"]):
-                    self._fail(p.id, o, f"{frm.id} can no longer pay {_fmt_cost(off['give'])}")
-                    continue
-                if not _can_pay(p.resources, off["want"]):
-                    self._fail(p.id, o, f"you cannot pay {_fmt_cost(off['want'])}")
-                    continue
-                _pay(frm.resources, off["give"])
-                _pay(p.resources, off["want"])
-                for r, v in off["give"].items():
-                    p.resources[r] += v
-                for r, v in off["want"].items():
-                    frm.resources[r] += v
-                self.trade_offers.remove(off)
-                self._emit("trade_executed", vis=[frm.id, p.id], id=off["id"], **{"from": frm.id, "to": p.id},
-                           give=dict(off["give"]), want=dict(off["want"]))
-        for p in self._alive_in_order():
-            for o in orders[p.id]:
-                if o["type"] != "offer_trade":
-                    continue
-                self._trade_counter += 1
-                off = {"id": f"t{self._trade_counter}", "from": p.id, "to": o["to"],
-                       "give": dict(o["give"]), "want": dict(o["want"]),
-                       "turn": t, "expires_turn": t + C.TRADE_OFFER_TTL}
-                self.trade_offers.append(off)
-                self._emit("trade_offered", vis=[p.id, o["to"]], id=off["id"], **{"from": p.id, "to": o["to"]},
-                           give=dict(off["give"]), want=dict(off["want"]))
 
     # ---------------------------------------------------------------- 3
     def _phase_market(self, orders: dict) -> None:
@@ -1060,6 +1060,8 @@ class Game:
             inc = self._seasoned(raw[p.id], self.turn)
             for r, v in inc.items():
                 p.resources[r] += v
+        D.pay_contracts(self)          # after yields, before upkeep (§13.3)
+        for p in self._alive_in_order():
             upkeep = self._upkeep(p.id)
             p.resources["food"] -= upkeep
             if p.resources["food"] < 0:
@@ -1111,8 +1113,7 @@ class Game:
                 del self.treaties[key]
                 self._emit("treaty_expired", a=key[0], b=key[1])
         self.treaty_proposals = [pr for pr in self.treaty_proposals if pr["turn"] >= t]
-        self.trade_offers = [o for o in self.trade_offers if o["expires_turn"] > t
-                             and self._by_id[o["from"]].alive and self._by_id[o["to"]].alive]
+        D.expire_deals(self)
         self.market_history.append({"turn": t, "prices": self._prices()})
         if len(self.market_history) > C.MARKET_HISTORY_TURNS:
             self.market_history = self.market_history[-C.MARKET_HISTORY_TURNS:]
@@ -1135,6 +1136,7 @@ class Game:
         for key in [k for k in self.treaties if p.id in k]:
             del self.treaties[key]
         self.treaty_proposals = [pr for pr in self.treaty_proposals if p.id not in (pr["from"], pr["to"])]
+        D.on_eliminated(self, p.id)
         p.wonder_city = None
         self._invalidate()
         p.final_score = self.stats()[p.id]["score"]

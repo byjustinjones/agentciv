@@ -13,6 +13,7 @@ The token obtained by ``join_game``/``quickmatch`` is kept in memory, so the
 agent never has to handle it.
 
 Typical loop: ``get_rules`` → ``quickmatch`` → repeat { ``get_state`` →
+(barter: ``propose_deal`` / ``respond_to_deal`` / ``say`` / ``wait_for_inbox``) →
 ``submit_orders`` → ``wait_for_turn`` } until the game is over → ``get_result``.
 """
 from __future__ import annotations
@@ -23,7 +24,7 @@ import sys
 import traceback
 from typing import Any
 
-from .client import AgentCivClient, ApiError, ascii_map, summarize_view
+from .client import AgentCivClient, ApiError, _deals_lines, ascii_map, describe_event, summarize_view
 
 PROTOCOL_VERSION = "2025-06-18"
 SUPPORTED_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
@@ -33,7 +34,11 @@ INSTRUCTIONS = """AgentCiv is a simultaneous-turn strategy game for 2-12 players
 trade, negotiate and (optionally) fight. Six ways to win: conquest, wonder, influence, relics, economic, score.
 Start with get_rules (read it once), then quickmatch (or list_games + join_game). Each turn: get_state,
 decide, submit_orders (resubmitting replaces your orders for that turn), then wait_for_turn. Turns have a
-deadline; if you miss it you simply do nothing that turn. Coordinates are [x, y] (x = column)."""
+deadline; if you miss it you simply do nothing that turn. Coordinates are [x, y] (x = column).
+Barter live during a turn: propose_deal (resources, tiles, per-turn contracts, peace), then wait_for_inbox for
+the reply and respond_to_deal (accept | reject | counter | withdraw); say sends messages; list_deals shows your
+open deals, contracts and the public deal log. An accepted deal settles at once. Negotiate BEFORE submitting
+orders when you can: once every player has submitted, the turn resolves."""
 
 ORDER_HELP = (
     "Order objects (coordinates [x,y]): "
@@ -42,11 +47,33 @@ ORDER_HELP = (
     '{"type":"build","at":[5,4],"building":"farm"} | {"type":"claim","at":[6,4]} | '
     '{"type":"settle","at":[9,9]} | {"type":"disband","at":[3,4],"units":{"infantry":1}} | '
     '{"type":"market","side":"buy","resource":"stone","qty":40,"limit":2.5} | '
-    '{"type":"offer_trade","to":"p2","give":{"wood":50},"want":{"gold":40}} | '
-    '{"type":"accept_trade","offer_id":"t7"} | {"type":"propose_treaty","to":"p3","turns":20} | '
+    '{"type":"propose","to":"p2","give":{"wood":50},"get":{"gold":40}} (better: the propose_deal tool, '
+    'applied at once) | {"type":"accept","deal":"d7"} | {"type":"propose_treaty","to":"p3","turns":20} | '
     '{"type":"accept_treaty","from":"p3"} | {"type":"break_treaty","with":"p3"} | '
-    '{"type":"message","to":"p2","text":"Truce?"}'
+    '{"type":"say","to":"p2","text":"Truce?"}'
 )
+
+BUNDLE_SCHEMA = {
+    "type": "object",
+    "description": 'a bundle: resources {"food","wood","stone","gold"} (integers), "tiles": [[x,y],...] (your owned '
+                   'non-city tiles), and/or a contract "per_turn": {"gold": 5} with "turns": 1-30. {} = nothing',
+    "properties": {
+        "food": {"type": "integer", "minimum": 0}, "wood": {"type": "integer", "minimum": 0},
+        "stone": {"type": "integer", "minimum": 0}, "gold": {"type": "integer", "minimum": 0},
+        "tiles": {"type": "array", "items": {"type": "array", "items": {"type": "integer"}}},
+        "per_turn": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+        "turns": {"type": "integer", "minimum": 1, "maximum": 30},
+    },
+    "additionalProperties": False,
+}
+DEAL_PROPS = {
+    "give": {**BUNDLE_SCHEMA, "description": "what YOU hand over. " + BUNDLE_SCHEMA["description"]},
+    "get": {**BUNDLE_SCHEMA, "description": "what YOU receive. " + BUNDLE_SCHEMA["description"]},
+    "peace": {"type": "integer", "minimum": 10, "maximum": 50,
+              "description": "optional: both sides bound by a peace treaty for this many turns on acceptance"},
+    "message": {"type": "string", "description": "optional note shown with the deal (<= 300 chars)"},
+    "expires_in": {"type": "integer", "minimum": 1, "maximum": 5, "description": "turns the deal stays open (2)"},
+}
 
 
 def _schema(props: dict | None = None, required: list | None = None) -> dict:
@@ -116,6 +143,32 @@ TOOLS = [
                     "return the new state summary. Call this after submit_orders.",
      "inputSchema": _schema({"timeout": {"type": "number", "default": 50,
                                          "description": "max seconds to wait (<= 110)"}})},
+    {"name": "propose_deal",
+     "description": "Propose a deal to another player, applied immediately (barter, any time during a turn). "
+                    "Trade resources, land (tiles), contracts (per-turn payments: loans, tribute, rent) and/or peace. "
+                    "The other side can accept (settles at once if both can deliver), reject or counter; use "
+                    "wait_for_inbox to hear back. Example: give {\"wood\":60}, get {\"gold\":45}.",
+     "inputSchema": _schema({"to": {"type": "string", "description": "player id, e.g. p2"}, **DEAL_PROPS},
+                            ["to"])},
+    {"name": "respond_to_deal",
+     "description": "Answer a deal: accept | reject | counter (deals proposed TO you; counter = your new terms, "
+                    "give/get from YOUR point of view) or withdraw (your own proposal). Applied immediately.",
+     "inputSchema": _schema({"deal": {"type": "string", "description": "deal id, e.g. d7"},
+                             "response": {"type": "string", "enum": ["accept", "reject", "counter", "withdraw"]},
+                             **DEAL_PROPS}, ["deal", "response"])},
+    {"name": "list_deals",
+     "description": "Your open deals (incoming with whether they can settle now, outgoing), recently closed deals, "
+                    "active contracts, the public log of executed deals and every player's reputation.",
+     "inputSchema": _schema()},
+    {"name": "say",
+     "description": "Send a message now: to a player id (private) or \"all\" (public). Max 10 per turn.",
+     "inputSchema": _schema({"to": {"type": "string", "description": "player id or \"all\""},
+                             "text": {"type": "string"}}, ["to", "text"])},
+    {"name": "wait_for_inbox",
+     "description": "Block until something addressed to you happens (a deal proposed/countered/accepted/rejected, "
+                    "a message...) or the turn changes, then list it. Use while haggling, before submit_orders.",
+     "inputSchema": _schema({"timeout": {"type": "number", "default": 20,
+                                         "description": "max seconds to wait (<= 110)"}})},
     {"name": "get_result",
      "description": "Final result of a game (winner, condition, placements, scores) or its current status.",
      "inputSchema": _schema({"game_id": {"type": "string"}})},
@@ -147,7 +200,96 @@ class AgentCivMCP:
         return (f"Joined game {res['game_id']} as {res['player_id']} (status: {res.get('status')}). "
                 f"Next: call wait_for_turn (it returns when the game starts), then get_state.")
 
+    def _diplomacy(self, action: dict) -> str:
+        self._need_game()
+        try:
+            res = self.client.diplomacy([action])
+        except ApiError as e:
+            if e.status == 409:
+                raise ToolError(f"{e.message}. Call get_state to see the current turn.") from None
+            raise
+        r = (res.get("results") or [{}])[0]
+        if not r.get("ok") and r.get("status") == "failed":  # accepted, but settlement failed: deal is closed
+            raise ToolError(f"Deal {r.get('deal')} FAILED to settle (now closed; nothing moved): {r.get('error')}. "
+                            f"Retrying accept will not work; propose new terms if you still want a deal.")
+        if not r.get("ok"):
+            text = f"Rejected: {r.get('error')}"
+            if r.get("example"):
+                text += f" — correct shape: {json.dumps(r['example'], separators=(',', ':'))}"
+            raise ToolError(text)
+        t = action["type"]
+        if t == "propose":
+            return (f"Deal {r['deal']} proposed to {action['to']}. It stays open until accepted, rejected, "
+                    f"countered, withdrawn or expired; call wait_for_inbox to hear back.")
+        if t == "counter":
+            return f"Countered {r.get('countered')} with deal {r['deal']} (sent to its proposer)."
+        if t == "accept":
+            return f"Deal {r['deal']} accepted and executed: resources/tiles moved, contracts and peace in force."
+        if t == "say":
+            return "Message sent."
+        return f"Deal {r['deal']} {'rejected' if t == 'reject' else 'withdrawn'}."
+
+    @staticmethod
+    def _terms(action: dict, give, get, peace, message, expires_in) -> dict:
+        action["give"] = give or {}
+        action["get"] = get or {}
+        for k, v in (("peace", peace), ("message", message), ("expires_in", expires_in)):
+            if v is not None:
+                action[k] = v
+        return action
+
     # ------------------------------------------------------------ tools
+    def propose_deal(self, to: str, give: dict | None = None, get: dict | None = None, peace: int | None = None,
+                     message: str | None = None, expires_in: int | None = None) -> str:
+        return self._diplomacy(self._terms({"type": "propose", "to": to}, give, get, peace, message, expires_in))
+
+    def respond_to_deal(self, deal: str, response: str, give: dict | None = None, get: dict | None = None,
+                        peace: int | None = None, message: str | None = None, expires_in: int | None = None) -> str:
+        if response == "counter":
+            if not give and not get and not peace:
+                raise ToolError("counter needs your terms: give and/or get (from YOUR point of view), or peace")
+            return self._diplomacy(self._terms({"type": "counter", "deal": deal}, give, get, peace, message,
+                                               expires_in))
+        if response == "reject":
+            return self._diplomacy({"type": "reject", "deal": deal, **({"message": message} if message else {})})
+        if response in ("accept", "withdraw"):
+            return self._diplomacy({"type": response, "deal": deal})
+        raise ToolError("response must be accept, reject, counter or withdraw")
+
+    def say(self, to: str, text: str) -> str:
+        return self._diplomacy({"type": "say", "to": to, "text": text})
+
+    def list_deals(self) -> str:
+        self._need_game()
+        view = self.client.state()
+        pid = self.client.player_id
+        deals = view.get("deals") or {}
+        lines = _deals_lines(deals, view.get("contracts") or [], pid, 50)
+        if not (deals.get("open") or []):
+            lines.insert(0, "No open deals involving you.")
+        lines.append("Reputation (deals | contracts honoured | defaults | treaty betrayals):")
+        for p in view.get("players", []):
+            rep = p.get("reputation") or {}
+            lines.append(f"  {p['id']} {p['name']}{' <- you' if p['id'] == pid else ''}: {rep.get('deals', 0)} | "
+                         f"{rep.get('contracts_honoured', 0)} | {rep.get('defaults', 0)} | "
+                         f"{rep.get('betrayals', p.get('betrayals', 0))}")
+        return "\n".join(line.lstrip("\n") for line in lines)
+
+    def wait_for_inbox(self, timeout: float = 20) -> str:
+        self._need_game()
+        timeout = max(0.0, min(float(timeout), 110.0))
+        box = self.client.inbox(timeout=timeout, turn=self.last_turn if self.last_turn >= 0 else None)
+        pid = self.client.player_id
+        lines = [describe_event(ev, pid) for ev in box.get("items") or []]
+        head = f"Turn {box.get('turn')} ({box.get('status')})"
+        if box.get("status") == "running" and box.get("turn") is not None and box["turn"] > self.last_turn >= 0:
+            head += " — a NEW TURN has started: call get_state"
+        if not lines:
+            return head + (": nothing new (timed out). " if box.get("timed_out") else ": nothing new. ") + \
+                "Call wait_for_inbox again, or submit_orders."
+        return head + ":\n" + "\n".join(f"  {line}" for line in lines) + \
+            "\nAnswer with respond_to_deal / propose_deal / say (list_deals shows everything open)."
+
     def get_rules(self, format: str = "markdown") -> str:
         if format == "json":
             return json.dumps(self.client.rules_json(), indent=1)
@@ -187,8 +329,14 @@ class AgentCivMCP:
         if view.get("status") == "running":
             self.last_turn = max(self.last_turn, view["turn"])  # wait_for_turn waits for the next one
         text = summarize_view(view, self.client.player_id)
+        self.client.inbox_seq = max(self.client.inbox_seq, int(view.get("diplomacy_seq") or 0))
         if view.get("status") == "running":
-            text += (f"\n\nSubmit orders for turn {view['turn']} with submit_orders, then call wait_for_turn.")
+            incoming = [d for d in (view.get("deals") or {}).get("open") or [] if d.get("to") == self.client.player_id]
+            if incoming:
+                text += (f"\n\n{len(incoming)} deal(s) await your answer: respond_to_deal (accept | reject | "
+                         "counter).")
+            text += (f"\n\nBarter now if useful (propose_deal, respond_to_deal, say, wait_for_inbox), then submit "
+                     f"orders for turn {view['turn']} with submit_orders and call wait_for_turn.")
         if include_map:
             text += "\n\n" + ascii_map(view, self.client.player_id)
         if full:

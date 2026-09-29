@@ -10,7 +10,8 @@ class Player:
     __slots__ = (
         "id", "name", "index", "color", "resources", "alive", "eliminated_turn",
         "capital", "betrayals", "relic_streak", "wonder_city", "city_counter",
-        "tiles", "final_score",
+        "tiles", "final_score", "deals", "contracts_honoured", "defaults",
+        "influence_debt",
     )
 
     def __init__(self, pid: str, name: str, index: int, color: str):
@@ -28,6 +29,11 @@ class Player:
         self.city_counter = 0                # used for city names
         self.tiles = 0                       # owned tile count (maintained by Game)
         self.final_score: int | None = None  # score frozen at elimination
+        # public reputation (DESIGN §13.4); ``betrayals`` above is the treaty counter
+        self.deals = 0                       # executed deals (either side)
+        self.contracts_honoured = 0          # contracts paid in full as payer
+        self.defaults = 0                    # contracts defaulted on as payer
+        self.influence_debt = 0              # unpaid default penalties (taken from future influence)
 
 
 class City:

@@ -32,7 +32,9 @@ from ..bots import get_bot
 from ..bots.base import Bot, IdleBot
 from ..engine import Game, GameConfig
 from ..engine import constants as C
-from .guide import order_hint
+from ..engine.deals import ACTION_TYPES as DIPLOMACY_TYPES
+from ..engine.deals import ALL_ACTION_TYPES, DealError, parse_action
+from .guide import ORDER_EXAMPLES, order_hint
 from .replay import ArchivedReplay, FrameStore, envelope, slice_full_replay
 from .storage import Storage
 
@@ -47,6 +49,13 @@ DEFAULT_FILL_BOTS = ["strategist", "economist", "rusher", "turtle", "random"]
 BOT_SLOW_WARN = 5.0
 ERROR_GRACE = 2.0                # after a submission with rejected orders, wait this long for a fix
 ARCHIVE_CACHE_SIZE = 8           # parsed replay files kept in memory (compact frames)
+
+# House-bot negotiation (docs/DESIGN.md §13.6)
+NEGOTIATION_ROUNDS = 3           # rounds of Bot.negotiate(view) per turn before act()
+NEGOTIATION_BUDGET = 5.0         # max seconds of those rounds per turn (later rounds are skipped)
+NEGOTIATE_DEBOUNCE = 0.25        # a house bot answers this long after something is addressed to it ...
+NEGOTIATE_DEBOUNCE_MAX = 1.0     # ... (the timer restarts on new items, but never beyond this)
+REACTIVE_PER_TURN = 10           # mid-turn (reactive) negotiations per house bot per turn
 
 # Ratings: only games played under standard, server-controlled conditions feed the leaderboard.
 MAX_RATED_TURN_TIMEOUT = 300.0   # rated games need a real deadline, so a losing player can't stall forever
@@ -104,6 +113,34 @@ def make_bot(name: str, seed: int) -> tuple[Bot, str]:
     except Exception as e:
         log.warning("bot %r unavailable (%s: %s); using 'idle' instead", name, type(e).__name__, e)
         return IdleBot(seed=seed), "idle"
+
+
+def _negotiator(bot):
+    """The bot's ``negotiate`` method, or None if it has none (or only the
+    do-nothing default of :class:`Bot`, so no view is built for it)."""
+    fn = getattr(bot, "negotiate", None)
+    if not callable(fn):
+        return None
+    base = getattr(Bot, "negotiate", None)
+    if base is not None and getattr(type(bot), "negotiate", None) is base:
+        return None
+    return fn
+
+
+def _action_hint(action) -> dict:
+    """Example/hint for a diplomacy action that failed to parse (state errors get none)."""
+    try:
+        parse_action(action)
+        return {}
+    except DealError:
+        pass
+    except Exception:  # pragma: no cover - defensive
+        return {}
+    t = action.get("type") if isinstance(action, dict) else None
+    if isinstance(t, str) and t in ALL_ACTION_TYPES:
+        return order_hint(action)
+    return {"hint": "valid diplomacy actions: " + ", ".join(DIPLOMACY_TYPES) + "; e.g. "
+                    + json.dumps(ORDER_EXAMPLES["propose"], separators=(",", ":"))}
 
 
 def _is_reserved_name(name: str) -> bool:
@@ -259,6 +296,10 @@ class Seat:
     draft: bool = False              # submitted with "ready": false — don't resolve the turn for them yet
     error_at: float | None = None    # monotonic time of this turn's last submission with rejected orders
     verified: bool = False           # joined with the key of a registered name
+    nudge_due: float | None = None   # house bot: monotonic time of its next reactive negotiation
+    nudge_first: float | None = None
+    reactive: int = 0                # reactive negotiations this turn
+    acted_seq: int = 0               # diplomacy_seq when the house bot last computed its orders
 
 
 class GameSession:
@@ -288,6 +329,7 @@ class GameSession:
         self._turn_started = 0.0
         self._deadline_mono: float | None = None
         self._bots_done = True
+        self._public_dip = 0          # bumped when public diplomacy happens mid-turn (pushes an SSE frame)
         self._thread = threading.Thread(target=self._run, name=f"game-{game_id}", daemon=True)
         with self.cond:
             for b in opts["bots"]:
@@ -415,6 +457,8 @@ class GameSession:
         self._bots_done = not any(s.is_bot and s.pid in alive for s in self.seats.values())
         for s in self.seats.values():
             s.draft, s.error_at = False, None
+            s.nudge_due = s.nudge_first = None
+            s.reactive = 0
         self._touch()
 
     def _record_frame(self) -> None:
@@ -481,7 +525,7 @@ class GameSession:
     # ------------------------------------------------------------ worker
     def _run(self) -> None:
         while not self.manager.stopping and not self.closed:
-            jobs = None
+            job = None
             with self.cond:
                 if self.closed:
                     break
@@ -492,38 +536,281 @@ class GameSession:
                     continue
                 if self.status == "finished":
                     break
+                turn = self.game.turn
                 if not self._bots_done:
-                    turn = self.game.turn
-                    alive = set(self.game.alive_players())
-                    jobs = [(s, self.game.player_view(s.pid)) for s in self.seats.values()
-                            if s.is_bot and s.pid in alive]
-                    bot_only = not self._living_remote()
+                    job = ("turn", not self._living_remote())
                 else:
-                    wait = self._seconds_until_ready()
-                    if wait <= 0:
-                        self._advance()
-                        continue
-                    self.cond.wait(min(wait, 1.0))
-                    continue
+                    due = self._take_due_nudges()
+                    if due:
+                        job = ("react", due)
+                    else:
+                        wait = self._seconds_until_ready()
+                        if wait <= 0:
+                            # never resolve with a house bot's stale orders: answer pending nudges
+                            # (and re-act after executed deals) first, even if not yet due
+                            due = self._take_due_nudges(force=True)
+                            if not due:
+                                self._advance()
+                                continue
+                            job = ("react", due)
+                        else:
+                            nxt = min((s.nudge_due for s in self.seats.values() if s.nudge_due is not None),
+                                      default=math.inf)
+                            self.cond.wait(max(0.0, min(wait, 1.0, nxt - time.monotonic())))
+                            continue
             # house bots think outside the lock so state requests stay fast; bot-only games share a
             # few compute slots so a pile of them can't starve the API and games with remote players
-            if bot_only:
-                with self.manager.bot_slots:
-                    results = [(seat, self._bot_orders(seat, view)) for seat, view in jobs]
+            if job[0] == "turn":
+                if job[1]:
+                    with self.manager.bot_slots:
+                        self._house_turn(turn)
+                else:
+                    self._house_turn(turn)
             else:
-                results = [(seat, self._bot_orders(seat, view)) for seat, view in jobs]
-            with self.cond:
-                if self.game.turn == turn and self.status == "running":
-                    for seat, orders in results:
-                        errs = self.game.submit_orders(seat.pid, orders)
-                        if errs and log.isEnabledFor(logging.DEBUG):
-                            log.debug("game %s %s (%s) order errors: %s", self.game_id, seat.pid,
-                                      seat.bot_name, errs[:5])
-                self._bots_done = True
-                self._touch()
+                self._react(turn, job[1])
         if self.status == "finished" and not self.manager.stopping:
             self._finalize()
             self.manager._retire(self)
+
+    def _bot_seats(self, turn: int) -> list[Seat]:
+        """Living house bots in seat order, rotated by the turn (who negotiates first)."""
+        alive = set(self.game.alive_players())
+        bots = [s for s in self.seats.values() if s.is_bot and s.pid in alive and s.bot is not None]
+        if not bots:
+            return bots
+        k = turn % len(bots)
+        return bots[k:] + bots[:k]
+
+    def _current(self, turn: int, seat: Seat) -> bool:
+        """Still the same running turn and the seat's player alive (call under the lock)."""
+        p = self.game.player(seat.pid)
+        return self.game.status == "running" and self.game.turn == turn and bool(p and p.alive)
+
+    def _house_turn(self, turn: int) -> None:
+        """A turn's work for the house bots: NEGOTIATION_ROUNDS rounds of
+        ``negotiate`` (each bot, in rotating seat order, sees a fresh view and
+        its actions apply at once), then ``act`` on fresh views."""
+        with self.cond:
+            order = self._bot_seats(turn)
+            negotiators = [(s, fn) for s in order if (fn := _negotiator(s.bot)) is not None]
+        t0 = time.monotonic()
+        budget = self._negotiation_budget()
+        for _ in range(NEGOTIATION_ROUNDS if negotiators else 0):
+            for seat, fn in negotiators:
+                if time.monotonic() - t0 > budget:
+                    break
+                self._negotiate_once(turn, seat, fn, nudge=False)
+            else:
+                continue
+            log.debug("game %s turn %s: house-bot negotiation budget used up", self.game_id, turn)
+            break
+        with self.cond:
+            jobs = [(s, self.game.player_view(s.pid), self.game.diplomacy_seq)
+                    for s in self._bot_seats(turn) if self._current(turn, s)]
+        results = [(seat, self._bot_orders(seat, view), seq) for seat, view, seq in jobs]
+        with self.cond:
+            if self.game.turn == turn and self.status == "running":
+                for seat, orders, seq in results:
+                    self._submit_bot(seat, orders, seq)
+            self._bots_done = True
+            self._touch()
+
+    def _submit_bot(self, seat: Seat, orders: list, seq: int) -> None:
+        errs = self.game.submit_orders(seat.pid, orders)
+        seat.acted_seq = seq
+        if errs and log.isEnabledFor(logging.DEBUG):
+            log.debug("game %s %s (%s) order errors: %s", self.game_id, seat.pid, seat.bot_name, errs[:5])
+
+    def _negotiation_budget(self) -> float:
+        tt = self.opts["turn_timeout"]
+        return NEGOTIATION_BUDGET if tt <= 0 else max(0.5, min(NEGOTIATION_BUDGET, 0.25 * tt))
+
+    def _negotiate_once(self, turn: int, seat: Seat, fn, nudge: bool) -> None:
+        """One ``negotiate`` call of a house bot on a fresh view (outside the lock)."""
+        with self.cond:
+            if not self._current(turn, seat):
+                return
+            view = self.game.player_view(seat.pid)
+        actions = self._bot_negotiate(seat, fn, view)
+        if actions:
+            with self.cond:
+                if self._current(turn, seat):
+                    self._apply_diplomacy(seat.pid, actions, nudge=nudge)
+
+    def _bot_negotiate(self, seat: Seat, fn, view: dict) -> list:
+        t0 = time.monotonic()
+        try:
+            actions = fn(view)
+            if actions is None:
+                return []
+            if isinstance(actions, dict):
+                actions = actions.get("actions", [actions]) if "actions" in actions else [actions]
+            if not isinstance(actions, list):
+                raise TypeError(f"negotiate() returned {type(actions).__name__}, expected list")
+        except Exception:
+            seat.bot_errors += 1
+            if seat.bot_errors <= 3:
+                log.exception("game %s: house bot %s (%s) failed to negotiate on turn %s; no actions",
+                              self.game_id, seat.pid, seat.bot_name, view.get("turn"))
+            return []
+        dt = time.monotonic() - t0
+        if dt > BOT_SLOW_WARN:
+            log.warning("game %s: house bot %s took %.1fs to negotiate", self.game_id, seat.bot_name, dt)
+        return actions
+
+    def _take_due_nudges(self, force: bool = False) -> list[tuple[Seat, bool]]:
+        """House bots whose reactive work is due now, as ``(seat, negotiate?)``
+        (clears their timers; under the lock). ``REACTIVE_PER_TURN`` caps only
+        the ``negotiate`` calls, never the re-``act`` after an executed deal.
+        ``force`` (the turn is about to resolve): every pending nudge, due or
+        not, plus any bot with a deal executed since it last acted."""
+        now = time.monotonic()
+        due = []
+        for s in self.seats.values():
+            if s.nudge_due is not None and (force or s.nudge_due <= now):
+                s.nudge_due = s.nudge_first = None
+                if s.bot is None:
+                    continue
+                talk = s.reactive < REACTIVE_PER_TURN and _negotiator(s.bot) is not None
+                if talk:
+                    s.reactive += 1
+                due.append((s, talk))
+        if force:
+            listed = {s.pid for s, _ in due}
+            turn = self.game.turn
+            due += [(s, False) for s in self._bot_seats(turn)
+                    if s.pid not in listed and self._current(turn, s) and self._deal_since_act(s)]
+        return due
+
+    def _deal_since_act(self, seat: Seat) -> bool:
+        """A deal ``seat`` is party to executed after it last computed its orders (under the lock)."""
+        return any(ev["type"] == "deal_executed" and seat.pid in (ev.get("from"), ev.get("to"))
+                   for ev in self._dip_events(seat.acted_seq))
+
+    def _react(self, turn: int, seats: list[tuple[Seat, bool]]) -> None:
+        """Mid-turn: house bots answer what was addressed to them (negotiate,
+        if still within their per-turn budget), and recompute their orders if a
+        deal they are party to executed since they last acted (their resources
+        or land changed)."""
+        for seat, talk in seats:
+            fn = _negotiator(seat.bot) if talk else None
+            if fn is not None:
+                self._negotiate_once(turn, seat, fn, nudge=True)
+            with self.cond:
+                if not self._current(turn, seat) or not self._bots_done:
+                    continue
+                if not self._deal_since_act(seat):
+                    continue
+                view, seq = self.game.player_view(seat.pid), self.game.diplomacy_seq
+            orders = self._bot_orders(seat, view)
+            with self.cond:
+                if self._current(turn, seat):
+                    self._submit_bot(seat, orders, seq)
+                    self._touch()
+
+    # ------------------------------------------------------------ diplomacy
+    def _dip_events(self, since: int) -> list[dict]:
+        """Diplomacy events with ``seq > since`` (with their ``_vis``), oldest first."""
+        feed = self.game._dip_feed
+        out = []
+        for ev in reversed(feed):
+            if ev["seq"] <= since:
+                break
+            out.append(ev)
+        out.reverse()
+        return out
+
+    def _apply_diplomacy(self, pid: str, actions, nudge: bool = True) -> list:
+        """Apply diplomacy actions for ``pid`` now (under the lock), wake
+        long-pollers, push an SSE frame on public diplomacy and schedule the
+        reactive negotiation of house bots something was addressed to."""
+        g = self.game
+        seq0 = g.diplomacy_seq
+        results = g.diplomacy(pid, actions)
+        if g.diplomacy_seq == seq0:
+            return results
+        events = self._dip_events(seq0)
+        if any(ev.get("_vis") is None for ev in events):
+            self._public_dip += 1
+        if nudge:
+            now = time.monotonic()
+            alive = set(g.alive_players())
+            for s in self.seats.values():
+                if not s.is_bot or s.pid == pid or s.pid not in alive or s.bot is None:
+                    continue
+                talks = _negotiator(s.bot) is not None
+                for ev in events:
+                    if ev.get("by") == s.pid or s.pid not in (ev.get("from"), ev.get("to")):
+                        continue
+                    if talks or ev["type"] == "deal_executed":
+                        if s.nudge_first is None:
+                            s.nudge_first = now
+                        s.nudge_due = min(now + NEGOTIATE_DEBOUNCE, s.nudge_first + NEGOTIATE_DEBOUNCE_MAX)
+                        break
+        self._touch()
+        return results
+
+    def diplomacy(self, pid: str, body) -> dict:
+        """``POST /diplomacy``: apply actions immediately (§13.2)."""
+        turn = None
+        if isinstance(body, list):
+            actions = body
+        elif isinstance(body, dict) and "actions" in body:
+            actions, turn = body["actions"], body.get("turn")
+        elif isinstance(body, dict) and "type" in body:
+            actions = [body]
+        else:
+            raise ApiError(400, "body must be {\"actions\": [...]} (e.g. {\"actions\": [{\"type\": \"propose\", "
+                                "\"to\": \"p2\", \"give\": {\"wood\": 60}, \"get\": {\"gold\": 45}}]})")
+        if not isinstance(actions, list):
+            raise ApiError(400, "'actions' must be a list of action objects")
+        if len(actions) > C.MAX_ACTIONS_PER_CALL:  # refused before taking the game lock
+            raise ApiError(400, f"too many actions in one call ({len(actions)}; max {C.MAX_ACTIONS_PER_CALL})")
+        if turn is not None:
+            turn = _number({"turn": turn}, "turn", None, -1, 10 ** 9, integer=True)
+        with self.cond:
+            g = self.game
+            if g.status == "lobby":
+                raise ApiError(409, "game has not started yet", turn=g.turn, status=g.status)
+            if g.status == "finished":
+                raise ApiError(409, "game is finished", turn=g.turn, status=g.status)
+            if turn is not None and turn != g.turn:
+                raise ApiError(409, f"stale turn {turn}: the current turn is {g.turn}", turn=g.turn,
+                               status=g.status)
+            p = g.player(pid)
+            if p is None or not p.alive:
+                raise ApiError(409, "you have been eliminated", turn=g.turn, status=g.status)
+            results = self._apply_diplomacy(pid, actions)
+            for r in results:  # malformed actions get a correctly shaped example (like rejected orders)
+                i = r.get("index", -1)
+                if not r.get("ok") and isinstance(i, int) and 0 <= i < len(actions):
+                    r.update({k: v for k, v in _action_hint(actions[i]).items() if k not in r})
+            return {"results": results, "ok": all(r.get("ok") for r in results), "seq": g.diplomacy_seq,
+                    "turn": g.turn, "deadline": g.deadline}
+
+    def inbox(self, pid: str, since: int | None, timeout: float, turn: int | None = None) -> dict:
+        """``GET /inbox``: diplomacy events visible to ``pid`` with ``seq >
+        since`` (not its own). Long-polls until there is one, the turn or
+        status changes, or ``timeout`` passes. ``turn``: the turn the caller
+        believes is current (returns at once if it isn't any more)."""
+        since = 0 if since is None else since
+        end = time.monotonic() + timeout
+        with self.cond:
+            g = self.game
+            turn0, status0 = (g.turn if turn is None else turn), g.status
+            timed_out = False
+            while True:
+                box = g.inbox(pid, since)
+                if (box["items"] or g.status != status0 or g.turn != turn0 or g.status == "finished"
+                        or self.manager.stopping or self.closed):
+                    break
+                remaining = end - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    break
+                self.cond.wait(remaining)
+            return {"seq": box["seq"], "items": box["items"], "turn": g.turn, "status": g.status,
+                    "deadline": g.deadline, "timed_out": timed_out}
 
     def _bot_orders(self, seat: Seat, view: dict) -> list:
         t0 = time.monotonic()
@@ -742,11 +1029,12 @@ class GameSession:
         # remote players' submissions are part of the key so spectators see "submitted" live
         subs = tuple(pid for pid, s in self.seats.items()
                      if not s.is_bot and self.game.status == "running" and self.game.has_submitted(pid))
-        return (self.game.status, self.game.turn, len(self.seats), subs)
+        return (self.game.status, self.game.turn, len(self.seats), subs, self._public_dip)
 
     def next_frame(self, last_key, timeout: float):
-        """Block until the spectator-visible state changes (turn, status or
-        lobby seats). Returns ``(key, bytes | None, finished)``; bytes is None
+        """Block until the spectator-visible state changes (turn, status,
+        lobby seats, a remote submission or public diplomacy such as an
+        executed deal). Returns ``(key, bytes | None, finished)``; bytes is None
         on timeout."""
         end = time.monotonic() + timeout
         with self.cond:
@@ -798,6 +1086,13 @@ class ArchivedGame:
 
     def submit(self, pid, body):
         raise ApiError(409, "game is finished", status="finished")
+
+    def diplomacy(self, pid, body):
+        raise ApiError(409, "game is finished", status="finished")
+
+    def inbox(self, pid, since, timeout, turn=None) -> dict:
+        return {"seq": 0, "items": [], "turn": self._summary.get("turn", 0), "status": "finished",
+                "deadline": None, "timed_out": False}
 
 
 class GameManager:

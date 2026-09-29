@@ -7,11 +7,11 @@ from agentciv.engine.testing import new_game, run_turn
 
 TOP_KEYS = {"game_id", "turn", "max_turns", "status", "deadline", "season", "you", "players", "map",
             "cities", "armies", "market", "treaties", "treaty_proposals", "trade_offers", "messages",
-            "events", "victory", "costs"}
+            "events", "victory", "costs", "deals", "contracts", "diplomacy_seq"}
 PLAYER_KEYS = {"id", "name", "color", "alive", "eliminated_turn", "resources", "income", "cities", "tiles",
                "capitals_held", "military_power", "units", "wonder_stage", "relics_held", "relics_guarded",
                "relic_streak",
-               "betrayals", "score", "submitted", "victory_progress"}
+               "betrayals", "reputation", "score", "submitted", "victory_progress"}
 YOU_KEYS = {"id", "name", "resources", "caps", "income", "upkeep", "claim_cost", "settle_cost", "submitted"}
 
 

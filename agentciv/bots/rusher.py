@@ -13,10 +13,27 @@ Strategy
   sells stone it doesn't need, and disbands rather than starves.
 * Accepts treaties only from players it is not currently targeting and never
   proposes any.
+
+Trading (§13)
+-------------
+* **Extortion**: demands tribute (gold per turn for 10 turns) plus a
+  15-turn peace from weaker rivals its army threatens — not from its
+  current target unless that assault has stalled.
+* Peace with its target is worth minus the expected spoils of the conquest
+  (plunder + capital, scaled by how feasible the assault looks), so buying
+  it off costs real money.
+* **Opportunist**: honours a contract only while the payee is militarily
+  respectable (otherwise the gold goes to the army and the contract may
+  default); breaks a peace treaty (50 influence) when the partner cheated
+  on tribute, or when the partner's tribute has ended and it has become an
+  easy prey.
 """
 from __future__ import annotations
 
-from .common import raw_strength, total_units, treaty_proposals_to_me
+from agentciv.engine import constants as C
+
+from .common import (DealValuer, contract_income, raw_strength, total_units,
+                     treaty_proposals_to_me)
 from .planner import PlannerBot
 
 
@@ -36,9 +53,112 @@ class RusherBot(PlannerBot):
     ATTACK_RATIO = 1.1
     ECON_SHARE = 0.25          # share of wood/gold left for the economy
 
+    # trading
+    COUNTER_SHARE = 0.65
+    COUNTER_LIMIT = 1
+    CONCEDE = 0.25
+    TRIBUTE_TURNS = 10
+    TRIBUTE_PEACE = 15
+    EXTORT_RATIO = 1.3          # our army near them / their defence
+    BREAK_RATIO = 1.8           # break a peace only against a much weaker partner
+
     def pipeline(self):
-        return [self.pick_target, self.diplomacy, self.food_safety, self.defend, self.sell,
+        return [self.pick_target, self.opportunism, self.diplomacy, self.food_safety, self.defend, self.sell,
                 self.build_army, self.attack, self.expand, self.develop, self.garrison_moves]
+
+    # -- negotiation ------------------------------------------------------
+    def trade_setup(self, w) -> None:
+        super().trade_setup(w)
+        self.pick_target()
+
+    def trade_needs(self) -> tuple:
+        needs, gold = super().trade_needs()
+        if self.target is not None:
+            needs["stone"] = max(needs["stone"], 20 * self.siege_needed(self.target))
+        return needs, gold
+
+    def conquest_value(self, q: str) -> float:
+        """Expected spoils of taking ``q``'s capital (plunder + a capital)."""
+        w = self.w
+        v = DealValuer(w) if getattr(self, "tv", None) is None or self.tv.w is not w else self.tv
+        res = (w.players.get(q) or {}).get("resources", {}) or {}
+        plunder = sum(res.get(r, 0) * C.PLUNDER_FRACTION * v.prices.get(r, 1.0) for r in C.TRADABLE)
+        mine = max(30.0, float(raw_strength(w.my_units)))
+        feas = min(1.0, mine / max(1.0, v.defense(q)))
+        if self.memory.get("hard", {}).get(self.memory.get("target"), -1) > w.turn:
+            feas *= 0.3
+        return (plunder + 250.0) * feas
+
+    def peace_bias(self) -> dict:
+        b = super().peace_bias()
+        if self.target_owner is not None:
+            b[self.target_owner] = b.get(self.target_owner, 0.0) - self.conquest_value(self.target_owner)
+        return b
+
+    def trade_proposals(self) -> list:
+        """Tribute + peace demanded from weaker rivals our army threatens."""
+        w, v = self.tw, self.tv
+        mine = raw_strength(w.my_units)
+        if mine < 40:
+            return []
+        stalled = self.memory.get("hard", {}).get(self.memory.get("target"), -1) > w.turn
+        out = []
+        for q in self.partners():
+            if q in w.treaties or (q == self.target_owner and not stalled):
+                continue
+            t = v.threat(w.me, q)
+            if t < 40 or t < self.EXTORT_RATIO * v.defense(q):
+                continue
+            pl = w.players.get(q) or {}
+            inc = (pl.get("income") or {}).get("gold", 0)
+            gold = (pl.get("resources") or {}).get("gold", 0)
+            x = int(max(3, min(60, 0.5 * inc + gold / 40.0)))
+            get = {"per_turn": {"gold": x}, "turns": self.TRIBUTE_TURNS}
+            deal = {"from": w.me, "to": q, "give": {}, "get": get, "peace": self.TRIBUTE_PEACE}
+            if v.deal_gain(deal, q) < 0:
+                x = max(3, x // 2)
+                get = {"per_turn": {"gold": x}, "turns": self.TRIBUTE_TURNS}
+                deal["get"] = get
+            out.append({"to": q, "give": {}, "get": get, "peace": self.TRIBUTE_PEACE, "kind": "tribute",
+                        "value": v.deal_gain(deal),
+                        "text": f"pay {x} gold/turn for {self.TRIBUTE_TURNS} turns and we keep the peace"})
+        out.sort(key=lambda p: -p["value"])
+        return out[:1]
+
+    # -- opportunism in act() ---------------------------------------------
+    def honour_contract(self, c: dict) -> bool:
+        w = self.w
+        payee = (w.players.get(c.get("payee")) or {}).get("military_power", 0) or 0
+        return payee >= 0.7 * max(1, raw_strength(w.my_units))
+
+    def opportunism(self) -> None:
+        """Break a peace with a partner that cheated on tribute, or with a
+        weak partner that no longer pays."""
+        w, p = self.w, self.p
+        cheat = self.memory.setdefault("cheaters", {})
+        for e in w.events:
+            if e.get("type") == "contract_default" and e.get("payee") == w.me:
+                cheat[e.get("payer")] = w.turn
+        if w.res.get("influence", 0) < C.TREATY_BREAK_COST + 10 or self.memory.get("broke", -99) > w.turn - 12:
+            return
+        paying = contract_income(w)
+        v = DealValuer(w)
+        best = None
+        for q in sorted(w.treaties):
+            if q not in w.alive or self.relic_runner(q):
+                continue
+            payer = any(c.get("payer") == q and c.get("payee") == w.me for c in w.view.get("contracts", []) or [])
+            if payer and paying.get("gold", 0) > 0 and q not in cheat:
+                continue
+            t = v.threat(w.me, q)
+            ratio = t / max(1.0, v.defense(q))
+            if q in cheat and cheat[q] >= w.turn - 10:
+                ratio *= 1.5
+            if ratio >= self.BREAK_RATIO and (best is None or ratio > best[0]):
+                best = (ratio, q)
+        if best is not None:
+            p.orders.append({"type": "break_treaty", "with": best[1]})
+            self.memory["broke"] = w.turn
 
     # -- target -----------------------------------------------------------
     def pick_target(self) -> None:

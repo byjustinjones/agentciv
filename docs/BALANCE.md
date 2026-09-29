@@ -160,6 +160,12 @@ the handicapped version used for the ladder.
 
 ## 4. Results (current constants)
 
+These tables were measured **before barter** (docs/DESIGN.md §13). Since
+then every tournament turn starts with 3 negotiation rounds; §5 has fields A
+and B with barter, the same fields without it (`--rounds 0`, current bots)
+and the trading ablation. The other tables in this section (5 copies,
+fairness, other player counts, ladder) have not been re-run with barter.
+
 Commands (all 6 players unless noted; `--jobs 4`):
 
 ```
@@ -252,7 +258,128 @@ strategist 53.3% (place 1.80), economist 20.0%, turtle 15.0%, rusher 11.7%,
 random 0%; endings wonder 45%, economic 20%, relics 18%, conquest 13%,
 influence 3%; median length 78 — within noise of the 240-game table above.
 
-## 5. Open issues
+## 5. Barter (§13): does trading keep skill on top?
+
+Every turn the tournament runner gives each bot 3 negotiation rounds before
+it acts (rotating seat order, fresh view each round, actions applied at
+once). How the bots trade: docs/BOTS.md ("Barter"). Commands (seed 1
+unless noted, 240 games each, `--jobs 4`):
+
+```
+python -m agentciv.tournament --bots strategist,economist,rusher,turtle,random,random --games 240 --seed 1 --jobs 4
+python -m agentciv.tournament --bots strategist,economist,rusher,turtle,economist,turtle --games 240 --seed 1 --jobs 4
+python -m agentciv.tournament --bots strategist,economist,rusher,turtle,random,random --games 240 --seed 1 --jobs 4 --rounds 0   # no barter
+python -m agentciv.tournament --bots strategist_notrade,economist,rusher,turtle,random,random --games 240 --seed 1 --jobs 4       # ablation
+python -m agentciv.tournament --bots strategist,strategist_notrade,economist,rusher,turtle,random --games 240 --seed 1 --jobs 4 # head-to-head
+```
+
+### Field A — `strategist,economist,rusher,turtle,random,random`
+
+| | strategist win% / place | economist | turtle | rusher | endings |
+|---|---|---|---|---|---|
+| **barter** (seed 1) | **51.2% / 1.93** | 24.6% | 15.0% | 9.2% | wonder 44%, economic 25%, relics 17%, conquest 10%, influence 4% |
+| barter (seed 2) | 48.3% / 1.92 | 23.7% | 13.3% | 14.6% | wonder 37%, economic 25%, relics 18%, conquest 16%, influence 3% |
+| no barter (`--rounds 0`) | 52.9% / 1.88 | 22.1% | 13.3% | 11.7% | wonder 44%, economic 22%, relics 15%, conquest 15%, influence 4% |
+| barter, strategist does not trade (seed 1) | 52.5% / 1.92 | 23.3% | 12.1% | 12.1% | wonder 42%, economic 25%, relics 16%, conquest 15%, influence 3% |
+| barter, strategist does not trade (seed 2) | 49.2% / 2.02 | 20.0% | 16.3% | 14.6% | wonder 45%, economic 23%, relics 15%, conquest 12%, influence 5% |
+
+With barter the random bots still place last (5.27–5.37). Median game length
+78.5 turns (no barter 78). **Deals: 16.7 per game** — bargain 6.9, random
+3.1, loan 3.0, sell 1.8, buy 1.5, peace 0.24, tribute 0.19. Per bot and game:
+strategist 9.4 deals (mostly bargains from the random bots; 0.6 contracts as
+payer, 0.18 defaults), economist 5.7 (3.0 loans out, never a default), turtle 4.0,
+rusher 2.1, random 5.7–6.5 (it loses ~400 gold-equivalent per game in
+trades at base prices, the strategist gains ~800).
+
+**After the deal-exploit review** (land adjacency / no foreign units / 5
+tiles per turn, default fines scaled with the debt and carried as
+`influence_debt`, bots' credit limit and exposed-land valuation, a random
+bot that can't be milked), 60 games, `--players 6`, default seed:
+strategist 55.0% / place 1.90, economist 25.0%, turtle 13.3%, rusher 6.7%,
+random 0% (5.35–5.37); endings wonder 42%, economic 25%, relics 15%,
+conquest 12%, influence 7%; median 72.5 turns. **Deals: 6.7 per game**
+(random 2.6, sell 1.9, buy 1.05, loan 0.8, peace 0.22, tribute 0.07,
+bargain 0.07): the strategist's bargains with the random bots are gone
+(random no longer takes lopsided deals) and loans shrank to first-time
+credit limits (150 gold of instalments, growing with contracts honoured).
+
+Calibration notes: a contract default costs `max(25, ceil(owed/5))`
+influence, owed as debt if the payer spent its influence first. With the
+bots' credit limit a first-time borrower gets at most ~125 gold from a bot,
+so a deliberate default nets about 100 gold for 25–40 influence and a
+public default that ends further credit. If loans become an exploit again,
+lower `CONTRACT_DEFAULT_OWED_PER_INFLUENCE` (engine) or `CREDIT_BASE`
+(bots/common.py).
+
+### Field B — `strategist,economist,rusher,turtle,economist,turtle`
+
+| | strategist win% / place | turtles | economists | rusher | endings |
+|---|---|---|---|---|---|
+| **barter** | **53.3% / 2.26** | 6.2% / 8.7% | 12.9% / 17.9% | 0.8% | influence 40%, economic 31%, wonder 25%, relics 3%, conquest 1% |
+| no barter (`--rounds 0`) | 57.5% / 2.27 | 7.5% / 7.9% | 12.1% / 14.2% | 0.8% | wonder 36%, influence 33%, economic 26%, relics 2%, conquest 2% |
+| barter, strategist does not trade | 53.3% / 2.28 | 5.8% / 7.9% | 12.5% / 19.6% | 0.8% | influence 35%, economic 32%, wonder 28%, relics 2%, conquest 1% |
+
+**Deals: 11.5 per game** — loan 5.5, sell 3.2, buy 2.4, peace 0.26,
+tribute 0.13. The turtles borrow (about 2 loans each per game) and buy stone/wood
+for their wonder stages, the economists lend and sell, the rusher buys food
+while it is not (yet) a big army and collects a little tribute; the
+strategist makes only 1.9 deals per game here (no random bots to bargain
+with, and it sells nothing but overflow at a premium).
+
+### The strategist stays on top; what trading is worth to it
+
+* **Barter costs the strategist 1–4 points** of win rate against the
+  no-barter game (A: 52.9% → 51.2%, B: 57.5% → 53.3%; the BALANCE tables of
+  §4, 52.9% / 54.2%, are within 2 points), mostly because the *others* now
+  trade among themselves: the economists' loans and fair sales help the
+  turtles and themselves (economic wins in B 26% → 31%). It keeps the best
+  win rate and average place in every field by a wide margin.
+* **Ablation, separate fields.** A strategist that never trades
+  (`strategist_notrade`: same code and random tie-breaks, `TRADE = False`)
+  in the same barter field does as well within noise: A 52.5% / 49.2% (seed
+  1 / 2) vs 51.2% / 48.3% trading, B 53.3% vs 53.3% (average place 2.28 vs
+  2.26). One 240-game run has a standard error of about 3.2 points, so an
+  effect of a point or two is not measurable this way.
+* **Ablation, head-to-head** (both in the same games:
+  `strategist,strategist_notrade,economist,rusher,turtle,random`, 240
+  games): the trading strategist wins **33.8%** (place **2.58**), the
+  non-trading one **24.6%** (place 2.70); economist 25.4%, turtle 9.6%,
+  rusher 6.7%. Trading helps the skilled bot when the two meet directly.
+* Negotiation is fast: 0.8–1.8 ms per `negotiate` call (the strategist's
+  is the slowest; single calls peak at 20–50 ms under `--jobs 4`), so a
+  game takes ~4–6 s instead of ~2–3 s (views for 3 rounds dominate).
+
+### What tuning the traders taught us
+
+* **Selling "surplus" can lose games.** A strategist that offered its stock
+  above keep levels to needy buyers won 42–47% of field B (vs 53% without
+  trading): barter sold the whole surplus at once, while its market sales
+  are throttled by price impact, so the stone and wood its wonder needed
+  went to rivals (its wonder wins fell from 42 to 16). It now sells only
+  what would overflow its storage caps, and only at ≥ 110% of what the
+  market would pay.
+* **Food is war material.** Economists and turtles selling food "fairly" to
+  the rusher pushed its conquest wins from 25 to 39 (field A, seed 2). No
+  bot now sells food or wood to a hostile army that can reach it, to a
+  conqueror (2+ capitals) or to an army 1.5× the average size.
+* **Don't feed the race you are in.** The strategist refuses the leader,
+  never gives a contender what its race runs on (gold to an economic racer,
+  stone/wood to a wonder builder), never pays interest on loans others push
+  on it (the economist's 20% loans fed the economist's own victory), and
+  signs no peace with a contender (it may have to block it).
+* **Negotiation must not leak into play.** Calling the strategist's victory
+  ETA model during negotiation updated its path hysteresis several times a
+  turn and quietly changed its play (several points of win rate in field
+B). The
+  negotiation now restores that state; a test checks that negotiating
+  without sending anything plays exactly like no negotiation.
+* **Guards.** "Close to winning" uses real progress only (conquest counts
+  from the first captured capital; at 2–3 players the own capital alone was
+  0.5) and projects the deal (net gold incl. 10 turns of instalments; the
+  next wonder stage becoming affordable): 0.7 for every bot, 0.55 for the
+  strategist.
+
+## 6. Open issues
 
 * **Thresholds do not scale with the player count.** At 8 players the
   strategist wins 79% of mixed games, almost all by wonder (turn ~68); at 5
@@ -272,6 +399,19 @@ influence 3%; median length 78 — within noise of the 240-game table above.
   goal or wonder cost move 10–15% of field-B games between the two; the
   current values keep every condition ≤ 45% in field B with a few points of
   margin (wonder 43%).
+* **Trading is a small edge.** The strategist's own trading is worth a few
+  points head-to-head but is within noise in separate fields; its biggest
+  gains come from bargains with the random bots (field A). Loans (its
+  largest lever: long loans that are only partly repaid before its victory)
+  are rare because lenders refuse loans that make a wonder stage 4+
+  affordable. The economist also grants loan *requests* while it is itself
+  close to the economic target (it only stops *offering* them).
+* **Barter shifts field B toward the economic victory** (26% → 31%) and away
+  from the wonder (36% → 25%): the turtles pay the economists interest, and
+  the strategist races for influence more often.
+* **The rusher's opportunism** (breaking a treaty with a weak partner) also
+  plays without barter, so `--rounds 0` differs slightly from the §4 tables
+  (field B: strategist 57.5% instead of 54.2%).
 * README.md (not part of the balance work) still quotes the old thresholds
   (600 influence, 2000 gold, a relic majority for 10 turns, ceil(n/2)
   capitals).

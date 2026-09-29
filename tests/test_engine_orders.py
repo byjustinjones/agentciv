@@ -52,7 +52,7 @@ def test_unknown_player_and_not_running():
     ({"type": "offer_trade", "to": "p1", "give": {"wood": 1}}, "yourself"),
     ({"type": "offer_trade", "to": "p2", "give": {"influence": 1}}, "not tradable"),
     ({"type": "offer_trade", "to": "p2"}, "give or want"),
-    ({"type": "accept_trade", "offer_id": "t99"}, "no open trade offer"),
+    ({"type": "accept_trade", "offer_id": "t99"}, "no open deal"),
     ({"type": "propose_treaty", "to": "p2", "turns": 5}, "turns"),
     ({"type": "accept_treaty", "from": "p2"}, "no treaty proposal"),
     ({"type": "break_treaty", "with": "p2"}, "no treaty"),
@@ -72,14 +72,15 @@ def test_prevalidation_errors(order, fragment):
 
 def test_too_many_orders_and_messages():
     g = new_game(2)
-    orders = [{"type": "message", "to": "all", "text": f"m{i}"} for i in range(7)]
+    n = C.MAX_MESSAGES_PER_TURN
+    orders = [{"type": "message", "to": "all", "text": f"m{i}"} for i in range(n + 2)]
     orders += [{"type": "disband", "at": [0, 0]}] * 100
     errs = g.submit_orders("p1", orders)
     idx = {e["index"] for e in errs}
-    assert {5, 6} <= idx                         # messages over the per-turn limit
-    assert set(range(100, 107)) <= idx           # orders over the cap
+    assert {n, n + 1} <= idx                     # messages over the per-turn limit
+    assert set(range(100, 100 + n + 2)) <= idx   # orders over the cap
     run_turn(g)
-    assert len([m for m in g.messages if m["from"] == "p1"]) == 5
+    assert len([m for m in g.messages if m["from"] == "p1"]) == n
 
 
 def test_resubmit_replaces():

@@ -12,6 +12,14 @@ Storyline (6 players, 24x24 map, 73 turns):
   * p5 Echo     - conqueror; takes Fenix's cities (2 original capitals)
   * p6 Fenix    - eliminated on turn 57
 
+Barter (docs/DESIGN.md §13): Draco lends Cassia gold (a contract she honours),
+Fenix buys peace from Echo with a tribute contract and defaults on it, Cassia
+sells Draco a hill tile after some haggling, Brutus's tribute demand is
+rejected, Athena and Brutus buy a truce with food - plus a few rejected,
+expired, withdrawn and failed offers. Running frames carry only the public
+parts (deal log, contracts, reputation, public events); the finished frame
+carries every deal (open + recent) and the private deal events of its range.
+
 Run:  python3 web/mock/make_mock.py   (writes next to this file)
 """
 from __future__ import annotations
@@ -378,6 +386,7 @@ def player_rows(t, armies):
             "cities": len(mine), "tiles": tiles, "capitals_held": caps_held,
             "military_power": mil, "units": units, "wonder_stage": wstage,
             "relics_held": relics, "relic_streak": streak, "betrayals": betrayals[pid],
+            "reputation": {**reputation[pid], "betrayals": betrayals[pid]},
             "score": score if alive[pid] else 0,
             "submitted": alive[pid] and (i + t) % 4 != 0,
             "victory_progress": {
@@ -415,6 +424,164 @@ SCRIPTED_MESSAGES = {
 }
 
 
+# ------------------------------------------------------------------ barter
+# Negotiation threads: steps (turn, from, to, give, get, peace, message) -
+# every step after the first is a counter by the previous step's recipient -
+# and the outcome of the last step: (status, turn, reason). "LAND" in a tile
+# list is resolved when the thread starts (a Cassia hill next to Draco).
+THREADS = [
+    ([(13, "p4", "p3", {"gold": 100}, {"per_turn": {"gold": 12}, "turns": 10}, None, "Loan: 100 gold now, 12/turn for 10 turns"),
+      (13, "p3", "p4", {"per_turn": {"gold": 11}, "turns": 10}, {"gold": 100}, None, "11 a turn and we have a deal"),
+      (14, "p4", "p3", {"gold": 100}, {"per_turn": {"gold": 12}, "turns": 9}, None, "12 for 9 turns, final offer")],
+     ("accepted", 14, None)),
+    ([(18, "p5", "p3", {"wood": 60}, {"gold": 45}, None, "Surplus wood, 0.75g each")], ("accepted", 18, None)),
+    ([(26, "p2", "p1", {}, {"gold": 80}, 30, "Tribute of 80 gold buys you a quiet decade.")], ("rejected", 27, "No.")),
+    ([(29, "p5", "p6", {}, {"per_turn": {"gold": 8}, "turns": 20}, 15, "Pay and I look elsewhere.")], ("accepted", 29, None)),
+    ([(37, "p4", "p6", {"stone": 50}, {"gold": 90}, None, "Stone for your walls"),
+      (37, "p6", "p4", {"gold": 70}, {"stone": 50}, None, "70, I'm paying Echo already")], ("accepted", 37, None)),
+    ([(43, "p4", "p3", {"gold": 120}, {"tiles": "LAND"}, None, "That hill next to my quarry - 120 gold?"),
+      (44, "p3", "p4", {"tiles": "LAND"}, {"gold": 160}, None, "It has a quarry. 160."),
+      (44, "p4", "p3", {"gold": 140}, {"tiles": "LAND"}, None, "Meet at 140")], ("accepted", 44, None)),
+    ([(47, "p2", "p4", {"wood": 300}, {"gold": 150}, None, "Timber for gold")],
+     ("failed", 47, "p2 lacks 132 wood")),
+    ([(50, "p6", "p1", {"stone": 40}, {"gold": 30}, None, "Please, I need gold for archers")], ("expired", 52, None)),
+    ([(51, "p3", "p1", {"stone": 30}, {"food": 50}, None, None)], ("withdrawn", 52, "withdrawn by p3")),
+    ([(58, "p5", "p1", {"per_turn": {"gold": 14}, "turns": 20}, {"gold": 150}, None, "War chest loan: 150 now, 14/turn x20"),
+      (58, "p1", "p5", {"gold": 150}, {"per_turn": {"gold": 15}, "turns": 20}, None, "15 a turn")], ("accepted", 58, None)),
+    ([(59, "p4", "p3", {"stone": 80}, {"gold": 150}, None, "Stone for the last wonder stages")], ("accepted", 59, None)),
+    ([(64, "p1", "p2", {"food": 60}, {}, 20, "Truce? Cassia is two stages from winning."),
+      (64, "p2", "p1", {}, {"food": 90}, 20, "90 food and I march east")], ("accepted", 65, None)),
+    ([(72, "p1", "p4", {"food": 100}, {"gold": 70}, None, "Food for the winter")], ("accepted", 72, None)),
+    ([(72, "p5", "p2", {"gold": 50}, {"stone": 40}, None, "Siege stone?")], ("open", None, None)),
+]
+CONTRACT_DEFAULTS = {("p6", 41)}      # (payer, turn): Fenix runs out of gold
+LAND_TILE = []
+deals = {}                            # id -> deal (engine shape)
+deal_log = []                         # public log of executed deals
+contracts = []                        # active contracts
+reputation = {p: {"deals": 0, "contracts_honoured": 0, "defaults": 0} for p in PIDS}
+private_by_turn: dict[int, list] = {}  # events only the parties (and finished views) see
+dip_seq = [0]
+step_ids = {}                         # (thread index, step index) -> deal id
+contract_counter = [0]
+
+
+def pev(turn, **kw):
+    dip_seq[0] += 1
+    private_by_turn.setdefault(turn, []).append({"turn": turn, "seq": dip_seq[0], **kw})
+
+
+def dev(turn, **kw):
+    dip_seq[0] += 1
+    ev(turn, seq=dip_seq[0], **kw)
+
+
+def resolve(bundle):
+    b = json.loads(json.dumps(bundle))
+    if b.get("tiles") == "LAND":
+        b["tiles"] = [list(LAND_TILE)]
+    return b
+
+
+def pick_land_tile():
+    """A tile of Cassia's bordering Draco's land (else the one closest to Draco's capital)."""
+    cap4 = next(c for c in cities if c["original_owner"] == "p4" and c["capital"])
+    cand = [(x, y) for x, y in territory("p3") if not city_at(x, y) and (x, y) not in relic_owner]
+    border = [t for t in cand if any(inb(t[0] + dx, t[1] + dy) and owner[t[1] + dy][t[0] + dx] == "p4"
+                                     for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)))]
+    cap3 = next(c for c in cities if c["original_owner"] == "p3" and c["capital"])
+    mid = ((cap3["x"] + cap4["x"]) / 2, (cap3["y"] + cap4["y"]) / 2)
+    # a border tile away from the line between the two capitals (keeps the map readable)
+    return max(border, key=lambda t: (math.dist(t, mid), t)) if border else \
+        min(cand, key=lambda t: (cheb(t, (cap4["x"], cap4["y"])), t))
+
+
+def deal_view(d, reason=False):
+    keys = ["id", "thread", "from", "to", "give", "get", "peace", "message", "turn", "expires_turn", "status"]
+    out = {k: json.loads(json.dumps(d[k])) for k in keys}
+    if reason:
+        out["reason"], out["closed_turn"] = d["reason"], d["closed_turn"]
+    return out
+
+
+def close_deal(d, status, turn, reason):
+    d.update(status=status, closed_turn=turn, reason=reason)
+
+
+def barter_turn(prev):
+    """Apply every thread step / outcome / contract instalment of turn ``prev``."""
+    for ti, (steps, (status, oturn, reason)) in enumerate(THREADS):
+        for k, (turn, frm, to, give, get, peace, msg) in enumerate(steps):
+            if turn != prev:
+                continue
+            if steps[0][0] == prev and k == 0 and not LAND_TILE and "LAND" in json.dumps(steps):
+                LAND_TILE.extend(pick_land_tile())
+            did = f"d{len(deals) + 1}"
+            prior = deals[step_ids[(ti, k - 1)]] if k else None
+            d = {"id": did, "thread": prior["thread"] if prior else did, "from": frm, "to": to,
+                 "give": resolve(give), "get": resolve(get), "peace": peace, "message": msg, "turn": turn,
+                 "expires_turn": turn + 2, "status": "open", "reason": None, "closed_turn": None}
+            deals[did] = d
+            step_ids[(ti, k)] = did
+            if prior:
+                close_deal(prior, "countered", turn, f"countered by {frm} with {did}")
+                pev(turn, type="deal_countered", by=frm, deal=prior["id"], new=deal_view(d), **{"from": to, "to": frm})
+            else:
+                pev(turn, type="deal_proposed", by=frm, deal=deal_view(d), **{"from": frm, "to": to})
+        if oturn != prev:
+            continue
+        d = deals[step_ids[(ti, len(steps) - 1)]]
+        close_deal(d, status, prev, reason)
+        parties = {"from": d["from"], "to": d["to"]}
+        if status == "rejected":
+            pev(prev, type="deal_rejected", by=d["to"], deal=d["id"], message=reason, **parties)
+        elif status == "withdrawn":
+            pev(prev, type="deal_withdrawn", by=d["from"], deal=d["id"], reason=reason, **parties)
+        elif status == "expired":
+            pev(prev, type="deal_expired", deal=d["id"], **parties)
+        elif status == "failed":
+            pev(prev, type="deal_failed", by=d["to"], deal=d["id"], reason=reason, **parties)
+        elif status == "accepted":
+            made = []
+            for giver, receiver, b in ((d["from"], d["to"], d["give"]), (d["to"], d["from"], d["get"])):
+                for x, y in b.get("tiles", []):
+                    owner[y][x] = receiver
+                if b.get("per_turn"):
+                    contract_counter[0] += 1
+                    c = {"id": f"c{contract_counter[0]}",
+                         "payer": giver, "payee": receiver, "per_turn": dict(b["per_turn"]),
+                         "turns_left": b["turns"], "deal": d["id"]}
+                    contracts.append(c)
+                    made.append(c["id"])
+            d["contracts"] = made
+            for p in (d["from"], d["to"]):
+                reputation[p]["deals"] += 1
+            deal_log.append({"id": d["id"], "turn": prev, **parties, "give": d["give"], "get": d["get"],
+                             "peace": d["peace"]})
+            dev(prev, type="deal_executed", by=d["to"], deal=d["id"], thread=d["thread"], give=d["give"],
+                get=d["get"], peace=d["peace"], contracts=made, **parties)
+            if d["peace"]:
+                a, b2 = d["from"], d["to"]
+                treaties[:] = [tr for tr in treaties if {tr["a"], tr["b"]} != {a, b2}]
+                treaties.append({"a": a, "b": b2, "until_turn": prev + d["peace"]})
+                ev(prev, type="treaty_signed", a=a, b=b2, until_turn=prev + d["peace"], deal=d["id"])
+    # contracts pay after yields (first instalment in the turn of acceptance)
+    for c in list(contracts):
+        if (c["payer"], prev) in CONTRACT_DEFAULTS:
+            contracts.remove(c)
+            reputation[c["payer"]]["defaults"] += 1
+            dev(prev, type="contract_default", contract=c["id"], payer=c["payer"], payee=c["payee"],
+                per_turn=c["per_turn"], turns_left=c["turns_left"], penalty=25, deal=c["deal"])
+            continue
+        c["turns_left"] -= 1
+        pev(prev, type="contract_paid", contract=c["id"], payer=c["payer"], payee=c["payee"],
+            paid=c["per_turn"], turns_left=c["turns_left"])
+        if c["turns_left"] <= 0:
+            contracts.remove(c)
+            reputation[c["payer"]]["contracts_honoured"] += 1
+            pev(prev, type="contract_completed", contract=c["id"], payer=c["payer"], payee=c["payee"], deal=c["deal"])
+
+
 # ---------------------------------------------------------------- simulate
 frames = []
 for t in range(0, SNAPSHOTS[-1] + 1):
@@ -443,16 +610,8 @@ for t in range(0, SNAPSHOTS[-1] + 1):
             ev(prev, type="treaty_signed", a="p4", b="p5", until_turn=70)
         if prev == 62:
             treaties[:] = [tr for tr in treaties if {tr["a"], tr["b"]} != {"p1", "p3"}]
-        if prev == 65:
-            treaties.append({"a": "p1", "b": "p2", "until_turn": 85})
-            ev(prev, type="treaty_signed", a="p1", b="p2", until_turn=85)
-        # --- trades
-        if prev in (18, 37, 54, 66):
-            a, b, give, want = {18: ("p5", "p3", {"wood": 60}, {"gold": 45}),
-                                37: ("p4", "p6", {"stone": 50}, {"gold": 90}),
-                                54: ("p4", "p3", {"stone": 80}, {"gold": 150}),
-                                66: ("p1", "p4", {"food": 100}, {"gold": 70})}[prev]
-            ev(prev, type="trade_executed", offer_id=f"t{prev}", **{"from": a}, to=b, give=give, want=want)
+        # --- barter: proposals, counters, executed deals (+ land, peace), contracts
+        barter_turn(prev)
         # --- market
         for r in prices:
             drift = {"food": 0.0, "wood": 0.004, "stone": 0.012}[r]
@@ -576,8 +735,10 @@ for t in range(0, SNAPSHOTS[-1] + 1):
     rows = player_rows(t, armies)
     s_idx = (t // 6) % 4
     lo = SNAPSHOTS[SNAPSHOTS.index(t) - 1] if t else -1
-    evs = [e for tt in range(lo, t) for e in events_by_turn.get(tt, [])]
     finished = t == SNAPSHOTS[-1]
+    evs = [e for tt in range(lo, t) for e in events_by_turn.get(tt, [])
+           + (private_by_turn.get(tt, []) if finished else [])]
+    evs.sort(key=lambda e: (e["turn"], e.get("seq", 0)))
     result = None
     if finished:
         survivors = sorted((r for r in rows if r["alive"] and r["id"] != "p3"), key=lambda r: -r["score"])
@@ -585,10 +746,14 @@ for t in range(0, SNAPSHOTS[-1] + 1):
         result = {"winner": "p3", "condition": "wonder", "turn": END_TURN,
                   "placements": placements, "scores": {r["id"]: r["score"] for r in rows}}
     proposals, offers = [], []
-    if t == 60:
-        proposals = [{"from": "p1", "to": "p2", "turns": 20, "turn": 59}]
-        offers = [{"id": "t59", "from": "p3", "to": "p4", "give": {"gold": 120},
-                   "want": {"stone": 60}, "expires_turn": 62}]
+    open_deals = [d for d in deals.values() if d["status"] == "open"] if finished else []
+    closed = sorted((d for d in deals.values() if d["status"] != "open"),
+                    key=lambda d: (d["closed_turn"], int(d["id"][1:])), reverse=True) if finished else []
+    if finished:
+        offers = [{"id": d["id"], "from": d["from"], "to": d["to"], "give": d["give"], "want": d["get"],
+                   "turn": d["turn"], "expires_turn": d["expires_turn"]}
+                  for d in open_deals if not d["peace"] and all(k in ("food", "wood", "stone", "gold")
+                                                                  for k in list(d["give"]) + list(d["get"]))]
     frame = {
         "game_id": "g7", "turn": t, "max_turns": MAX_TURNS,
         "status": "finished" if finished else "running",
@@ -615,6 +780,11 @@ for t in range(0, SNAPSHOTS[-1] + 1):
         "treaties": [dict(tr) for tr in treaties if tr["until_turn"] > t],
         "treaty_proposals": proposals,
         "trade_offers": offers,
+        "deals": {"open": [{**deal_view(d), "deliverable": True, "problem": None} for d in open_deals],
+                  "recent": [deal_view(d, reason=True) for d in closed[:100]],
+                  "log": json.loads(json.dumps([e for e in deal_log if e["turn"] < t][-50:]))},
+        "contracts": json.loads(json.dumps(contracts)),
+        "diplomacy_seq": dip_seq[0],
         "messages": [m for m in messages if m["turn"] < t][-50:],
         "events": evs,
         "victory": {"thresholds": {"conquest_capitals": CONQUEST_NEEDED, "wonder_stage": 5,

@@ -9,6 +9,7 @@ import sys
 
 import pytest
 
+from agentciv.client import AgentCivClient
 from agentciv.mcp_server import TOOLS, AgentCivMCP, MCPServer
 from agentciv.server import create_server
 
@@ -190,3 +191,67 @@ def test_tool_failures_are_tool_errors_not_protocol_errors():
     assert srv.handle({"jsonrpc": "2.0", "method": "tools/call",
                        "params": {"name": "get_rules", "arguments": {}}}) is None
     assert calls == []  # a notification never runs a tool
+
+
+def test_barter_through_tools(mcp, server):
+    """An MCP agent haggles with an SDK agent: wait_for_inbox, respond_to_deal (counter), list_deals, say,
+    propose_deal and respond_to_deal (withdraw), plus error paths."""
+    names = {t["name"] for t in mcp.request("tools/list")["result"]["tools"]}
+    assert {"propose_deal", "respond_to_deal", "list_deals", "say", "wait_for_inbox"} <= names
+    host = AgentCivClient(server.url)
+    gid = host.create_game(max_players=2, turn_timeout=0, rated=False)
+    text, err = mcp.tool("join_game", game_id=gid, name="Claude")
+    assert not err
+    sdk = AgentCivClient(server.url)
+    sdk.join(gid, "Trader")
+    text, err = mcp.tool("wait_for_turn", timeout=10)
+    assert not err and "turn 0/" in text and "propose_deal" in text
+    # the SDK agent proposes; the MCP agent hears about it and counters
+    did = sdk.propose("p1", give={"wood": 20}, get={"gold": 25}, message="good wood")["deal"]
+    text, err = mcp.tool("wait_for_inbox", timeout=10)
+    assert not err and f"p2 proposed deal {did} to you" in text and '"good wood"' in text
+    text, err = mcp.tool("get_state")
+    assert f"{did} TO YOU from p2" in text and "await your answer" in text
+    text, err = mcp.tool("respond_to_deal", deal=did, response="counter")
+    assert err and "needs your terms" in text
+    text, err = mcp.tool("respond_to_deal", deal=did, response="counter", give={"gold": 18}, get={"wood": 20},
+                         message="18")
+    assert not err and "Countered d1 with deal d2" in text
+    box = sdk.inbox(timeout=5)
+    assert box["items"][0]["type"] == "deal_countered" and box["items"][0]["new"]["give"] == {"gold": 18}
+    assert sdk.accept("d2")["status"] == "accepted"
+    text, err = mcp.tool("wait_for_inbox", timeout=10)
+    assert not err and "deal d2 EXECUTED" in text
+    text, err = mcp.tool("list_deals")
+    assert not err and "Recent public deals" in text and "d2" in text and "Reputation" in text
+    # say, propose + withdraw, and errors come back as tool errors
+    text, err = mcp.tool("say", to="p2", text="pleasure doing business")
+    assert not err and "sent" in text
+    assert sdk.inbox(timeout=5)["items"][0]["text"] == "pleasure doing business"
+    text, err = mcp.tool("propose_deal", to="p2", give={"stone": 5}, get={"per_turn": {"gold": 2}, "turns": 5},
+                         peace=20, message="loan-ish")
+    assert not err and "Deal d3 proposed to p2" in text
+    text, err = mcp.tool("list_deals")
+    assert "d3 (yours, waiting for p2)" in text and "2 gold/turn for 5 turns" in text and "peace 20" in text
+    text, err = mcp.tool("respond_to_deal", deal="d3", response="withdraw")
+    assert not err and "withdrawn" in text
+    text, err = mcp.tool("respond_to_deal", deal="d3", response="accept")
+    assert err and "no longer open" in text
+    text, err = mcp.tool("propose_deal", to="p2", give={"influence": 5})
+    assert err and "not tradable" in text
+    # an accept whose settlement fails is reported as a failed (closed) deal, not as a rejection
+    fid = sdk.propose("p1", give={"gold": 10 ** 5}, get={"wood": 1})["deal"]
+    text, err = mcp.tool("respond_to_deal", deal=fid, response="accept")
+    assert err and f"Deal {fid} FAILED to settle (now closed" in text and "Rejected" not in text
+    assert sdk.inbox(timeout=5)["items"][-1]["type"] == "deal_failed"
+    text, err = mcp.tool("wait_for_inbox", timeout=1)
+    assert not err and f"proposed deal {fid}" in text
+    text, err = mcp.tool("respond_to_deal", deal="d9", response="maybe")
+    assert err
+    text, err = mcp.tool("wait_for_inbox", timeout=0.2)
+    assert not err and "nothing new" in text
+    # a turn change ends the wait too
+    sdk.submit_orders([], turn=0)
+    mcp.tool("submit_orders", orders=[])
+    text, err = mcp.tool("wait_for_inbox", timeout=10)
+    assert not err and "NEW TURN" in text

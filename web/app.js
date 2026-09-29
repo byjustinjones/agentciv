@@ -71,6 +71,25 @@
     farm: '+2 food', lumber_mill: '+2 wood', quarry: '+2 stone', mine: '+2 gold', temple: '+2 influence',
   };
   const DEPOSIT_MAX = { stone: 300, gold: 150 };
+  /** Barter (docs/DESIGN.md §13): what a deal contains, and how a deal ended. */
+  const DEAL_RES = ['food', 'wood', 'stone', 'gold'];
+  const DEAL_KIND = {
+    goods: { label: 'goods', color: '#f3c969', title: 'immediate resources' },
+    land: { label: 'land', color: '#fb923c', title: 'tiles change hands' },
+    contract: { label: 'contract', color: '#c084fc', title: 'recurring payments (loan, tribute, rent)' },
+    peace: { label: 'peace', color: '#4ade80', title: 'binding peace treaty' },
+  };
+  const DEAL_STATUS = {
+    open: { label: 'open', color: '#60a5fa' },
+    accepted: { label: 'accepted', color: '#4ade80' },
+    countered: { label: 'countered', color: '#94a3b8' },
+    rejected: { label: 'rejected', color: '#f87171' },
+    withdrawn: { label: 'withdrawn', color: '#94a3b8' },
+    expired: { label: 'expired', color: '#7d8494' },
+    failed: { label: 'failed', color: '#fbbf24' },
+  };
+  const REDUCED_MOTION = !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+  const dealNum = (id) => parseInt(String(id || '').replace(/\D/g, ''), 10) || 0;
 
   /** Rule numbers come from the view's `costs` (GET /api/rules.json) when present, so the GUI
    *  follows rule changes; the constants above are only fallbacks. */
@@ -121,6 +140,13 @@
     dot: 'M8 6a2 2 0 1 0 0 4 2 2 0 0 0 0-4z',
     lock: 'M4.5 7.5h7v6h-7zM6 7.5V5a2 2 0 0 1 4 0v2.5',
     plug: 'M6 2v3M10 2v3M4.5 5h7v2.5a3.5 3.5 0 0 1-7 0zM8 11v3',
+    deal: 'M1.5 8.5l3-3 3.5 3.5M14.5 8.5l-3-3-2.5 2.5M5.5 10.5l2 2 1.5-1.5M8 12l1 1 3.5-3.5',
+    counter: 'M3 5h9l-2.5-2.5M13 11H4l2.5 2.5',
+    contract: 'M4 1.5h6l3 3V14.5H4zM10 1.5v3h3M6.5 8h4M6.5 11h4',
+    coin: 'M8 2.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11zM8 5v6M6.2 6.5h2.8a1 1 0 0 1 0 2H7a1 1 0 0 0 0 2h2.8',
+    chat: 'M2.5 3h11v7.5H7l-3 2.5v-2.5H2.5z',
+    x: 'M4 4l8 8M12 4l-8 8',
+    clock: 'M8 2a6 6 0 1 0 0 12A6 6 0 0 0 8 2zM8 4.5V8l2.5 1.5',
   };
   const icon = (name, color) =>
     `<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="${color || 'currentColor'}" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${ICON_PATHS[name] || ICON_PATHS.dot}"/></svg>`;
@@ -586,6 +612,8 @@
     meta: null,          // game summary: seat types, max_players, lobby settings
     history: { loading: false, loaded: 0, total: null },
     feedLimit: 150,
+    tradeLimits: {},     // "show more" state of the trade panel's lists
+    animRaf: 0,          // pending animation frame of the deal lines on the map
 
     get view() { return this.frames[this.idx] || null; },
     get latest() { return this.frames[this.frames.length - 1] || null; },
@@ -599,7 +627,9 @@
         id, frames: [], idx: 0, live: true, playing: false, highlight: null, hover: null,
         flash: null, overlayDismissed: false, filter: '', terrainCache: null, meta: null,
         history: { loading: false, loaded: 0, total: null }, streamAttempt: 0, metaAt: 0, feedLimit: 150,
+        tradeLimits: {},
       });
+      if (params.has('tab')) this.setTab(params.get('tab'));
       $('#feed-filter').value = '';
       this.clearPanels();
       this.meta = App.gamesCache.find((g) => g.game_id === id) || null;
@@ -632,8 +662,10 @@
     /** Blank every panel that shows per-game data, so a newly opened game (or one that fails to
      *  load) never shows the previous game's sidebar, banner, overlay or player filter. */
     clearPanels() {
-      ['#status-panel', '#players-table', '#race', '#market', '#events', '#diplo', '#race-note', '#market-fee']
+      ['#status-panel', '#players-table', '#race', '#market', '#events', '#trade', '#diplo', '#race-note', '#market-fee']
         .forEach((sel) => { const el = $(sel); if (el) el.innerHTML = ''; });
+      const tn = $('#trade-n');
+      if (tn) { tn.hidden = true; tn.textContent = ''; }
       ['#banner', '#overlay', '#tooltip'].forEach((sel) => { const el = $(sel); if (el) { el.hidden = true; el.innerHTML = ''; } });
       const f = $('#feed-filter');
       delete f.dataset.ids;
@@ -707,6 +739,7 @@
           } else if (this.pendingFrame == null) {
             this.renderControls();
             this.renderFeed();
+            this.renderTrade();
           }
           const end = rep?.to ?? (lo + frames.length - 1);
           if (typeof rep?.total_frames !== 'number' || !frames.length || end + 1 >= rep.total_frames ||
@@ -851,6 +884,8 @@
       this.stopLive();
       this.pause();
       clearInterval(this.clockTimer);
+      if (this.animRaf) cancelAnimationFrame(this.animRaf);
+      this.animRaf = 0;
     },
 
     // --- replay controls -----------------------------------------------
@@ -920,14 +955,17 @@
       $('#feed-filter').addEventListener('change', (e) => {
         this.filter = e.target.value;
         this.renderFeed();
+        this.renderTrade();
         this.renderDiplomacy();
       });
-      $$('.tab').forEach((t) => t.addEventListener('click', () => {
-        this.tab = t.dataset.tab;
-        $$('.tab').forEach((x) => x.classList.toggle('active', x === t));
-        $('#tab-events').hidden = this.tab !== 'events';
-        $('#tab-diplo').hidden = this.tab !== 'diplo';
-      }));
+      $$('.tab').forEach((t) => t.addEventListener('click', () => this.setTab(t.dataset.tab)));
+      // "show more" buttons inside the trade panel
+      $('#trade').addEventListener('click', (e) => {
+        const more = e.target.closest('[data-more]');
+        if (!more) return;
+        this.tradeLimits[more.dataset.more] = (this.tradeLimits[more.dataset.more] || 0) + 40;
+        this.renderTrade();
+      });
       document.addEventListener('keydown', (e) => {
         if ($('#game').hidden || /INPUT|SELECT|TEXTAREA/.test(document.activeElement?.tagName)) return;
         if (e.key === 'ArrowLeft') { this.pause(); this.live = false; this.seek(this.idx - 1); }
@@ -940,6 +978,8 @@
       });
       // Delegated clicks: player chips and coordinates anywhere in the sidebar / overlay.
       $('#game').addEventListener('click', (e) => {
+        const go = e.target.closest('[data-goto-tab]');
+        if (go) { e.preventDefault(); this.setTab(go.dataset.gotoTab); return; }
         const chip = e.target.closest('[data-pid]');
         if (chip) { this.toggleHighlight(chip.dataset.pid); return; }
         const at = e.target.closest('[data-x]');
@@ -958,6 +998,14 @@
       if ('ResizeObserver' in window) new ResizeObserver(() => this.drawMap()).observe($('#map-wrap'));
       else window.addEventListener('resize', () => this.drawMap());
       matchMedia('(resolution: 1dppx)').addEventListener?.('change', () => this.drawMap());
+    },
+
+    setTab(tab) {
+      this.tab = ['events', 'trade', 'diplo'].includes(tab) ? tab : 'events';
+      $$('.tab').forEach((x) => x.classList.toggle('active', x.dataset.tab === this.tab));
+      $('#tab-events').hidden = this.tab !== 'events';
+      $('#tab-trade').hidden = this.tab !== 'trade';
+      $('#tab-diplo').hidden = this.tab !== 'diplo';
     },
 
     toggleHighlight(pid) {
@@ -990,6 +1038,7 @@
       this.renderMarket(v);
       this.renderFilterOptions(v);
       this.renderFeed();
+      this.renderTrade();
       this.renderDiplomacy();
       this.renderLegend();
       const hasMap = Array.isArray(v.map?.terrain) && v.map.terrain.length > 0 && num(v.map.width, 1) > 0;
@@ -1247,6 +1296,9 @@
       }
       ctx.stroke();
 
+      // deal lines under cities/armies so the endpoints never hide a capital
+      const links = this.dealLinks(v);
+      if (links.length) this.drawDeals(ctx, v, links, t);
       for (const r of v.map.relics || []) this.drawRelic(ctx, r, t, hl && r.owner !== hl);
       for (const c of v.cities || []) this.drawCity(ctx, c, t, hl && c.owner !== hl);
       const perTile = new Map();
@@ -1272,6 +1324,197 @@
         const g = 3 + k * 4;
         ctx.strokeRect(this.flash.x * t - g, this.flash.y * t - g, t + 2 * g, t + 2 * g);
       }
+      if (links.length && !REDUCED_MOTION) this.scheduleAnim();
+    },
+
+    /** Redraw the map at ≤ 30 fps while deal lines are on it (they are animated). */
+    scheduleAnim() {
+      if (this.animRaf) return;
+      this.animRaf = requestAnimationFrame((ts) => {
+        this.animRaf = 0;
+        if ($('#game').hidden || $('#map').hidden) return;
+        if (ts - (this.animAt || 0) < 32) { this.scheduleAnim(); return; }
+        this.animAt = ts;
+        this.drawMap();
+      });
+    },
+
+    /** Deals executed in the shown turn (the frame's previous turn, or the current turn while
+     *  live), from the public deal log and `deal_executed` events; newest last. */
+    dealLinks(v) {
+      const byId = new Map();
+      const add = (d) => {
+        if (!d || !d.from || !d.to) return;
+        const id = d.id ?? d.deal;
+        const k = id != null ? String(id) : `${d.turn}|${d.from}|${d.to}|${byId.size}`;
+        if (!byId.has(k)) byId.set(k, { ...d, id: id ?? null });
+      };
+      for (const d of v.deals?.log || []) if (typeof d.turn === 'number' && d.turn >= v.turn - 1) add(d);
+      for (const e of this.recentEvents(v)) {
+        if (e.type === 'deal_executed') add({ ...e, id: e.deal });
+        else if (e.type === 'trade_executed') add({ ...e, id: e.offer_id ?? e.id, get: e.want }); // pre-§13 replays
+      }
+      return Array.from(byId.values()).sort((a, b) => num(a.turn) - num(b.turn) || dealNum(a.id) - dealNum(b.id));
+    },
+
+    /** Map anchor of a player: its own capital, else any capital/city it holds, else the
+     *  centre of its territory. Returns tile coordinates or null. */
+    anchorOf(v, pid) {
+      const cs = (v.cities || []).filter((c) => c.owner === pid);
+      const c = cs.find((q) => q.capital && (q.original_owner ?? pid) === pid) || cs.find((q) => q.capital) || cs[0];
+      if (c) return [c.x, c.y];
+      const owner = v.map?.owner || [];
+      let sx = 0; let sy = 0; let n = 0;
+      for (let y = 0; y < owner.length; y++) {
+        const row = owner[y] || [];
+        for (let x = 0; x < row.length; x++) if (row[x] === pid) { sx += x; sy += y; n++; }
+      }
+      return n ? [Math.round(sx / n), Math.round(sy / n)] : null;
+    },
+
+    dealKinds(d) {
+      const has = (b) => b && typeof b === 'object';
+      const goods = (b) => has(b) && DEAL_RES.some((r) => num(b[r]) > 0);
+      const kinds = [];
+      if (goods(d.give) || goods(d.get)) kinds.push('goods');
+      if ((d.give?.tiles || []).length || (d.get?.tiles || []).length) kinds.push('land');
+      if ((has(d.give?.per_turn) && Object.keys(d.give.per_turn).length) || (has(d.get?.per_turn) && Object.keys(d.get.per_turn).length)) kinds.push('contract');
+      if (d.peace) kinds.push('peace');
+      return kinds;
+    },
+
+    /** Curved, animated line between the two parties' capitals for every deal executed in the
+     *  shown turn (gradient in the parties' colours, packets travelling both ways, a badge whose
+     *  ring segments show the deal's kinds), plus a marker on every tile that changed hands. */
+    drawDeals(ctx, v, links, t) {
+      const now = REDUCED_MOTION ? 0 : performance.now();
+      const hl = this.highlight;
+      const pairCount = new Map();
+      const qpt = (a, c, b, s) => [
+        (1 - s) * (1 - s) * a[0] + 2 * (1 - s) * s * c[0] + s * s * b[0],
+        (1 - s) * (1 - s) * a[1] + 2 * (1 - s) * s * c[1] + s * s * b[1],
+      ];
+      const tiles = [];
+      ctx.save();
+      ctx.lineCap = 'round';
+      for (const d of links) {
+        const pa = this.anchorOf(v, d.from);
+        const pb = this.anchorOf(v, d.to);
+        for (const [bundle, to] of [[d.give, d.to], [d.get, d.from]]) {
+          for (const tl of bundle?.tiles || []) if (Array.isArray(tl)) tiles.push({ x: tl[0], y: tl[1], to });
+        }
+        if (!pa || !pb || (pa[0] === pb[0] && pa[1] === pb[1])) continue;
+        const key = [d.from, d.to].sort().join('|');
+        const k = pairCount.get(key) || 0;
+        pairCount.set(key, k + 1);
+        const a = [pa[0] * t + t / 2, pa[1] * t + t / 2];
+        const b = [pb[0] * t + t / 2, pb[1] * t + t / 2];
+        const dx = b[0] - a[0];
+        const dy = b[1] - a[1];
+        const len = Math.hypot(dx, dy);
+        // bend to the same side for a given pair regardless of direction; fan out repeats
+        const sgn = d.from < d.to ? 1 : -1;
+        const bend = len * (0.2 + 0.12 * Math.floor(k / 2)) * (k % 2 ? -1 : 1) * sgn;
+        const c = [(a[0] + b[0]) / 2 - (dy / len) * bend, (a[1] + b[1]) / 2 + (dx / len) * bend];
+        const ca = this.color(d.from);
+        const cb = this.color(d.to);
+        const dim = hl && hl !== d.from && hl !== d.to;
+        ctx.globalAlpha = dim ? 0.25 : 1;
+        const w = Math.max(2.2, t * 0.13);
+        const path = () => { ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.quadraticCurveTo(c[0], c[1], b[0], b[1]); };
+        // dark casing + soft glow
+        path();
+        ctx.setLineDash([]);
+        ctx.strokeStyle = 'rgba(6,8,12,0.75)';
+        ctx.lineWidth = w + 3;
+        ctx.stroke();
+        const grad = ctx.createLinearGradient(a[0], a[1], b[0], b[1]);
+        grad.addColorStop(0, ca);
+        grad.addColorStop(1, cb);
+        path();
+        ctx.shadowColor = 'rgba(255,255,255,0.35)';
+        ctx.shadowBlur = t * 0.35;
+        ctx.strokeStyle = grad;
+        ctx.lineWidth = w;
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+        // marching highlight dashes
+        path();
+        ctx.setLineDash([t * 0.28, t * 0.62]);
+        ctx.lineDashOffset = -((now / 45) % (t * 0.9));
+        ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+        ctx.lineWidth = Math.max(1, w * 0.38);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        // packets: what `from` gives travels a→b, what `to` gives travels b→a
+        const phase = ((now / 2200) + 0.37 * k) % 1;
+        const packets = [];
+        if (d.give && Object.keys(d.give).length) packets.push([phase, ca]);
+        if (d.get && Object.keys(d.get).length) packets.push([1 - ((phase + 0.5) % 1), cb]);
+        for (const [s, col] of packets) {
+          const [px, py] = qpt(a, c, b, s);
+          ctx.beginPath();
+          ctx.arc(px, py, Math.max(2.5, t * 0.17), 0, Math.PI * 2);
+          ctx.fillStyle = col;
+          ctx.fill();
+          ctx.lineWidth = 1.5;
+          ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+          ctx.stroke();
+        }
+        // badge at the curve's midpoint: ring segments = deal kinds, arrows inside
+        const [mx, my] = qpt(a, c, b, 0.5);
+        const r = Math.max(6, t * 0.36);
+        const kinds = this.dealKinds(d);
+        ctx.beginPath();
+        ctx.arc(mx, my, r, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(14,16,21,0.92)';
+        ctx.fill();
+        const segs = kinds.length ? kinds : ['goods'];
+        const gap = segs.length > 1 ? 0.25 : 0;
+        ctx.lineWidth = Math.max(2, r * 0.3);
+        segs.forEach((kd, i) => {
+          const a0 = -Math.PI / 2 + (i * 2 * Math.PI) / segs.length + gap / 2;
+          ctx.beginPath();
+          ctx.arc(mx, my, r - ctx.lineWidth / 2, a0, a0 + (2 * Math.PI) / segs.length - gap);
+          ctx.strokeStyle = DEAL_KIND[kd].color;
+          ctx.stroke();
+        });
+        const q = r * 0.42;
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = Math.max(1.2, r * 0.14);
+        ctx.beginPath();
+        ctx.moveTo(mx - q, my - q * 0.4); ctx.lineTo(mx + q, my - q * 0.4); ctx.lineTo(mx + q * 0.55, my - q * 0.85);
+        ctx.moveTo(mx + q, my + q * 0.4); ctx.lineTo(mx - q, my + q * 0.4); ctx.lineTo(mx - q * 0.55, my + q * 0.85);
+        ctx.stroke();
+      }
+      // traded tiles: pulsing dashed frame in the new owner's colour + a corner tag
+      const pulse = REDUCED_MOTION ? 1 : 0.6 + 0.4 * Math.sin(now / 260);
+      for (const tl of tiles) {
+        const col = this.color(tl.to);
+        ctx.globalAlpha = hl && hl !== tl.to ? 0.4 : 1;
+        ctx.shadowColor = col;
+        ctx.shadowBlur = t * 0.45 * pulse;
+        ctx.strokeStyle = col;
+        ctx.lineWidth = Math.max(2, t * 0.1);
+        ctx.setLineDash([t * 0.2, t * 0.12]);
+        ctx.lineDashOffset = -((now / 60) % (t * 0.32));
+        ctx.strokeRect(tl.x * t + 2, tl.y * t + 2, t - 4, t - 4);
+        ctx.setLineDash([]);
+        ctx.shadowBlur = 0;
+        ctx.strokeStyle = 'rgba(255,255,255,0.75)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(tl.x * t + 3.5 + t * 0.08, tl.y * t + 3.5 + t * 0.08, t - 7 - t * 0.16, t - 7 - t * 0.16);
+        const s = Math.max(5, t * 0.34);
+        ctx.fillStyle = DEAL_KIND.land.color;
+        ctx.beginPath();
+        ctx.moveTo(tl.x * t, tl.y * t); ctx.lineTo(tl.x * t + s, tl.y * t); ctx.lineTo(tl.x * t, tl.y * t + s);
+        ctx.closePath();
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+      ctx.restore();
     },
 
     /** Last turn's events carried by frame v (events of turn v.turn-1, or unlabelled ones). */
@@ -1699,6 +1942,13 @@
         parts.push(`<div class="tt-sec">${this.chip(a.owner)} army <span class="muted">· power ${power}</span><div class="units">${esc(list)}</div></div>`);
       }
       for (const e of battles) parts.push(`<div class="tt-sec" style="color:#fca5a5">${this.describe(e).html}</div>`);
+      for (const d of this.dealLinks(v)) {
+        for (const [bundle, from, to] of [[d.give, d.from, d.to], [d.get, d.to, d.from]]) {
+          if ((bundle?.tiles || []).some((tl) => Array.isArray(tl) && tl[0] === x && tl[1] === y)) {
+            parts.push(`<div class="tt-sec"><b style="color:${DEAL_KIND.land.color}">⇄ Traded</b> ${this.chip(from)} → ${this.chip(to)}<div class="muted">in deal ${esc(d.id ?? '')} (turn ${esc(d.turn ?? '?')})</div></div>`);
+          }
+        }
+      }
       return parts.join('');
     },
 
@@ -1778,7 +2028,7 @@
             <td><div class="pname"><span class="swatch" style="background:${esc(this.color(p.id))}"></span>
               <b>${esc(p.name || p.id)}</b>${this.meta && this.seat(p.id) && !this.isBot(p.id) ? `<span class="tag agent" title="remote agent (HTTP / SDK / MCP)">${icon('plug')}</span>` : ''}${dead ? `<span class="dead-tag">✝${p.eliminated_turn != null ? 'T' + esc(p.eliminated_turn) : ''}</span>`
                 : `<span class="sub${p.submitted ? ' yes' : ''}" title="${p.submitted ? 'orders submitted for this turn' : 'no orders yet this turn'}"></span>`}
-              ${num(p.betrayals) ? `<span class="betray" title="betrayals">⚑${p.betrayals}</span>` : ''}</div></td>
+              ${num(p.betrayals) ? `<span class="betray" title="betrayals">⚑${p.betrayals}</span>` : ''}${num(p.reputation?.defaults) ? `<span class="betray" title="contract defaults">⚠${p.reputation.defaults}</span>` : ''}</div></td>
             <td class="num">${fmt(p.cities)}</td><td class="num">${fmt(p.tiles)}</td>
             ${RESOURCES.map((r) => cell(p, r)).join('')}
             <td class="num" title="${esc(units)}">${fmt(p.military_power)}</td>
@@ -2018,7 +2268,7 @@
           return { icon: 'treaty', color: '#86efac', html: `${P(e.from ?? who)} proposed peace to ${P(e.to)}${e.turns ? ` <span class="muted">(${esc(e.turns)} turns)</span>` : ''}` };
         case 'treaty_signed': {
           const [a, b] = Array.isArray(e.players) ? e.players : [e.a ?? e.from, e.b ?? e.to];
-          return { icon: 'treaty', color: '#4ade80', html: `${P(a)} and ${P(b)} signed a peace treaty${e.until_turn != null ? ` <span class="muted">until turn ${esc(e.until_turn)}</span>` : ''}` };
+          return { icon: 'treaty', color: '#4ade80', html: `${P(a)} and ${P(b)} signed a peace treaty${e.until_turn != null ? ` <span class="muted">until turn ${esc(e.until_turn)}</span>` : ''}${e.deal ? ` <span class="muted">(part of deal ${esc(e.deal)})</span>` : ''}` };
         }
         case 'treaty_expired': {
           const [a, b] = Array.isArray(e.players) ? e.players : [e.a ?? e.from, e.b ?? e.to];
@@ -2029,6 +2279,40 @@
           const other = e.with ?? e.other ?? e.b ?? e.victim;
           return { icon: 'broken', color: '#f87171', major: true, html: `${P(breaker)} <span class="betray">broke</span> their treaty with ${P(other)} <span class="muted">(betrayal)</span>` };
         }
+        case 'deal_proposed': {
+          const d = e.deal && typeof e.deal === 'object' ? e.deal : e;
+          const from = d.from ?? e.from ?? e.by;
+          const to = d.to ?? e.to;
+          return { icon: 'deal', color: '#bef264', html: `${P(from)} proposed a deal to ${P(to)}: ${this.dealInline({ ...d, from, to })}${this.dealMsg(d.message)} ${this.dealId(d.id)}` };
+        }
+        case 'deal_countered': {
+          const n = e.new && typeof e.new === 'object' ? e.new : {};
+          const by = e.by ?? n.from ?? e.to;
+          const other = by === e.to ? e.from : (n.to ?? e.from);
+          return { icon: 'counter', color: '#93c5fd', html: `${P(by)} countered ${P(other)}'s offer ${this.dealId(e.deal)}: ${this.dealInline({ ...n, from: by, to: other })}${this.dealMsg(n.message)} ${this.dealId(n.id)}` };
+        }
+        case 'deal_executed':
+          return { icon: 'deal', color: '#4ade80', major: true, html: `<b>Deal</b> ${P(e.from)} ⇄ ${P(e.to)}: ${this.dealInline(e, true)}${(e.contracts || []).length ? ` <span class="muted">(contract${e.contracts.length > 1 ? 's' : ''} ${esc(e.contracts.join(', '))})</span>` : ''} ${this.dealId(e.deal)}` };
+        case 'deal_rejected': {
+          const by = e.by ?? e.to;
+          const other = by === e.from ? e.to : e.from;
+          return { icon: 'x', color: '#f87171', html: `${P(by)} rejected ${other ? `${P(other)}'s deal` : 'deal'} ${this.dealId(e.deal)}${this.dealMsg(e.message)}` };
+        }
+        case 'deal_withdrawn':
+          return { icon: 'x', color: '#94a3b8', html: e.by ? `${P(e.by)} withdrew deal ${this.dealId(e.deal)}${e.from && e.to ? ` <span class="muted">(${esc(this.pname(e.from))} → ${esc(this.pname(e.to))})</span>` : ''}`
+            : `Deal ${this.dealId(e.deal)} between ${P(e.from)} and ${P(e.to)} was withdrawn${e.reason ? ` <span class="muted">— ${esc(e.reason)}</span>` : ''}` };
+        case 'deal_expired':
+          return { icon: 'clock', color: '#7d8494', html: `Deal ${this.dealId(e.deal)} from ${P(e.from)} to ${P(e.to)} expired unanswered` };
+        case 'deal_failed':
+          return { icon: 'fail', color: '#fbbf24', html: `Deal ${this.dealId(e.deal)} (${P(e.from)} → ${P(e.to)}) <b>failed</b> to settle${e.reason ? ` <span class="muted">— ${esc(e.reason)}</span>` : ''}` };
+        case 'contract_paid':
+          return { icon: 'coin', color: '#c084fc', html: `${P(e.payer)} paid ${P(e.payee)} ${bag(e.paid) || '?'} <span class="muted">(contract ${esc(e.contract ?? '')}${e.turns_left != null ? `, ${esc(e.turns_left)} turn${e.turns_left === 1 ? '' : 's'} left` : ''})</span>` };
+        case 'contract_completed':
+          return { icon: 'contract', color: '#4ade80', html: `${P(e.payer)} honoured contract ${esc(e.contract ?? '')} to ${P(e.payee)} in full${e.deal ? ` <span class="muted">(deal ${esc(e.deal)})</span>` : ''}` };
+        case 'contract_default':
+          return { icon: 'contract', color: '#f87171', major: true, html: `${P(e.payer)} <span class="betray">defaulted</span> on contract ${esc(e.contract ?? '')} to ${P(e.payee)} <span class="muted">(owed ${bag(e.per_turn) || '?'}/turn, ${esc(e.turns_left ?? '?')} turns left${e.penalty != null ? `; −${esc(e.penalty)} influence` : ''})</span>` };
+        case 'say':
+          return { icon: 'chat', color: e.to === 'all' ? '#60a5fa' : '#c084fc', html: `${P(e.from ?? e.by)} → ${e.to === 'all' || e.to == null ? 'everyone' : P(e.to)}: <span class="quote">“${esc(e.text)}”</span>` };
         case 'trade_offered':
           return { icon: 'trade', color: '#bef264', html: `${P(e.from)} offered ${P(e.to)} ${bag(e.give) || '?'} for ${bag(e.want) || '?'}${e.id ? ` <span class="muted">(${esc(e.id)})</span>` : ''}` };
         case 'trade_executed':
@@ -2053,6 +2337,36 @@
       }
     },
 
+    // --- barter helpers (§13 bundles: resources, tiles, per_turn + turns) ---
+    bundleHtml(b) {
+      if (!b || typeof b !== 'object') return '<span class="muted">nothing</span>';
+      const parts = [];
+      for (const [r, n] of Object.entries(b)) {
+        if (r === 'tiles' || r === 'per_turn' || r === 'turns' || !num(n)) continue;
+        parts.push(`<span class="rq"><i class="swatch" style="background:${RES_COLOR[r] || '#9ca3af'}"></i>${fmt(num(n))} ${esc(r)}</span>`);
+      }
+      const tiles = (Array.isArray(b.tiles) ? b.tiles : []).filter((tl) => Array.isArray(tl));
+      if (tiles.length) {
+        parts.push(`<span class="rq land" title="land: tiles change hands">${tiles.length} tile${tiles.length === 1 ? '' : 's'} ${tiles.map(([x, y]) =>
+          `<span class="at" data-x="${num(x)}" data-y="${num(y)}" title="show on map">(${num(x)},${num(y)})</span>`).join(' ')}</span>`);
+      }
+      if (b.per_turn && typeof b.per_turn === 'object' && bagText(b.per_turn)) {
+        parts.push(`<span class="rq contract" title="contract: paid every turn">${esc(bagText(b.per_turn))}/turn × ${esc(b.turns ?? '?')}</span>`);
+      }
+      return parts.length ? parts.join(' <span class="muted">+</span> ') : '<span class="muted">nothing</span>';
+    },
+    /** "gives X for Y" (proposer's view), or with `named` "A gives X · B gives Y". */
+    dealInline(d, named = false) {
+      const peace = d.peace ? ` <span class="muted">+</span> <span class="rq peace" title="binding peace treaty">peace ${esc(d.peace)} turns</span>` : '';
+      if (!named) return `gives ${this.bundleHtml(d.give)} for ${this.bundleHtml(d.get)}${peace}`;
+      return `${esc(this.pname(d.from))} gives ${this.bundleHtml(d.give)} · ${esc(this.pname(d.to))} gives ${this.bundleHtml(d.get)}${peace}`;
+    },
+    dealMsg(m) { return m ? ` <span class="quote">“${esc(m)}”</span>` : ''; },
+    dealId(id) { return id ? `<span class="did">${esc(id)}</span>` : ''; },
+    kindTags(d) {
+      return this.dealKinds(d).map((k) => `<span class="ktag" style="--k:${DEAL_KIND[k].color}" title="${esc(DEAL_KIND[k].title)}">${DEAL_KIND[k].label}</span>`).join('');
+    },
+
     collectMessages() {
       const seen = new Set();
       const out = [];
@@ -2074,12 +2388,10 @@
       const inv = (o) => this.involves(o, f);
       const treaties = (v.treaties || []).filter(inv);
       const proposals = (v.treaty_proposals || []).filter(inv);
-      const offers = (v.trade_offers || []).filter(inv);
       const betrayers = (v.players || []).filter((p) => num(p.betrayals) > 0 && (!f || p.id === f));
       const msgs = this.collectMessages().filter((m) => !f || m.from === f || m.to === f);
-      const bag = (b) => Object.entries(b || {}).map(([k, n]) => `${n} ${k}`).join(', ') || '—';
       const hidden = v.status === 'running'
-        ? '<div class="dsec small muted">Private messages, trade offers and treaty proposals stay hidden while the game runs; the replay reveals them once it is over.</div>' : '';
+        ? '<div class="dsec small muted">Private messages and treaty proposals stay hidden while the game runs; the replay reveals them once it is over. Deals, contracts and negotiation threads are in the <a href="#" data-goto-tab="trade">Trade</a> tab.</div>' : '';
       $('#diplo').innerHTML = `${hidden}
         <div class="dsec"><h4>Active treaties (${treaties.length})</h4>
           ${treaties.length ? treaties.map((t) => `<div class="treaty">${icon('treaty', '#4ade80')} ${this.chip(t.a)} <span class="muted">⇄</span> ${this.chip(t.b)}
@@ -2088,9 +2400,6 @@
         </div>
         ${proposals.length ? `<div class="dsec"><h4>Pending proposals</h4>${proposals.map((p) =>
           `<div class="treaty">${this.chip(p.from)} <span class="muted">→</span> ${this.chip(p.to)} <span class="left">${esc(p.turns)} turns · proposed T${esc(p.turn)}</span></div>`).join('')}</div>` : ''}
-        ${offers.length ? `<div class="dsec"><h4>Open trade offers</h4>${offers.map((o) =>
-          `<div class="treaty">${icon('trade', '#a3e635')} ${this.chip(o.from)} offers ${this.chip(o.to)} <b>${esc(bag(o.give))}</b> for <b>${esc(bag(o.want))}</b>
-           <span class="left">expires T${esc(o.expires_turn)}</span></div>`).join('')}</div>` : ''}
         <div class="dsec"><h4>Betrayals</h4>${betrayers.length ? betrayers.map((p) =>
           `<div class="treaty">${icon('broken', '#f87171')} ${this.chip(p.id)} <span class="betray">broke ${p.betrayals} treat${p.betrayals === 1 ? 'y' : 'ies'}</span></div>`).join('')
           : '<div class="empty">Nobody has broken a treaty.</div>'}</div>
@@ -2103,6 +2412,278 @@
         </div></div>`;
     },
 
+    /** Everything the trade panel shows, gathered from the loaded frames.
+     *  - log: executed deals (public deal log ∪ deal_executed events) up to the shown frame
+     *  - defaults: contract_default events up to the shown frame
+     *  - threads: negotiation threads (proposal → counters → outcome); built from the private
+     *    parts of the views (deals.open/recent, private deal events), i.e. complete once the
+     *    game is over. Deals after the shown turn are left out; outcomes after it show as open. */
+    tradeData() {
+      const v = this.view;
+      const lastIdx = this.frames.length - 1;
+      const limit = this.idx >= lastIdx ? Infinity : num(v.turn) - 1;
+      const log = new Map();
+      const defaults = [];
+      const seenDefault = new Set();
+      const deals = new Map();
+      let privateData = false;
+      const addLog = (d) => {
+        const id = d.id ?? d.deal;
+        if (!d.from || !d.to) return;
+        const k = id != null ? String(id) : `${d.turn}|${d.from}|${d.to}|${JSON.stringify(d.give)}`;
+        const cur = log.get(k);
+        log.set(k, cur ? { ...d, ...cur, thread: cur.thread ?? d.thread, contracts: cur.contracts ?? d.contracts } : { ...d, id: id ?? null });
+      };
+      const upd = (d) => {
+        if (!d || typeof d !== 'object' || d.id == null) return;
+        const cur = deals.get(d.id) || { id: d.id };
+        for (const [k, val] of Object.entries(d)) {
+          if (val === undefined) continue;
+          if (k === 'status' && cur.status && cur.status !== 'open' && val === 'open') continue; // never reopen
+          if ((k === 'reason' || k === 'closed_turn') && val == null) continue;
+          cur[k] = val;
+        }
+        deals.set(d.id, cur);
+      };
+      const close = (id, status, turn, reason, extra) => {
+        if (id == null) return;
+        const cur = deals.get(id) || { id };
+        if (extra) for (const [k, val] of Object.entries(extra)) if (val !== undefined && cur[k] === undefined) cur[k] = val;
+        if (!cur.status || cur.status === 'open') {
+          cur.status = status;
+          if (cur.closed_turn == null) cur.closed_turn = turn;
+          if (cur.reason == null && reason) cur.reason = reason;
+        }
+        deals.set(id, cur);
+      };
+      for (let i = 0; i <= lastIdx; i++) {
+        const f = this.frames[i];
+        const inView = i <= this.idx;
+        const fd = f.deals || {};
+        if (inView) for (const d of fd.log || []) addLog(d);
+        for (const d of fd.log || []) {
+          upd({ id: d.id, from: d.from, to: d.to, give: d.give, get: d.get, peace: d.peace, turn: d.turn });
+          close(d.id, 'accepted', d.turn);
+        }
+        for (const d of fd.open || []) { privateData = true; upd(d); }
+        for (const d of fd.recent || []) { privateData = true; upd(d); }
+        for (const e0 of f.events || []) {
+          const e = e0.turn == null ? { ...e0, turn: f.turn - 1 } : e0;
+          switch (e.type) {
+            case 'deal_proposed': privateData = true; upd(e.deal && typeof e.deal === 'object' ? e.deal : null); break;
+            case 'deal_countered':
+              privateData = true;
+              upd(e.new);
+              close(e.deal, 'countered', e.turn, e.new?.id ? `countered with ${e.new.id}` : null, { from: e.from, to: e.to });
+              break;
+            case 'deal_executed':
+              if (inView) addLog({ ...e, id: e.deal });
+              upd({ id: e.deal, thread: e.thread, from: e.from, to: e.to, give: e.give, get: e.get, peace: e.peace });
+              close(e.deal, 'accepted', e.turn);
+              break;
+            case 'trade_executed': // pre-§13 replays
+              if (inView) addLog({ ...e, id: e.offer_id ?? e.id, get: e.get ?? e.want });
+              break;
+            case 'deal_rejected': privateData = true; close(e.deal, 'rejected', e.turn, e.message || null, { from: e.from, to: e.to }); break;
+            case 'deal_withdrawn': privateData = true; close(e.deal, 'withdrawn', e.turn, e.reason || null, { from: e.from, to: e.to }); break;
+            case 'deal_failed': privateData = true; close(e.deal, 'failed', e.turn, e.reason || null, { from: e.from, to: e.to }); break;
+            case 'deal_expired': privateData = true; close(e.deal, 'expired', e.turn, null, { from: e.from, to: e.to }); break;
+            case 'contract_default': {
+              const k = `${e.contract}|${e.turn}`;
+              if (inView && !seenDefault.has(k)) { seenDefault.add(k); defaults.push(e); }
+              break;
+            }
+            default: break;
+          }
+        }
+      }
+      // negotiation threads
+      const threads = new Map();
+      for (const d of deals.values()) {
+        if (!d.from || !d.to || !(num(d.turn, 0) <= limit)) continue;
+        const status = d.status && d.status !== 'open' && !(num(d.closed_turn, num(d.turn)) <= limit) ? 'open' : (d.status || 'open');
+        const tid = d.thread || d.id;
+        if (!threads.has(tid)) threads.set(tid, { id: tid, deals: [] });
+        threads.get(tid).deals.push({ ...d, status });
+      }
+      const tlist = Array.from(threads.values()).map((th) => {
+        th.deals.sort((a, b) => dealNum(a.id) - dealNum(b.id));
+        const first = th.deals[0];
+        const last = th.deals[th.deals.length - 1];
+        th.parties = [first.from, first.to];
+        th.start = Math.min(...th.deals.map((d) => num(d.turn)));
+        th.end = Math.max(...th.deals.map((d) => (d.status === 'open' ? num(d.turn) : num(d.closed_turn, num(d.turn)))));
+        th.outcome = last.status;
+        return th;
+      }).sort((a, b) => b.end - a.end || dealNum(b.deals[b.deals.length - 1].id) - dealNum(a.deals[a.deals.length - 1].id));
+      const logList = Array.from(log.values()).sort((a, b) => num(b.turn) - num(a.turn) || dealNum(b.id) - dealNum(a.id));
+      for (const d of logList) {
+        const known = d.id != null ? deals.get(d.id) : null;
+        if (known?.message && !d.message) d.message = known.message;
+        if (known?.thread && !d.thread) d.thread = known.thread;
+      }
+      defaults.sort((a, b) => num(b.turn) - num(a.turn));
+      return { log: logList, defaults, threads: tlist, privateData };
+    },
+
+    renderTrade() {
+      const el = $('#trade');
+      const v = this.view;
+      if (!el) return;
+      if (!v) { el.innerHTML = ''; return; }
+      const f = this.filter;
+      const inv = (d) => !f || d.from === f || d.to === f || d.payer === f || d.payee === f;
+      const T = this.tradeData();
+      const links = this.dealLinks(v);
+      const newIds = new Set(links.map((d) => String(d.id)));
+      const tn = $('#trade-n');
+      if (tn) {
+        tn.hidden = !links.length;
+        tn.textContent = links.length;
+        tn.title = `${links.length} deal${links.length === 1 ? '' : 's'} executed in the shown turn`;
+      }
+      const lim = (k, n) => n + (this.tradeLimits[k] || 0);
+      const more = (k, total, shown) => (total > shown
+        ? `<button class="btn ghost small more" data-more="${k}">Show ${Math.min(40, total - shown)} more <span class="muted">(${total - shown} hidden)</span></button>` : '');
+      const P = (pid) => this.chip(pid);
+      const players = v.players || [];
+      const contracts = (v.contracts || []).filter(inv);
+      const log = T.log.filter(inv);
+      const defaults = T.defaults.filter(inv);
+      const running = v.status !== 'finished';
+
+      // summary
+      const allContracts = v.contracts || [];
+      const summary = `<div class="trade-summary">
+        <span class="race-chip" title="deals executed so far"><b>${T.log.length}</b> deal${T.log.length === 1 ? '' : 's'}</span>
+        <span class="race-chip${links.length ? ' fresh' : ''}" title="deals executed in the shown turn (lines on the map)"><b>${links.length}</b> this turn</span>
+        <span class="race-chip" title="contracts currently paying every turn"><b>${allContracts.length}</b> active contract${allContracts.length === 1 ? '' : 's'}</span>
+        <span class="race-chip${T.defaults.length ? ' hot' : ''}" title="contracts defaulted on"><b>${T.defaults.length}</b> default${T.defaults.length === 1 ? '' : 's'}</span>
+      </div>`;
+
+      // active contracts (+ defaults)
+      const totalTurns = (c) => {
+        const d = T.log.find((x) => String(x.id) === String(c.deal));
+        if (!d) return null;
+        const b = d.from === c.payer ? d.give : d.get;
+        return num(b?.turns, null);
+      };
+      const atRisk = (c) => {
+        const p = players.find((q) => q.id === c.payer);
+        if (!p?.resources) return false;
+        return Object.entries(c.per_turn || {}).some(([r, n]) => num(p.resources[r]) + Math.max(0, num(p.income?.[r])) < num(n));
+      };
+      const contractRows = contracts.map((c) => {
+        const total = totalTurns(c);
+        const left = num(c.turns_left);
+        const paid = total != null ? Math.max(0, total - left) : null;
+        const risk = atRisk(c);
+        return `<div class="crow${risk ? ' risk' : ''}">
+          <div class="crow-top">${icon('contract', DEAL_KIND.contract.color)} ${P(c.payer)} <span class="muted">pays</span> ${P(c.payee)}
+            <span class="rq contract">${esc(bagText(c.per_turn) || '?')}/turn</span>
+            ${risk ? '<span class="risk-tag" title="the payer holds less than one instalment (plus income): a default is likely">at risk</span>' : ''}
+            <span class="left">${esc(left)} turn${left === 1 ? '' : 's'} left</span></div>
+          ${total ? `<div class="cbar" title="${paid}/${total} instalments paid"><i style="width:${(100 * paid / total).toFixed(1)}%"></i></div>` : ''}
+          <div class="small muted">${esc(c.id)} · deal ${esc(c.deal ?? '?')}${total ? ` · ${paid}/${total} paid` : ''}</div>
+        </div>`;
+      }).join('');
+      const defaultRows = defaults.map((e) => `<div class="crow default">
+          <div class="crow-top">${icon('contract', '#f87171')} ${P(e.payer)} <span class="betray">defaulted</span> <span class="muted">on</span> ${esc(e.contract ?? '')} <span class="muted">to</span> ${P(e.payee)}
+            <span class="left">T${esc(e.turn)}</span></div>
+          <div class="small muted">owed ${esc(bagText(e.per_turn) || '?')}/turn with ${esc(e.turns_left ?? '?')} turns left${e.penalty != null ? ` · payer lost ${esc(e.penalty)} influence` : ''}${e.deal ? ` · deal ${esc(e.deal)}` : ''}</div>
+        </div>`).join('');
+
+      // reputation
+      const repRows = this.sortedPlayers(v).filter((p) => !f || p.id === f).map((p) => {
+        const r = p.reputation || {};
+        const betr = num(r.betrayals, num(p.betrayals));
+        const out = allContracts.filter((c) => c.payer === p.id).length;
+        const inn = allContracts.filter((c) => c.payee === p.id).length;
+        const bad = (n) => (n ? ' class="num bad"' : ' class="num"');
+        return `<tr class="${p.alive === false ? 'dead' : ''}"><td>${P(p.id)}</td>
+          <td class="num">${fmt(num(r.deals))}</td><td class="num">${fmt(num(r.contracts_honoured))}</td>
+          <td${bad(num(r.defaults))}>${fmt(num(r.defaults))}</td><td${bad(betr)}>${fmt(betr)}</td>
+          <td class="num muted" title="active contracts: paying / receiving">${out || inn ? `${out} / ${inn}` : '–'}</td></tr>`;
+      }).join('');
+
+      // deal log
+      const nLog = lim('log', 25);
+      const logHtml = log.slice(0, nLog).map((d) => `<div class="deal-card${newIds.has(String(d.id)) ? ' new' : ''}">
+          <div class="dh"><span class="dt">T${esc(d.turn ?? '?')}</span> ${P(d.from)} <span class="muted">⇄</span> ${P(d.to)}
+            <span class="ktags">${this.kindTags(d)}</span>${this.dealId(d.id)}</div>
+          <div class="dl"><span class="who">${esc(this.pname(d.from))} gives</span> ${this.bundleHtml(d.give)}</div>
+          <div class="dl"><span class="who">${esc(this.pname(d.to))} gives</span> ${this.bundleHtml(d.get)}</div>
+          ${d.peace ? `<div class="dl"><span class="who">both</span> <span class="rq peace">peace for ${esc(d.peace)} turns</span></div>` : ''}
+          ${d.message ? `<div class="dmsg">${this.dealMsg(d.message)}</div>` : ''}
+        </div>`).join('');
+
+      // open deals (full views only: finished games / offline replays)
+      const open = (v.deals?.open || (v.trade_offers || []).map((o) => ({ ...o, get: o.get ?? o.want, status: 'open' }))).filter(inv);
+      const openHtml = open.map((d) => `<div class="deal-card open">
+          <div class="dh"><span class="dt">T${esc(d.turn ?? '?')}</span> ${P(d.from)} <span class="muted">→</span> ${P(d.to)}
+            <span class="ktags">${this.kindTags(d)}</span>${this.dealId(d.id)}</div>
+          <div class="dl">${this.dealInline(d)}</div>
+          ${d.message ? `<div class="dmsg">${this.dealMsg(d.message)}</div>` : ''}
+          <div class="small ${d.problem ? 'warn-text' : 'muted'}">${d.problem ? `would fail now: ${esc(d.problem)}` : d.deliverable ? 'deliverable now' : ''}${d.expires_turn != null ? ` · expires end of T${esc(d.expires_turn)}` : ''}</div>
+        </div>`).join('');
+
+      // negotiation threads
+      let threadsHtml;
+      const threadsHidden = !T.privateData && running;
+      const threads = threadsHidden ? [] : T.threads.filter((th) => !f || th.parties.includes(f));
+      if (threadsHidden) {
+        threadsHtml = '<div class="empty">Proposals, counter-offers and rejections are private while the game runs. The full negotiation threads appear here once it is over.</div>';
+      } else if (!threads.length) {
+        threadsHtml = '<div class="empty">No negotiations.</div>';
+      } else {
+        const nTh = lim('threads', 20);
+        threadsHtml = threads.slice(0, nTh).map((th) => this.threadHtml(th)).join('') + more('threads', threads.length, nTh);
+      }
+
+      const hidden = running && !T.privateData
+        ? '<div class="small muted note">Spectators see executed deals, contracts and reputation live; private offers and haggling are revealed when the game ends.</div>' : '';
+      el.innerHTML = `${summary}${hidden}
+        <div class="dsec"><h4>Active contracts (${contracts.length})</h4>
+          ${contractRows || '<div class="empty">No active contracts.</div>'}
+          ${defaultRows ? `<h4 class="sub-h">Defaults (${defaults.length})</h4>${defaultRows}` : ''}</div>
+        <div class="dsec"><h4>Deal log (${log.length})</h4>
+          <div class="deal-log">${logHtml || '<div class="empty">No deals executed yet.</div>'}${more('log', log.length, nLog)}</div></div>
+        <div class="dsec"><h4>Reputation</h4><div class="table-wrap"><table class="table rep-table">
+          <thead><tr><th>Player</th><th class="num" title="deals executed">Deals</th><th class="num" title="contracts paid in full (as payer)">Honoured</th>
+            <th class="num" title="contracts defaulted on (as payer)">Defaults</th><th class="num" title="treaties broken">Betrayals</th>
+            <th class="num" title="active contracts paying / receiving">Pay / get</th></tr></thead>
+          <tbody>${repRows}</tbody></table></div></div>
+        ${openHtml ? `<div class="dsec"><h4>Open offers (${open.length})</h4>${openHtml}</div>` : ''}
+        <div class="dsec"><h4>Negotiation threads${threads.length ? ` (${threads.length})` : ''}</h4><div class="threads">${threadsHtml}</div></div>`;
+    },
+
+    threadHtml(th) {
+      const P = (pid) => this.chip(pid);
+      const steps = th.deals.map((d, i) => `<li class="step">
+          <span class="sk ${i ? 'counter' : 'proposal'}">${i ? 'counter' : 'offer'}</span>
+          <span class="stxt">${P(d.from)} <span class="muted">→</span> ${P(d.to)}: ${this.dealInline(d)}${this.dealMsg(d.message)}
+            ${this.dealId(d.id)} <span class="muted small">T${esc(d.turn ?? '?')}</span></span></li>`).join('');
+      const last = th.deals[th.deals.length - 1];
+      const st = DEAL_STATUS[th.outcome] || { label: th.outcome, color: '#94a3b8' };
+      const reason = last.reason && !/^(rejected|withdrawn) by p\d+$/.test(last.reason) ? ` <span class="muted">— ${esc(last.reason)}</span>` : '';
+      let outcome;
+      switch (th.outcome) {
+        case 'accepted': outcome = `${icon('deal', st.color)} <b style="color:${st.color}">Accepted</b> by ${P(last.to)}${last.closed_turn != null ? ` <span class="muted small">T${esc(last.closed_turn)}</span>` : ''}`; break;
+        case 'rejected': outcome = `${icon('x', st.color)} <b style="color:${st.color}">Rejected</b> by ${P(last.to)}${last.reason && !/^rejected by /.test(last.reason) ? ` <span class="quote">“${esc(last.reason)}”</span>` : ''}`; break;
+        case 'withdrawn': outcome = `${icon('x', st.color)} <b style="color:${st.color}">Withdrawn</b>${reason}`; break;
+        case 'expired': outcome = `${icon('clock', st.color)} <b style="color:${st.color}">Expired</b> unanswered`; break;
+        case 'failed': outcome = `${icon('fail', st.color)} <b style="color:${st.color}">Failed</b> to settle${reason}`; break;
+        case 'open': outcome = `${icon('clock', st.color)} <b style="color:${st.color}">Open</b> <span class="muted">— awaiting</span> ${P(last.to)}`; break;
+        default: outcome = `<b style="color:${st.color}">${esc(human(th.outcome))}</b>${reason}`;
+      }
+      const turns = th.start === th.end ? `T${th.start}` : `T${th.start}–${th.end}`;
+      return `<div class="thread" style="--s:${st.color}">
+        <div class="th-head">${P(th.parties[0])} <span class="muted">⇄</span> ${P(th.parties[1])}
+          <span class="muted small">${turns} · ${th.deals.length} offer${th.deals.length === 1 ? '' : 's'}</span>
+          <span class="st">${esc(st.label)}</span></div>
+        <ol class="steps">${steps}<li class="step outcome">${outcome}</li></ol></div>`;
+    },
+
     renderLegend() {
       const el = $('#legend');
       if (el.dataset.done) return;
@@ -2111,7 +2692,9 @@
         `<span>${icon('star', '#fff')} capital</span><span>${icon('relic', '#67e8f9')} relic</span>
          <span><i style="background:transparent;border:2px solid #d7dbe3"></i>walls</span>
          <span style="color:var(--accent)">◠ wonder stages</span>
-         <span>${icon('battle', '#f87171')} battle last turn</span><span>▭ bar: deposit left</span>`;
+         <span>${icon('battle', '#f87171')} battle last turn</span><span>▭ bar: deposit left</span>
+         <span title="a deal executed this turn: curved line between the parties' capitals; the badge ring shows goods / land / contract / peace"><i class="lg-deal"></i>deal this turn</span>
+         <span title="a tile that changed hands in a deal this turn"><i class="lg-land"></i>traded tile</span>`;
     },
   };
 

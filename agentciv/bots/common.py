@@ -17,7 +17,12 @@ Main pieces:
   estimation (:func:`sell_price`, :func:`buy_price`).
 * :class:`Plan` – an order list with a resource budget, so bots never emit
   orders they cannot pay for.
-* :class:`SafeBot` – a Bot base class whose ``act`` never raises.
+* Deals – :class:`DealValuer` values §13 deal terms (resources by need and
+  market prices, tiles, contracts by reliability, peace by threat) for any
+  player; :func:`danger` / :meth:`DealValuer.helps_winner` implement the
+  "never help a player close to winning" guard.
+* :class:`SafeBot` – a Bot base class whose ``act`` and ``negotiate`` never
+  raise.
 """
 from __future__ import annotations
 
@@ -841,6 +846,468 @@ def treaty_proposals_to_me(world: World) -> list:
 
 
 # ---------------------------------------------------------------------------
+# Deal valuation (docs/DESIGN.md §13)
+# ---------------------------------------------------------------------------
+PROGRESS_KEYS = ("conquest", "wonder", "influence", "relics", "economic")
+GOLD_NEED_PREMIUM = 0.15        # gold we need for a plan/investment is worth more than 1
+THREAT_REACH = 3                # turns of marching considered by peace valuation
+CREDIT_BASE = 150.0             # credit limit (gold PV) of a payer with no contract history
+SAFE_PEACE_TURNS = 10           # a received tile near a partner's army is safe for this long a treaty
+
+
+def spot_prices(world: World) -> dict:
+    """Current market spot price of every tradable resource (gold = 1)."""
+    out = {"gold": 1.0}
+    for r in C.MARKET_RESOURCES:
+        pool = world.pools.get(r)
+        out[r] = pool[1] / pool[0] if pool and pool[0] > 0 else base_price(r)
+    return out
+
+
+def annuity(discount: float, turns: int) -> float:
+    """Σ discount^k for k < turns (present value of 1 per turn)."""
+    if turns <= 0:
+        return 0.0
+    if discount >= 0.99999:
+        return float(turns)
+    return (1.0 - discount ** turns) / (1.0 - discount)
+
+
+def danger(world: World, q: str) -> float:
+    """How close ``q`` is to winning: its highest public victory progress
+    (0..1) over the real conditions (not the turn-limit score). Conquest
+    counts only once a rival capital has been taken (everyone starts with
+    its own)."""
+    prog = world.progress(q)
+    out = max((float(prog.get(k, 0.0) or 0.0) for k in PROGRESS_KEYS if k != "conquest"), default=0.0)
+    if int((world.players.get(q) or {}).get("capitals_held", 0) or 0) >= 2:
+        out = max(out, float(prog.get("conquest", 0.0) or 0.0))
+    return out
+
+
+def contract_obligations(world: World, pid: str | None = None) -> dict:
+    """Per-turn amounts ``pid`` (default: me) pays under running contracts."""
+    pid = pid or world.me
+    out: dict = {}
+    for c in world.view.get("contracts", []) or []:
+        if c.get("payer") == pid:
+            for r, v in (c.get("per_turn") or {}).items():
+                out[r] = out.get(r, 0) + int(v)
+    return out
+
+
+def contract_income(world: World, pid: str | None = None) -> dict:
+    """Per-turn amounts ``pid`` (default: me) receives under running contracts."""
+    pid = pid or world.me
+    out: dict = {}
+    for c in world.view.get("contracts", []) or []:
+        if c.get("payee") == pid:
+            for r, v in (c.get("per_turn") or {}).items():
+                out[r] = out.get(r, 0) + int(v)
+    return out
+
+
+class DealValuer:
+    """Gold-equivalent value of §13 deal terms for *any* player, from public
+    information (resources, income, caps, armies, reputation, contracts).
+
+    * **Resources** have a marginal value: the part a player *needs* (its
+      stock is below its target) is worth what buying it on the market would
+      cost (spot + slippage + fee); the rest is worth what selling it would
+      bring (spot − slippage − fee). Giving away surplus therefore costs
+      little, giving away what you need costs a lot — the room in between is
+      what makes a trade good for both sides.
+    * **Tiles**: yield over (part of) the remaining game.
+    * **Contracts**: instalments discounted per turn and, for the receiver,
+      weighted by the payer's reliability (reputation, ability to pay).
+      ``horizon`` truncates *our own* payments (after an expected victory
+      nothing is owed any more).
+    * **Peace**: the threat the other side poses (its army within reach of
+      our cities against our defence) plus a small base value; bots add a
+      ``peace_bias`` per player (negative = we want to be free to attack).
+
+    ``needs`` / ``gold_need`` describe our own targets (planner knowledge);
+    other players' needs are estimated (keep levels, food deficit, the next
+    wonder stage of a wonder builder)."""
+
+    def __init__(self, world: World, needs: dict | None = None, gold_need: int = 0,
+                 discount: float = 0.97, horizon: int | None = None,
+                 peace_bias: dict | None = None, peace_scale: float = 1.0):
+        self.w = world
+        self.me = world.me
+        self.prices = spot_prices(world)
+        self.my_needs = needs
+        self.my_gold_need = gold_need
+        self.discount = discount
+        self.horizon = horizon
+        self.peace_bias = peace_bias or {}
+        self.peace_scale = peace_scale
+        self.remaining = max(1, world.max_turns - world.turn)
+        self._threat: dict = {}
+        self._city_dist: dict = {}
+        self._needs: dict = {}
+
+    # -- public state -----------------------------------------------------
+    def stock(self, q: str) -> dict:
+        if q == self.me:
+            return self.w.res
+        return (self.w.players.get(q) or {}).get("resources", {}) or {}
+
+    def income(self, q: str) -> dict:
+        if q == self.me:
+            return self.w.income
+        return (self.w.players.get(q) or {}).get("income", {}) or {}
+
+    def fee(self, q: str) -> float:
+        if q == self.me:
+            return self.w.fee
+        hall = any(c["owner"] == q and c["buildings"].get("market_hall") for c in self.w.cities.values())
+        return C.MARKET_HALL_FEE if hall else C.MARKET_FEE
+
+    def caps(self, q: str) -> dict:
+        if q == self.me:
+            return self.w.caps
+        wh = sum(1 for c in self.w.cities.values() if c["owner"] == q and c["buildings"].get("warehouse"))
+        return {r: C.STORAGE_BASE + C.WAREHOUSE_STORAGE * wh for r in CAPPED}
+
+    def needs(self, q: str) -> dict:
+        """Stock of each capped resource ``q`` wants to keep on hand."""
+        if q == self.me and self.my_needs is not None:
+            return self.my_needs
+        got = self._needs.get(q)
+        if got is not None:
+            return got
+        pl = self.w.players.get(q) or {}
+        upkeep = int(pl.get("upkeep", 0) or 0)
+        inc = self.income(q)
+        need = {"food": 30 + 4 * upkeep, "wood": 40, "stone": 30}
+        if inc.get("food", 0) < upkeep:
+            need["food"] += 8 * (upkeep - inc.get("food", 0))
+        stage = int(pl.get("wonder_stage", 0) or 0)
+        if 1 <= stage < C.WONDER_VICTORY_STAGE:
+            # a wonder builder wants the next stage's stone/wood; above its
+            # storage cap only when it can build this turn (else it is lost)
+            cost = building_cost("wonder", stage + 1)
+            stock = self.stock(q)
+            short = sum(max(0, cost[r] - stock.get(r, 0)) * self.prices[r] for r in ("stone", "wood"))
+            now = stock.get("gold", 0) >= cost["gold"] + short
+            caps = self.caps(q)
+            for r in ("stone", "wood"):
+                need[r] = max(need[r], cost[r] if now else min(cost[r], caps[r]))
+        self._needs[q] = need
+        return need
+
+    def gold_need(self, q: str) -> int:
+        if q == self.me:
+            return self.my_gold_need
+        stage = int((self.w.players.get(q) or {}).get("wonder_stage", 0) or 0)
+        if 1 <= stage < C.WONDER_VICTORY_STAGE:
+            return building_cost("wonder", stage + 1)["gold"]
+        return 0
+
+    # -- resources --------------------------------------------------------
+    def buy_unit(self, q: str, r: str, qty: int) -> float:
+        """Gold per unit to buy ``qty`` of ``r`` on the market (with fee)."""
+        p = buy_price(self.w, r, max(1, qty))
+        if p == float("inf"):
+            p = 3.0 * self.prices[r]
+        return min(p, 3.0 * self.prices[r]) * (1 + self.fee(q))
+
+    def sell_unit(self, q: str, r: str, qty: int) -> float:
+        return sell_price(self.w, r, max(1, qty)) * (1 - self.fee(q))
+
+    def recv_value(self, q: str, r: str, x: int) -> float:
+        """Value for ``q`` of receiving ``x`` of resource ``r`` now."""
+        if x <= 0:
+            return 0.0
+        have = self.stock(q).get(r, 0)
+        if r == "gold":
+            need = max(0, self.gold_need(q) - have)
+            a = min(x, need)
+            return a * (1 + GOLD_NEED_PREMIUM) + (x - a)
+        need = max(0, self.needs(q).get(r, 0) - have)
+        a = min(x, need)
+        b = x - a
+        v = a * self.buy_unit(q, r, a) if a else 0.0
+        if b:
+            v += b * self.sell_unit(q, r, b) * 0.97
+        return v
+
+    def give_cost(self, q: str, r: str, x: int) -> float:
+        """Cost for ``q`` of handing over ``x`` of resource ``r`` now."""
+        if x <= 0:
+            return 0.0
+        have = self.stock(q).get(r, 0)
+        if r == "gold":
+            free = max(0, have - self.gold_need(q))
+            a = min(x, free)
+            return a + (x - a) * (1 + GOLD_NEED_PREMIUM)
+        free = max(0, have - self.needs(q).get(r, 0))
+        a = min(x, free)
+        b = x - a
+        v = a * self.sell_unit(q, r, a) if a else 0.0
+        if b:
+            v += b * self.buy_unit(q, r, b) * 1.05
+        return v
+
+    # -- tiles --------------------------------------------------------------
+    def tile_exposed(self, q: str, i: int, other: str | None = None, peace: int = 0) -> bool:
+        """Could another player's army take tile ``i`` from ``q`` soon? Any
+        army of a player not bound to ``q`` by a treaty (or by the deal's own
+        ``peace`` with ``other``) for another ``SAFE_PEACE_TURNS`` turns that
+        can march onto the tile within ``THREAT_REACH`` turns (§7.4:
+        undefended land is captured by moving onto it)."""
+        w = self.w
+        dist = w.bfs([i], max_dist=THREAT_REACH * 2)
+        for j, d in dist.items():
+            for owner, units in w.armies.get(j, {}).items():
+                if owner == q or not any(units.values()):
+                    continue
+                reach = THREAT_REACH * max((C.UNITS[u]["move"] for u, k in units.items() if k and u in C.UNITS),
+                                           default=1)
+                if d > reach:
+                    continue
+                if owner == other and peace >= SAFE_PEACE_TURNS:
+                    continue
+                until = w.treaties.get(owner) if q == w.me else (w.treaties.get(q) if owner == w.me else None)
+                if until is not None and until >= w.turn + SAFE_PEACE_TURNS:
+                    continue
+                if until is None and q != w.me and owner != w.me and w.at_peace(q, owner):
+                    continue                  # other players' treaties: end turn unknown here
+                return True
+        return False
+
+    def tile_value(self, q: str, xy, giving: bool, other: str | None = None, peace: int = 0) -> float:
+        w = self.w
+        try:
+            i = w.idx(int(xy[0]), int(xy[1]))
+            y = tile_yield(w, i)
+        except (TypeError, ValueError, IndexError):
+            return 0.0
+        if not giving and self.tile_exposed(q, i, other, peace):
+            return 0.0                # the giver (or another army) could just take it back
+        per_turn = sum(v * (3.0 if r == "influence" else self.prices.get(r, 1.0)) for r, v in y.items())
+        v = per_turn * min(self.remaining, 40) * 0.6 + 6.0 * C.SCORE_WEIGHTS["tiles"]
+        if giving:
+            v *= 1.3
+            if any(w.cities.get(j, {}).get("owner") == q for j in w.radius(i, 1)):
+                v += 40.0          # land next to our city: armies could stand there
+        return v
+
+    # -- contracts ------------------------------------------------------------
+    def installment(self, per_turn: dict) -> float:
+        return sum(v * (1.0 if r == "gold" else 0.95 * self.prices.get(r, 1.0)) for r, v in per_turn.items())
+
+    def reliability(self, payer: str, per_turn: dict, turns: int) -> float:
+        """Probability-like weight that ``payer`` pays every instalment."""
+        pl = self.w.players.get(payer) or {}
+        if not pl.get("alive", True):
+            return 0.0
+        rep = pl.get("reputation") or {}
+        rel = 0.93 * (0.55 ** int(rep.get("defaults", 0) or 0)) * (0.85 ** int(rep.get("betrayals", 0) or 0))
+        rel += 0.01 * min(5, int(rep.get("contracts_honoured", 0) or 0))
+        inc = self.income(payer)
+        owed = contract_obligations(self.w, payer)
+        stock = self.stock(payer)
+        upkeep = int(pl.get("upkeep", 0) or 0)
+        # gold can also come from selling production on the market
+        sellable = sum(max(0, inc.get(r, 0) - (upkeep if r == "food" else 0)) * self.prices[r] * 0.7
+                       for r in CAPPED)
+        for r, v in per_turn.items():
+            if v <= 0:
+                continue
+            spare = inc.get(r, 0) - owed.get(r, 0) + stock.get(r, 0) / max(1, turns)
+            if r == "food":
+                spare -= upkeep
+            elif r == "gold":
+                spare += sellable - sum(owed.get(x, 0) * self.prices[x] for x in CAPPED)
+            if spare < v:
+                rel *= max(0.1, spare / v)
+        return max(0.02, min(0.98, rel))
+
+    def credit_limit(self, payer: str) -> float:
+        """Most future instalments (present value) we accept as payment for
+        goods handed over now: grows with contracts ``payer`` honoured,
+        none after a default."""
+        rep = (self.w.players.get(payer) or {}).get("reputation") or {}
+        if int(rep.get("defaults", 0) or 0):
+            return 0.0
+        return CREDIT_BASE * (1 + min(4, int(rep.get("contracts_honoured", 0) or 0)))
+
+    def contract_value(self, viewer: str, bundle: dict, payer: str, payee: str) -> float:
+        """+PV for the payee, −cost for the payer (from ``viewer``'s side)."""
+        per = bundle.get("per_turn") or {}
+        turns = int(bundle.get("turns", 0) or 0)
+        if not per or turns <= 0:
+            return 0.0
+        inst = self.installment(per)
+        mine = viewer == self.me
+        disc = self.discount if mine else 0.97
+        t = min(turns, self.remaining)
+        if viewer == payer:
+            if mine and self.horizon is not None:
+                t = min(t, max(1, self.horizon))
+            cost = inst * annuity(disc, t)
+            if self.reliability(payer, per, turns) < 0.5:
+                cost += C.CONTRACT_DEFAULT_PENALTY * 3.0     # we would likely default
+            return -cost
+        return inst * annuity(disc, t) * self.reliability(payer, per, turns)
+
+    # -- peace ----------------------------------------------------------------
+    def _dist_from(self, city: int) -> dict:
+        d = self._city_dist.get(city)
+        if d is None:
+            d = self._city_dist[city] = self.w.bfs([city], max_dist=2 * THREAT_REACH)
+        return d
+
+    def threat(self, attacker: str, victim: str) -> float:
+        """Raw strength of ``attacker``'s units that could reach one of
+        ``victim``'s cities within a few turns (worst city)."""
+        key = (attacker, victim)
+        got = self._threat.get(key)
+        if got is not None:
+            return got
+        w = self.w
+        worst = 0.0
+        armies = w.armies_of(attacker)
+        if armies:
+            for c in w.cities_of(victim):
+                dist = self._dist_from(c)
+                tot = 0.0
+                for i, units in armies.items():
+                    d = dist.get(i)
+                    if d is None:
+                        continue
+                    for t, k in units.items():
+                        if t in C.UNITS and d <= THREAT_REACH * C.UNITS[t]["move"]:
+                            tot += k * C.UNITS[t]["strength"]
+                worst = max(worst, tot)
+        self._threat[key] = worst
+        return worst
+
+    def defense(self, q: str) -> float:
+        w = self.w
+        cities = w.cities_of(q)
+        if not cities:
+            return 0.0
+        own = 0.0
+        for c in cities:
+            cc = w.cities[c]
+            mult = 1 + 0.5 * cc["buildings"].get("walls", 0)
+            units = w.armies.get(c, {}).get(q, {})
+            own = max(own, (raw_strength(units) + float(cc.get("garrison", 0))) * mult)
+        return own + 0.3 * raw_strength(w.players.get(q, {}).get("units"))
+
+    def peace_value(self, q: str, other: str, turns: int) -> float:
+        """Value for ``q`` of ``turns`` turns of peace with ``other``."""
+        if not turns:
+            return 0.0
+        w = self.w
+        until = None
+        if q == self.me:
+            until = w.treaties.get(other)
+        elif other == self.me:
+            until = w.treaties.get(q)
+        if until is not None and until >= w.turn + turns:
+            return 0.0                                # nothing new
+        mp = float((w.players.get(other) or {}).get("military_power", 0) or 0)
+        t = self.threat(other, q)
+        v = 5.0 + 0.03 * mp + 4.0 * max(0.0, t - 0.6 * self.defense(q))
+        v = min(800.0, v) * min(1.0, turns / 20.0)
+        if q == self.me:
+            v = v * self.peace_scale + self.peace_bias.get(other, 0.0)
+        return v
+
+    # -- bundles & deals --------------------------------------------------------
+    def bundle_in(self, pid: str, b: dict, other: str, peace: int = 0) -> float:
+        v = sum(self.recv_value(pid, r, int(b.get(r, 0) or 0)) for r in C.TRADABLE)
+        v += sum(self.tile_value(pid, t, False, other, peace) for t in b.get("tiles", ()) or ())
+        v += self.contract_value(pid, b, other, pid)
+        return v
+
+    def bundle_out(self, pid: str, b: dict, other: str) -> float:
+        v = sum(self.give_cost(pid, r, int(b.get(r, 0) or 0)) for r in C.TRADABLE)
+        v += sum(self.tile_value(pid, t, True) for t in b.get("tiles", ()) or ())
+        v -= self.contract_value(pid, b, pid, other)
+        return v
+
+    def deal_gain(self, deal: dict, pid: str | None = None) -> float:
+        """Net value of ``deal`` for ``pid`` (default: me), either party."""
+        pid = pid or self.me
+        if pid == deal.get("from"):
+            out, inn, other = deal.get("give") or {}, deal.get("get") or {}, deal.get("to")
+        else:
+            out, inn, other = deal.get("get") or {}, deal.get("give") or {}, deal.get("from")
+        g = self.bundle_in(pid, inn, other, int(deal.get("peace") or 0)) - self.bundle_out(pid, out, other)
+        if pid == self.me and inn.get("per_turn") and (out.get("tiles") or any(out.get(r) for r in C.TRADABLE)):
+            # lending (goods now against instalments later): trust a payer
+            # only up to its credit limit (a default costs it influence, but
+            # the goods are gone)
+            pv = self.contract_value(pid, inn, other, pid)
+            g -= max(0.0, pv - self.credit_limit(other))
+        if deal.get("peace"):
+            g += self.peace_value(pid, other, int(deal["peace"]))
+        return g
+
+    def size(self, deal: dict) -> float:
+        """Market value of everything the deal moves (for relative margins)."""
+        tot = 0.0
+        for key in ("give", "get"):
+            b = deal.get(key) or {}
+            tot += sum(int(b.get(r, 0) or 0) * self.prices.get(r, 1.0) for r in C.TRADABLE)
+            per = b.get("per_turn") or {}
+            if per:
+                tot += self.installment(per) * min(int(b.get("turns", 0) or 0), self.remaining)
+            tot += 30.0 * len(b.get("tiles", ()) or ())
+        return tot
+
+    # -- "never help a player who is close to winning" -------------------------
+    def danger(self, q: str) -> float:
+        return danger(self.w, q)
+
+    def projected_danger(self, q: str, bundle: dict, bundle_from: dict | None = None) -> float:
+        """``q``'s victory progress if it received ``bundle`` and handed over
+        ``bundle_from`` (economic: the net gold value, contract payments of
+        the next 10 turns included; wonder: the next stage becomes
+        affordable)."""
+        w = self.w
+        d = danger(w, q)
+        if not bundle:
+            return d
+        out = bundle_from or {}
+        stock = self.stock(q)
+        pl = w.players.get(q) or {}
+
+        def value(b):
+            v = sum(int(b.get(r, 0) or 0) * self.prices.get(r, 1.0) for r in C.TRADABLE)
+            per = b.get("per_turn") or {}
+            if per:
+                v += self.installment(per) * min(10, int(b.get("turns", 0) or 0))
+            return v
+        target = w.thresholds.get("economic_gold", C.ECONOMIC_VICTORY_GOLD)
+        d = max(d, (stock.get("gold", 0) + value(bundle) - value(out)) / max(1, target))
+        stage = int(pl.get("wonder_stage", 0) or 0)
+        if 1 <= stage < C.WONDER_VICTORY_STAGE:
+            cost = building_cost("wonder", stage + 1)
+            short = 0.0
+            for r, v in cost.items():
+                have = stock.get(r, 0) + int(bundle.get(r, 0) or 0) - int(out.get(r, 0) or 0)
+                if r != "gold" and have < v:
+                    short += (v - have) * self.prices.get(r, 1.0) * 1.2
+            gold = stock.get("gold", 0) + int(bundle.get("gold", 0) or 0) - int(out.get("gold", 0) or 0)
+            if gold >= cost["gold"] + short:
+                d = max(d, (stage + 1) / C.WONDER_VICTORY_STAGE)
+        return d
+
+    def helps_winner(self, q: str, bundle_to_q: dict, threshold: float = 0.7,
+                     bundle_from_q: dict | None = None) -> bool:
+        """True if ``q`` is close to winning (progress ≥ ``threshold``) or
+        receiving ``bundle_to_q`` (for ``bundle_from_q``) would bring it
+        there."""
+        return self.projected_danger(q, bundle_to_q or {}, bundle_from_q) >= threshold
+
+
+# ---------------------------------------------------------------------------
 # Safe bot base
 # ---------------------------------------------------------------------------
 class SafeBot(Bot):
@@ -872,6 +1339,25 @@ class SafeBot(Bot):
             if self._plan is not None:
                 return list(self._plan.orders)[:C.MAX_ORDERS_PER_TURN]
             return []
+
+    TRADE = True        # False: never negotiates (ablation / pure market play)
+
+    def negotiate(self, view: dict) -> list:
+        """One §13 negotiation round; never raises. Subclasses implement
+        :meth:`decide_deals`."""
+        try:
+            if not self.TRADE or not view or not view.get("you") or not view["you"].get("alive", True):
+                return []
+            if view.get("status") not in (None, "running"):
+                return []
+            out = self.decide_deals(view)
+            return list(out or [])[:C.DIPLOMACY_ACTIONS_PER_TURN]
+        except Exception as e:  # never let a bot crash the game
+            self.last_error = f"negotiate: {type(e).__name__}: {e}"
+            return []
+
+    def decide_deals(self, view: dict) -> list:
+        return []
 
     def new_plan(self, world: World) -> Plan:
         self._plan = Plan(world)

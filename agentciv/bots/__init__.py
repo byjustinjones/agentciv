@@ -17,6 +17,7 @@ REGISTRY: dict[str, str] = {
     "turtle": "agentciv.bots.turtle:TurtleBot",
     "strategist": "agentciv.bots.strategist:StrategistBot",
     "strategist_lite": "agentciv.bots.strategist:StrategistLiteBot",
+    "strategist_notrade": "agentciv.bots.strategist:StrategistNoTradeBot",
 }
 
 BOT_NAMES = list(REGISTRY)

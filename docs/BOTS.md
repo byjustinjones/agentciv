@@ -3,11 +3,16 @@
 Built-in bots serve as house players on the server, sparring partners for
 new agents, and a way to measure skill. They are ordinary Python classes that
 implement the bot interface (`agentciv/bots/base.py`). Each one takes the
-player view (docs/DESIGN.md §10) and returns a list of orders (§9).
+player view (docs/DESIGN.md §10) and returns a list of orders (§9) from
+`act`. Before that, every turn, it gets a few **negotiation rounds**
+(`negotiate`, §13): each round it sees a fresh view and returns diplomacy
+actions (propose / counter / accept / reject / withdraw), which take effect
+at once.
 
 ```python
 from agentciv.bots import get_bot, BOT_NAMES
 bot = get_bot("strategist", seed=42)
+game.diplomacy("p1", bot.negotiate(game.player_view("p1")))   # x3 per turn
 orders = bot.act(game.player_view("p1"))
 ```
 
@@ -18,13 +23,24 @@ orders = bot.act(game.player_view("p1"))
 | `economist` | peaceful builder, sells surplus, hoards gold, weak defence | economic | medium |
 | `rusher` | infantry/cavalry rush on the nearest weak capital | conquest | medium (feast or famine) |
 | `turtle` | walls, archers, treaties; wonder or temples | wonder / influence | medium |
-| `strategist` | adaptive: picks the fastest race, raids, relic control, threat response | whatever is fastest | strongest |
+| `strategist` | adaptive: picks the fastest race, raids, relic control, threat response; the skilled trader | whatever is fastest | strongest |
 | `strategist_lite` | handicapped strategist (for the skill ladder) | economic | between |
+| `strategist_notrade` | the strategist with barter switched off (ablation baseline) | whatever is fastest | strong |
+
+How they barter (details under each bot and in [Barter](#barter-13)):
+
+| bot | proposes | answers |
+|-----|----------|---------|
+| `random` | now and then a random resource-for-gold swap at a random price | accepts 25% / rejects 25% of offers at random (the only bot that takes losing deals — within limits, see below) |
+| `economist` | its surplus at a fair price; **loans** (gold now, ~20% more back over 15 turns) to solvent players | accepts above a small margin, one fair counter |
+| `turtle` | gold for **peace** with armies that threaten it; the stone/wood its wonder stage lacks, in the build turn | accepts above a margin (values peace ×1.5), one fair counter |
+| `rusher` | **tribute** (gold per turn + a 15-turn peace) from weaker neighbours its army threatens | greedy counters; peace with its target costs the spoils of conquest; honours contracts and treaties only while that pays |
+| `strategist` | exploits needs (sells overflow at a premium, buys what its race lacks), borrows to fund its race, buys peace from armies at its gates, probes for sloppy traders | haggles: anchors high, concedes step by step; refuses the leader and anything that feeds a rival's race |
 
 Every bot is deterministic for a given `seed` and sequence of views. None of
 them does I/O, none raises (see `SafeBot` below), and each takes a few
-milliseconds per turn (the strategist averages about 7 ms per turn at 6
-players).
+milliseconds per turn: the strategist averages about 9 ms per `act` and
+under 2 ms per `negotiate` call at 6 players.
 
 ## Measured strength
 
@@ -33,12 +49,19 @@ The results below use the current constants and
 every game uses its own map seed. Full tables, the rule changes behind them
 and more fields: docs/BALANCE.md.
 
-| field (6 players, 240 games, seed 1) | strategist win% / avg place | next best |
-|------|------|------|
-| A: `strategist,economist,rusher,turtle,random,random` | 52.9% / 1.87 | economist 21.7% / 2.64 (turtle place 2.50) |
-| B: `strategist,economist,rusher,turtle,economist,turtle` | 54.2% / 2.38 | turtle 15.0% / 3.10 |
+| field (6 players, 240 games, seed 1, with barter) | strategist win% / avg place | next best | deals per game |
+|------|------|------|------|
+| A: `strategist,economist,rusher,turtle,random,random` | 51.2% / 1.93 | economist 24.6% / 2.61 (turtle place 2.48) | 16.7 |
+| B: `strategist,economist,rusher,turtle,economist,turtle` | 53.3% / 2.26 | economist 17.9% / 3.83 (turtle place 3.11) | 11.5 |
 
-The random bots place last (5.36–5.37 in field A).
+The random bots place last (5.27–5.37 in field A). Without barter
+(`--rounds 0`) the strategist wins 52.9% / 57.5%. Trading ablation: in the
+same games (`strategist,strategist_notrade,economist,rusher,turtle,random`)
+the trading strategist wins 33.8% (place 2.58), the non-trading one 24.6%
+(place 2.70); in separate fields the difference is within noise
+(docs/BALANCE.md §5).
+
+The numbers below predate barter:
 
 **Strategist against 5 copies of one bot** (60 games each, seed 3):
 
@@ -58,6 +81,7 @@ Reproduce with:
 ```
 python -m agentciv.tournament --games 240 --players 6 --seed 1 --jobs 4
 python -m agentciv.tournament --bots strategist,economist,rusher,turtle,economist,turtle --games 240 --seed 1 --jobs 4
+python -m agentciv.tournament --bots strategist,strategist_notrade,economist,rusher,turtle,random --games 240 --seed 1 --jobs 4
 python -m agentciv.tournament --bots strategist,rusher,rusher,rusher,rusher,rusher --games 60 --seed 3 --jobs 4
 ```
 
@@ -69,6 +93,13 @@ fitting improvement or city building, recruit random units, trade a random
 amount on the market, settle, or accept or propose treaties at random. It also
 moves random parts of its stacks one step in random directions. It never
 plans, so it wastes resources and scatters its army.
+
+In negotiations it proposes a random resource-for-gold swap at 60–150% of
+the spot price about once every 7 turns, and accepts a quarter and rejects a
+quarter of the offers it gets, at random. Because it fills seats in rated
+quickmatch games it cannot be milked: it accepts at most one deal per turn and
+never one that hands over land or a contract, more than half of any stock, or
+more than 1.5x the market value it receives.
 
 ### economist (`economist.py`)
 * **Diplomacy:** accepts every treaty and proposes 25-turn treaties to
@@ -91,6 +122,16 @@ plans, so it wastes resources and scatters its army.
   capital plunders half its gold.
 * **Relic streaks:** like every planner bot it attacks the weakest guarded
   relic of a hostile player whose relic streak runs (see `counter_relics`).
+* **Trading:** offers its surplus (stock above its small keep levels) to the
+  player who needs it most at a *fair* price (half of the estimated gain
+  from the trade each — both save the market fee and slippage). A patient
+  lender (it discounts future gold by only 0.5% per turn): from turn 12,
+  while its own gold race is far off (under half the target), it offers
+  **loans** — up to 600 gold, about 22 turns of the borrower's gold income,
+  and no more than the borrower's credit limit (below),
+  repaid with 20% interest over 15 turns — to one solvent player at a time
+  (gold income, no defaults, able to pay, not close to winning) that has a
+  use for gold; at most 35% of its gold is out on loan.
 
 ### rusher (`rusher.py`)
 * **Recruiting:** from turn 0 it turns food, wood and gold into attackers,
@@ -110,6 +151,18 @@ plans, so it wastes resources and scatters its army.
   spare stone, and disbands units rather than let them starve.
 * **Treaties:** accepts them only from players it is not targeting, and never
   proposes one.
+* **Extortion:** demands tribute — gold per turn for 10 turns plus a 15-turn
+  peace — from a weaker rival its army threatens (army within reach ≥ 1.3×
+  their defence), but not from its current target unless that assault has
+  stalled. Peace with its target is worth minus the expected spoils
+  (plunder + 250, scaled by how feasible the assault looks), so buying it
+  off costs real money. Counters are greedy (asks 65%, concedes 25%).
+* **Opportunist:** reserves gold for its contract instalments only while the
+  payee's army is at least 70% of its own (otherwise the army gets the gold
+  and the contract may default). It breaks a peace treaty (50 influence)
+  when the partner defaulted on tribute to it, or when the partner no
+  longer pays and its army near the partner is ≥ 1.8× the partner's
+  defence.
 
 ### turtle (`turtle.py`)
 * **Diplomacy:** proposes 30-turn treaties to everyone and accepts every
@@ -125,6 +178,13 @@ plans, so it wastes resources and scatters its army.
   cap) or **influence** (temples on every tile that can hold one, buying the
   stone for them). It picks influence only when its estimate is clearly
   faster than the wonder (×0.65), and never abandons a wonder at stage 2+.
+* **Trading:** **buys peace** — offers gold for 30 turns of peace to the
+  rival whose army threatens it most (it values peace 1.5× the shared
+  threat estimate) — and pays a tribute demand when the peace is worth
+  more. In the turn it can afford the next wonder stage it **bids for the
+  missing stone/wood** from players with spare stock (cheaper than the
+  market with slippage and fee; never above its storage cap otherwise). It
+  sells surplus food.
 
 ### strategist (`strategist.py`)
 It uses the economist's economy, then adds these behaviours on top:
@@ -178,10 +238,115 @@ It uses the economist's economy, then adds these behaviours on top:
 6. **Market.** It sells surplus before it overflows the caps. Voluntary sales
    are split so that the batch price stays within about 8% of the spot price;
    the rest waits a turn.
+7. **Trading — the skilled trader.**
+   * *Haggling:* it accepts an offer only if it leaves it a share of the
+     estimated joint gain that starts at 80% (anchoring) and drops by 12
+     points per counter in the thread, to 50% (45% in the last round of a
+     turn). Otherwise it counters (up to 3 times per thread), moving the
+     gold term to that share but conceding at least 30% of the gap between
+     its last offer and theirs, so the positions converge.
+   * *Exploiting needs:* it sells only what would overflow its storage caps
+     (its stock feeds its own growth; all surplus when racing for gold),
+     only to players who need it, at a
+     price leaving the buyer just its acceptance margin and at least 10%
+     above what the market would pay. It buys the stone/wood its wonder
+     needs (up to the storage cap, or all of it in the build turn) from
+     players with spare stock.
+   * *Never feeding a rival:* it refuses deals with the leader once the
+     leader threatens to win first (or has 45% progress), never gives a
+     contender (a rival whose victory ETA is not far behind its own) what
+     its race runs on (gold for the economic race; stone, wood, gold for the
+     wonder; stone, gold for temples), never signs peace with a contender or
+     a raid/block target, and sells no food/wood to armies that could march
+     on it (or on anyone). Stone for a wonder builder is fine only while it
+     does not make stage 3+ affordable (guard 0.55 instead of 0.7).
+   * *Funding its race with contracts:* when committed to the wonder or
+     influence race (ETA ≤ 35) and short of gold, it borrows (up to 1500,
+     half the lender's gold, instalments ≤ 30% of its potential gold
+     income) for 30 turns at 25% — from the leader too, whose gold then
+     leaves it. Before the next-but-one wonder stage it pre-finances that
+     one as well (lenders only check whether the *next* stage becomes
+     affordable). Its own instalments only count until its expected victory
+     (ETA + 3 turns), so long loans are cheap for it. It never pays interest
+     on loans others push on it.
+   * *Tribute:* accepts gold for peace only from players it has no plans
+     against; buys peace itself from an army at its gates when that is
+     cheaper than a war (so it marches on someone else).
+   * *Opponent modelling:* it offers to buy partners' spare stock at 40% of
+     the spot price. Rational bots refuse (and the offer then waits longer
+     each time, 4 up to 16 turns); a partner that accepts gets them again.
 
 `strategist_lite` is a handicapped strategist (fixed economic race, no raids,
 no relic campaigns, short treaties) used for the skill ladder in
-docs/BALANCE.md.
+docs/BALANCE.md. `strategist_notrade` is the strategist with `TRADE = False`
+(it never negotiates; same random tie-breaks), the baseline for measuring
+what barter is worth.
+
+## Barter (§13)
+
+All planner bots (economist, rusher, turtle, strategist) share the
+negotiation machinery of `trading.py` and the valuation of `common.py`;
+each bot supplies its needs, its peace preferences and its own proposals.
+
+**Valuation (`DealValuer`, `common.py`).** Every term of a deal is priced in
+gold, for any player, from public information:
+
+* **Resources** have a marginal value. The part a player *needs* (stock
+  below its target: keep levels, a winter food buffer, the next contract
+  instalments, the next wonder stage or temples, investments waiting for
+  gold) is worth what buying it on the market would cost (spot + slippage +
+  fee); the rest is worth what selling it would bring (spot − slippage −
+  fee). The difference is what makes a trade good for both sides. Other
+  players' needs are estimated (a wonder builder needs its next stage;
+  above its storage cap only if it can build this turn).
+* **Tiles:** yield over (part of) the remaining game; more for the giver when
+  the tile touches its city. A received tile is worth **nothing** while an
+  army of another player that is not bound to us by a treaty (or by the
+  deal's own peace) for 10+ more turns could march onto it within 3 turns —
+  undefended land is captured by moving onto it, so the seller could simply
+  take it back.
+* **Contracts:** instalments discounted per turn (0.97; the economist 0.995)
+  and, for the receiver, weighted by the payer's reliability: reputation
+  (defaults, betrayals, contracts honoured) and ability to pay (income incl.
+  sellable production minus existing obligations). A bot may cap its own
+  payments at a horizon (the strategist: its expected victory). **Credit
+  limit:** when the bot hands over goods now against instalments later (a
+  loan), it counts at most 150 gold of instalment value per payer, ×(1 +
+  contracts honoured, max 4), and nothing after a default.
+* **Peace:** base value plus the threat the other side poses — its army
+  within 3 turns of our cities against our defence — scaled by the length;
+  plus a bot-specific bias (e.g. −(spoils of conquest) for the rusher's
+  target, −400 for relic runners).
+* **The guard:** `danger(world, q)` is `q`'s best victory progress
+  (conquest only once a rival capital is taken); `helps_winner` also
+  projects the deal (net gold for the economic race, next wonder stage
+  affordable). Bots never deal with a player at 0.7+ (strategist 0.55) or
+  one the deal would bring there.
+* **War supplies:** no bot sells food or wood to a hostile army that can
+  reach it, to a conqueror (2+ capitals) or to an army 1.5× the average.
+
+**Negotiation loop (`Trader`, `trading.py`).** One call of
+`negotiate(view)`:
+
+1. Incoming deals: rejected if they cannot settle, come from a refused
+   partner, would help a near-winner or fail the bot's veto; accepted if the
+   gain clears `ACCEPT_MARGIN` (2) + `ACCEPT_FRACTION` (1.5%) of the deal's
+   size (or the bot's own threshold); otherwise countered — gold moved to
+   the bot's share of the joint surplus, conceding `CONCEDE` of the gap to
+   the last offer — while the thread has counters left (`COUNTER_LIMIT`),
+   accepted when the remaining gap is crumbs, else rejected. At most one
+   acceptance per round (valuations use the stock before the round).
+2. Own open proposals that turned bad are withdrawn.
+3. New proposals (`trade_proposals`), at most 2–3 per turn and one open deal
+   per partner. The kind travels in the message (`"[sell] 60 stone for 120
+   gold"`, `[buy]`, `[loan]`, `[peace]`, `[tribute]`, `[bargain]`); a
+   rejected or expired kind cools down per partner (4, 8, 12, 16 turns).
+
+Negotiation leaves no traces in `act()` state (tested: a dry run that
+evaluates everything but sends nothing plays exactly like no negotiation).
+In `act()`, planners reserve the gold (or other resource) their contract
+instalments need this turn beyond what this turn's income covers (wonder
+builds with market purchases keep it too; emergency defence does not).
 
 ## Building blocks (`common.py`, `planner.py`)
 
@@ -218,8 +383,19 @@ Both modules are useful if you write your own in-process bot.
     already planned this turn: claimed tiles, moved units and the tile count
     for claim costs.
 * `SafeBot` is a `Bot` base class. Its `act()` never raises (on an error it
-  returns the orders planned so far) and it provides a seeded `self.rng` and
-  `self.memory` across turns.
+  returns the orders planned so far), nor does its `negotiate()` (it calls
+  `decide_deals(view)`; `TRADE = False` switches barter off), and it
+  provides a seeded `self.rng` and `self.memory` across turns.
+* Barter (see [Barter](#barter-13)): `DealValuer(world, needs, gold_need,
+  discount, horizon, peace_bias)` with `deal_gain(deal, pid)`,
+  `recv_value`/`give_cost`, `contract_value`, `peace_value`, `threat`,
+  `helps_winner`; `danger(world, pid)`; `spot_prices`,
+  `contract_obligations`. The `Trader` mixin (`trading.py`) runs the
+  negotiation loop; override `trade_setup`, `trade_needs`,
+  `trade_horizon`, `peace_bias`, `refuse_partner`, `veto`,
+  `accept_threshold`, `counter_share` and `trade_proposals`, and build
+  proposals with `priced` (split the joint gain), `sale_offers`,
+  `purchase_bids` and `peace_offers`.
 * `PlannerBot` (in `planner.py`) is a `SafeBot` whose turn is a pipeline of
   behaviours:
   * `diplomacy`, `food_safety`, `plan_site`, `defend`, `counter_relics`,
@@ -236,7 +412,11 @@ Both modules are useful if you write your own in-process bot.
 
   Class-level knobs tune it, for example `INFLUENCE_WEIGHT`,
   `DEFENSE_MARGIN`, `MIN_GARRISON`, `SELL_FLOOR`, `DEFENSIVE_WALLS`,
-  `DEFENSE_BUY_FRACTION`, `BUY_FOR_IMPROVEMENTS`, `COUNTER_RELICS`. The
+  `DEFENSE_BUY_FRACTION`, `BUY_FOR_IMPROVEMENTS`, `COUNTER_RELICS`, and for
+  barter `ACCEPT_MARGIN`, `ACCEPT_FRACTION`, `COUNTER_LIMIT`,
+  `COUNTER_SHARE`, `CONCEDE`, `WIN_GUARD`, `DISCOUNT`, `PEACE_SCALE`,
+  `MAX_NEW_PER_TURN`. A `PlannerBot` is also a `Trader`; it reserves its
+  contract instalments (`honour_contract(c)` decides per contract). The
   economist, rusher, turtle and strategist are all `PlannerBot` subclasses.
 
 ## Writing your own bot
@@ -269,9 +449,10 @@ REGISTRY["mybot"] = "agentciv.bots.mybot:MyBot"
 
 Then try it with
 `python -m agentciv.tournament --bots mybot,strategist,economist,rusher,turtle,random --games 40`.
-For full control, subclass `SafeBot` and implement `decide(view) -> list`.
-Or subclass the plain `Bot` and implement `act(view)`, but then you must never
-raise.
+For full control, subclass `SafeBot` and implement `decide(view) -> list`
+(and `decide_deals(view) -> list` to barter). Or subclass the plain `Bot`
+and implement `act(view)` (and optionally `negotiate(view)`), but then you
+must never raise.
 
 **Remote** (any language): implement the same view → orders function
 yourself and play over HTTP (docs/DESIGN.md §12) or with the Python client
@@ -295,13 +476,28 @@ SDK (`agentciv/client.py`). A few tips from building these bots:
 * **Treaty partners can't enter each other's land.** To stop a partner,
   gather at the border first, then `break_treaty` (50 influence). You can
   fight that turn but only walk in on the next.
+* **Barter beats the market** by the fee and the slippage on both sides —
+  but only sell what you would otherwise sell anyway (the built-in bots
+  learned that the hard way: a strategist selling its "surplus" stone and
+  wood lost 7 points of win rate), never feed the player about to win, and
+  don't sell food to the biggest army around.
+* **Contracts outlive games**: instalments after the game has ended are
+  never paid, and a default only costs 25 influence and reputation. Lend to
+  players with income and a clean record; borrow long when you are close
+  to winning.
 
 ## Tournament runner
 
 ```
 python -m agentciv.tournament --bots strategist,economist,rusher,turtle,random,random \
-    --games 40 --players 6 --seed 1 [--max-turns 150] [--jobs 4] [--json out.json]
+    --games 40 --players 6 --seed 1 [--max-turns 150] [--jobs 4] [--rounds 3] [--json out.json]
 ```
+
+* **Negotiation:** every turn starts with `--rounds` (default 3, §13.6)
+  negotiation rounds. In each round every living bot, in a seat order that
+  rotates by turn and round, gets a fresh view and its `negotiate` actions
+  are applied at once (`Game.diplomacy`). `--rounds 0` plays without
+  barter.
 
 * **Isolation:** games run in-process against the engine, and each game gets
   fresh bots.
@@ -318,16 +514,25 @@ The report lists per bot:
 * games, wins, win rate, average placement and average score;
 * OpenSkill rating (`agentciv.ratings`, displayed as mu − 3σ);
 * wins by condition;
-* pre-validation errors per game and think time per turn.
+* pre-validation errors per game and think time per turn (`act`), plus
+  `negotiate` time per turn, per call and the maximum;
+* trade statistics per game: proposals and counters sent, deals accepted,
+  deals executed (either side), peace deals, contracts as payer / payee,
+  defaults, instalments and gold paid / received, betrayals, contracts
+  honoured, diplomacy actions rejected by the engine, and the net value
+  received at base market prices (`trade_per_game`).
 
 It also shows overall stats: the distribution of ending conditions, game
 length (median and average) and time per game, and the win rate by **start
 slot** (the index of the start position in `mapgen.start_layout(n)`, i.e. the
-map position independent of the seed's orientation) and by seat (`p1`…).
+map position independent of the seed's orientation) and by seat (`p1`…),
+and deals per game in total and by kind (the `[kind]` tag of the built-in
+bots' deal messages).
 Six identical bots measure positional fairness by start slot. `--json` writes
 the full summary, including per-game results (seats with their start slot,
 placements, scores, errors, timings).
 
-For programmatic use: `run_game(bot_specs, seed, max_turns)` returns one
-game's result dict. `run_tournament(...)` returns the summary, and
+For programmatic use: `run_game(bot_specs, seed, max_turns, rounds=3)`
+returns one game's result dict (with `trade`, `deal_kinds`,
+`deals_executed`, `negotiate_ms_*`). `run_tournament(...)` returns the summary, and
 `format_summary(...)` renders it.

@@ -5,8 +5,9 @@ spectator view when ``pid`` is None. Everything returned is freshly built
 plain JSON data (safe for callers to mutate).
 
 The spectator view is served without authentication, so while the game is
-not finished it is *public*: only public messages and events, no trade
-offers or treaty proposals (anyone could otherwise drop their token and read
+not finished it is *public*: only public messages and events, no open or
+closed deals (only the public log of executed deals and the contracts), no
+trade offers or treaty proposals (anyone could otherwise drop their token and read
 the other players' private diplomacy). ``full=True`` (or a finished game)
 gives the omniscient view.
 """
@@ -15,6 +16,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from . import constants as C
+from . import deals as D
 from .rules import claim_cost, rules_json, season, settle_cost, thresholds
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -83,6 +85,9 @@ def build_view(g: "Game", viewer: str | None, full: bool = False) -> dict:
             "relics_guarded": s["relics_guarded"],
             "relic_streak": p.relic_streak,
             "betrayals": p.betrayals,
+            "reputation": {"deals": p.deals, "contracts_honoured": p.contracts_honoured,
+                           "defaults": p.defaults, "betrayals": p.betrayals,
+                           "influence_debt": p.influence_debt},
             "score": s["score"],
             "submitted": g.has_submitted(p.id),
             "victory_progress": dict(s["victory_progress"]),
@@ -159,9 +164,8 @@ def build_view(g: "Game", viewer: str | None, full: bool = False) -> dict:
         "treaties": [{"a": a, "b": b, "until_turn": u} for (a, b), u in sorted(g.treaties.items())],
         "treaty_proposals": [dict(pr) for pr in g.treaty_proposals
                              if pr["turn"] == g.turn - 1 and involves(pr["from"], pr["to"])],
-        "trade_offers": [{"id": o["id"], "from": o["from"], "to": o["to"], "give": dict(o["give"]),
-                          "want": dict(o["want"]), "turn": o["turn"], "expires_turn": o["expires_turn"]}
-                         for o in g.trade_offers if involves(o["from"], o["to"])],
+        "trade_offers": D.legacy_trade_offers(g, viewer, omniscient),
+        **D.view_part(g, viewer, omniscient),
         "messages": messages,
         "events": events,
         "victory": {

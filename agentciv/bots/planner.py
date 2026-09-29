@@ -15,14 +15,15 @@ from agentciv.engine import combat as CB
 from agentciv.engine import constants as C
 from agentciv.engine.rules import claim_cost, settle_cost
 
-from .common import (CAPPED, SafeBot, World, add_units, base_price,
+from .common import (CAPPED, Plan, SafeBot, World, add_units, base_price,
                      best_counter, best_improvement, buy_price, food_projection,
                      raw_income, raw_strength, season_mods, simulate_attack,
                      threat_to, tile_yield, total_units,
                      treaty_proposals_to_me, value_of)
+from .trading import Trader
 
 
-class PlannerBot(SafeBot):
+class PlannerBot(Trader, SafeBot):
     """Base class with reusable behaviours. See subclasses for strategies."""
 
     name = "planner"
@@ -106,6 +107,7 @@ class PlannerBot(SafeBot):
         self.site_path: list = []
         rem = max(1, w.max_turns - w.turn)
         self.remaining = rem
+        self.reserve_contracts()
         self.note_contested()
         # per-game random tie-breaker per tile: breaking ties by tile index
         # would favour one map direction (and so some start positions)
@@ -113,6 +115,77 @@ class PlannerBot(SafeBot):
         if salt is None or len(salt) != w.n_tiles:
             salt = self.memory["salt"] = [self.rng.random() for _ in range(w.n_tiles)]
         self.salt = salt
+
+    # ------------------------------------------------------------------
+    # contracts (§13.3): keep what the instalments due this turn need
+    # ------------------------------------------------------------------
+    def honour_contract(self, c: dict) -> bool:
+        """Reserve this turn's instalment of contract ``c`` (we are the
+        payer)? Default: always — a default costs influence and reputation."""
+        return True
+
+    def reserve_contracts(self) -> None:
+        """Instalments are paid in phase 7 after yields: keep what this
+        turn's income will not cover."""
+        w = self.w
+        due: dict = {}
+        self.contract_due = due
+        for c in w.view.get("contracts", []) or []:
+            if c.get("payer") != w.me or not self.honour_contract(c):
+                continue
+            for r, v in (c.get("per_turn") or {}).items():
+                due[r] = due.get(r, 0) + int(v)
+        self.contract_due = due
+        if not due:
+            return
+        mods = season_mods(w.turn)
+        for r, v in due.items():
+            inc = math.floor(self.raw.get(r, 0) * mods.get(r, 1.0))
+            if r == "food":
+                inc -= w.upkeep
+            keep = v - int(0.8 * max(0, inc))
+            if keep > 0:
+                self.reserved[r] = self.reserved.get(r, 0) + keep
+
+    # ------------------------------------------------------------------
+    # negotiation (§13) — see agentciv.bots.trading.Trader
+    # ------------------------------------------------------------------
+    def trade_setup(self, w: World) -> None:
+        self.w = w
+        self.p = Plan(w)
+        self.raw = raw_income(w)
+        self.wts = self.weights()
+        self.reserved = {}
+        self.locked = {}
+        self.food_short = False
+        self.remaining = max(1, w.max_turns - w.turn)
+        self.__dict__.pop("_threat_cache", None)
+
+    def trade_needs(self) -> tuple:
+        """Stock we want to keep: the keep levels, a winter food buffer and
+        the next instalments of our contracts."""
+        w = self.w
+        needs = {r: self.keep(r) for r in CAPPED}
+        needs["food"] += 4 * w.upkeep
+        food_raw = self.raw.get("food", 0)
+        if food_projection(w, food_raw, w.upkeep, self.FOOD_BUFFER_TURNS) < 20:
+            needs["food"] += 60
+        gold = 0
+        inv = self.memory.get("invest_short")
+        if inv and inv[0] >= w.turn - 1 and inv[1] > 0:
+            # good investments are waiting for gold: gold now is worth more
+            gold = int(w.res.get("gold", 0)) + inv[1]
+        from .common import contract_obligations
+        for r, v in contract_obligations(w).items():
+            if r == "gold":
+                gold += 2 * v
+            elif r in needs:
+                needs[r] += 2 * v
+        return needs, gold
+
+    def peace_bias(self) -> dict:
+        # no peace with relic runners: we may have to hit their relics
+        return {q: -400.0 for q in self.w.rivals if self.relic_runner(q)}
 
     def weights(self) -> dict:
         w = self.w
@@ -521,6 +594,8 @@ class PlannerBot(SafeBot):
             cands.append((roi, i, b))
         cands.sort(key=lambda t: (-round(t[0], 9), self.salt[t[1]]))
         n = 0
+        short = 0.0         # value of good investments we could not afford (for loans, §13)
+        skipped = 0
         for roi, i, b in cands:
             if n >= limit:
                 break
@@ -529,6 +604,10 @@ class PlannerBot(SafeBot):
                 self.buy_missing(cost)
             if p.can(cost, self.reserved) and p.improve(i, b):
                 n += 1
+            elif skipped < 4 and roi >= 1 / 30.0:
+                skipped += 1
+                short += value_of(cost, self.wts) / max(0.1, self.wts.get("gold", 1.0))
+        self.memory["invest_short"] = (w.turn, int(short))
 
     def buy_missing(self, cost: dict, max_mult: float = 1.3) -> bool:
         """Buy the stone/wood/food missing for ``cost`` (beyond reserves) if
@@ -847,7 +926,9 @@ class PlannerBot(SafeBot):
         cost = p.city_build_cost(city, building)
         if cost is None:
             return False
-        keep = reserve or {}
+        keep = dict(reserve or {})
+        for r, v in getattr(self, "contract_due", {}).items():   # instalments due this turn
+            keep[r] = max(keep.get(r, 0), v)
         short = {r: cost[r] - (p.budget.get(r, 0) - keep.get(r, 0)) for r in cost
                  if r in C.MARKET_RESOURCES and cost[r] > p.budget.get(r, 0) - keep.get(r, 0)}
         gold = cost.get("gold", 0) + keep.get("gold", 0)

@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from . import constants as C
+from . import deals as D
 
 if TYPE_CHECKING:  # pragma: no cover
     from .game import Game
@@ -21,6 +22,9 @@ ORDER_TYPES = (
     "move", "recruit", "build", "claim", "settle", "disband", "market",
     "offer_trade", "accept_trade", "propose_treaty", "accept_treaty",
     "break_treaty", "message",
+    # diplomacy actions (§13), processed in phase 1; the three legacy names
+    # above (offer_trade, accept_trade, message) are aliases of these
+    "propose", "counter", "accept", "reject", "withdraw", "say",
 )
 
 
@@ -40,7 +44,7 @@ def as_int(v, what: str = "value") -> int:
         return int(v)
     if isinstance(v, str):
         s = v.strip()
-        if s.lstrip("-").isdigit():
+        if s.isascii() and s.lstrip("-").isdigit() and len(s) <= 12:
             return int(s)
     raise OrderError(f"{what} must be an integer")
 
@@ -81,8 +85,10 @@ class _Ctx:
         self.city_builds: dict = {}    # (tile, building) -> count
         self.wonder = False
         self.messages = 0
+        self.dip_actions = 0
+        self.proposals = 0
+        self.deal_refs: set = set()     # deals acted on earlier in this list
         self.treaty_targets: set = set()
-        self.accepted_offers: set = set()
         self.accepted_treaties: set = set()
         self.broken: set = set()
 
@@ -360,29 +366,34 @@ class Validator:
                 raise OrderError("limit must be > 0")
         return {"type": "market", "side": side, "resource": r, "qty": qty, "limit": limit}
 
-    def v_offer_trade(self, o: dict) -> dict:
-        to = self.other_player(o.get("to"), "to")
-        give = self.resources(o.get("give"), "give")
-        want = self.resources(o.get("want"), "want")
-        if not give and not want:
-            raise OrderError("trade must give or want something")
-        return {"type": "offer_trade", "to": to, "give": give, "want": want}
+    def v_diplomacy(self, o: dict) -> dict:
+        """Any diplomacy action (§13). Checked against the current state
+        now and again when it is applied in phase 1."""
+        try:
+            a = D.parse_action(o, self.g.width, self.g.height)
+        except D.DealError as e:
+            raise OrderError(str(e)) from None
+        ctx = self.ctx
+        if ctx.dip_actions >= C.DIPLOMACY_ACTIONS_PER_TURN:
+            raise OrderError(f"at most {C.DIPLOMACY_ACTIONS_PER_TURN} diplomacy actions per turn")
+        if a["type"] == "say" and ctx.messages >= C.SAY_PER_TURN:
+            raise OrderError(f"at most {C.SAY_PER_TURN} messages per turn")
+        if "deal" in a and a["deal"] in ctx.deal_refs:
+            raise OrderError(f"deal {a['deal']} is already used by an earlier order")
+        err = D.check(self.g, self.pid, a, extra_open=ctx.proposals)
+        if err:
+            raise OrderError(err)
+        ctx.dip_actions += 1
+        if a["type"] == "say":
+            ctx.messages += 1
+        if a["type"] in ("propose", "counter"):
+            ctx.proposals += 1
+        if "deal" in a:
+            ctx.deal_refs.add(a["deal"])
+        return {"type": o["type"], "action": a}
 
-    def v_accept_trade(self, o: dict) -> dict:
-        oid = o.get("offer_id", o.get("id"))
-        if isinstance(oid, int) and not isinstance(oid, bool):
-            oid = f"t{oid}"
-        oid = as_str(oid, "offer_id")
-        off = self.g.trade_offer(oid)
-        if off is None or off["to"] != self.pid:
-            # same message either way: must not reveal other players' offers
-            raise OrderError(f"no open trade offer {oid!r} addressed to you")
-        if off["turn"] >= self.g.turn:
-            raise OrderError(f"trade offer {oid} cannot be accepted until next turn")
-        if oid in self.ctx.accepted_offers:
-            raise OrderError("offer already accepted in this order list")
-        self.ctx.accepted_offers.add(oid)
-        return {"type": "accept_trade", "offer_id": oid}
+    v_propose = v_counter = v_accept = v_reject = v_withdraw = v_say = v_diplomacy
+    v_offer_trade = v_accept_trade = v_message = v_diplomacy
 
     def v_propose_treaty(self, o: dict) -> dict:
         to = self.other_player(o.get("to"), "to")
@@ -415,20 +426,6 @@ class Validator:
             raise OrderError("duplicate break_treaty")
         self.ctx.broken.add(w)
         return {"type": "break_treaty", "with": w}
-
-    def v_message(self, o: dict) -> dict:
-        to = o.get("to", "all")
-        if to != "all":
-            to = self.other_player(to, "to")
-        text = as_str(o.get("text"), "text")
-        if not text.strip():
-            raise OrderError("text must not be empty")
-        if len(text) > C.MAX_MESSAGE_LENGTH:
-            raise OrderError(f"text longer than {C.MAX_MESSAGE_LENGTH} characters")
-        if self.ctx.messages >= C.MAX_MESSAGES_PER_TURN:
-            raise OrderError(f"at most {C.MAX_MESSAGES_PER_TURN} messages per turn")
-        self.ctx.messages += 1
-        return {"type": "message", "to": to, "text": text}
 
 
 def prevalidate(game: "Game", pid: str, raw_orders) -> tuple[list, list]:

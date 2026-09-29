@@ -34,17 +34,38 @@ every turn and adapts:
   market sales split so the batch price stays near the spot price, and a
   random back-off when a claim/settle was contested (two players retrying
   the same tile would both fail forever).
+* **Trading (§13): the skilled trader.**
+
+  - *Haggling*: incoming offers are accepted only if they leave it a share
+    of the estimated joint surplus that starts high (anchoring, 0.8) and
+    drops with every counter in the thread (concessions converging to
+    0.5; a bit less in the last round of a turn); otherwise it counters
+    (up to 3 times) with the gold term moved to that share.
+  - *Exploiting needs*: it sells its surplus to the players who need it
+    most and buys what its race needs from players with spare stock, priced
+    so the partner keeps only about its acceptance margin; but it never
+    sells to the leader, nor anything that would bring a player within
+    reach of victory (e.g. stone to a wonder builder only while that
+    doesn't make stage 3+ affordable).
+  - *Funding its path with contracts*: when committed to the wonder or
+    influence race and short of gold, it borrows (gold now, gold per turn
+    later); its own instalments only count until its expected victory.
+  - *Tribute*: accepts peace-for-gold from players it has no plans against
+    (never from its raid/prey/block targets or the leader); pays a tribute
+    demand only when the threat is worth more than the tribute.
 """
 from __future__ import annotations
 
+import copy
 import math
+import random
 
 from agentciv.engine import combat as CB
 from agentciv.engine import constants as C
 from agentciv.engine.rules import building_cost
 
-from .common import (CAPPED, add_units, base_price, best_counter, season_mods,
-                     sell_price, simulate_attack, threat_to,
+from .common import (CAPPED, add_units, base_price, best_counter, danger,
+                     season_mods, sell_price, simulate_attack, threat_to,
                      treaty_proposals_to_me, wonder_city)
 from .planner import PlannerBot
 
@@ -87,6 +108,23 @@ class StrategistBot(PlannerBot):
     BLOCK_PATIENCE = 25           # give up a block after this many turns...
     BLOCK_COOLDOWN = 15           # ...for this many turns
 
+    # trading
+    COUNTER_LIMIT = 3
+    WIN_GUARD = 0.55              # stricter than the others: nobody gets near a win with our help
+    ANCHOR_SHARE = 0.8            # first ask: 80% of the joint surplus...
+    MIN_SHARE = 0.5               # ...conceding toward an even split
+    CONCESSION = 0.12             # per counter in the thread
+    MAX_NEW_PER_TURN = 3
+    LOAN_MAX = 1500
+    LOAN_TURNS = 30               # long loans: instalments after our victory are never paid
+    LOAN_INTEREST = 0.25
+    LOAN_ETA = 35                 # borrow only this close to our expected victory
+    LOAN_INCOME_SHARE = 0.3       # instalments at most this share of our potential gold income
+    LEADER_REFUSE = 0.45          # refuse the leader once its progress reaches this
+    CONCEDE = 0.3                 # concede 30% of the gap per counter (others: 50%)
+    BARGAIN_PRICE = 0.3           # probe offers: their spare stock at 30% of spot
+    SELL_PREMIUM = 1.1            # our sales: at least 110% of what the market pays
+
     def pipeline(self):
         return [self.observe, self.diplomacy, self.food_safety, self.plan_site, self.defend,
                 self.plan_goal_spending, self.relic_ops, self.plan_military, self.sell, self.goal_spending,
@@ -100,6 +138,291 @@ class StrategistBot(PlannerBot):
             self.plan_raid()
         elif self.USE_BLOCK:
             self.block()
+
+    # ------------------------------------------------------------------
+    # negotiation (§13)
+    # ------------------------------------------------------------------
+    # state that observe()/plan_goal_spending() update; negotiation must not
+    # leave traces in it (act() recomputes it once per turn, and repeated
+    # updates would change the path hysteresis)
+    _OBSERVED_MEMORY = ("hist", "wstage", "relic_progress", "path")
+    _GOAL_KNOBS = ("SELL_FLOOR", "MIN_ROI", "TEMPLE_BIAS", "INFLUENCE_WEIGHT",
+                   "BUY_FOR_IMPROVEMENTS", "INFLUENCE_RESERVE")
+
+    def trade_setup(self, w) -> None:
+        super().trade_setup(w)
+        mem = {k: copy.deepcopy(self.memory[k]) for k in self._OBSERVED_MEMORY if k in self.memory}
+        knobs = {k: self.__dict__[k] for k in self._GOAL_KNOBS if k in self.__dict__}
+        try:
+            self.observe()
+            self.plan_goal_spending()
+        finally:
+            for k in self._OBSERVED_MEMORY:
+                if k in mem:
+                    self.memory[k] = mem[k]
+                else:
+                    self.memory.pop(k, None)
+            for k in self._GOAL_KNOBS:
+                if k in knobs:
+                    self.__dict__[k] = knobs[k]
+                else:
+                    self.__dict__.pop(k, None)
+
+    def goal_order(self):
+        """(city, next wonder stage cost) when the wonder is our race."""
+        w = self.w
+        wc = wonder_city(w)
+        if not (self.goal == "wonder" or (wc is not None and w.cities[wc].get("wonder_stage", 0) >= 3)):
+            return None
+        home = wc or self.home()
+        if home is None:
+            return None
+        st = w.cities[home].get("wonder_stage", 0)
+        if st >= C.WONDER_VICTORY_STAGE:
+            return None
+        return home, building_cost("wonder", st + 1)
+
+    def goal_shortfall(self):
+        """(missing stone/wood, gold still missing) for the next step of our
+        race: a wonder stage, or temples for the influence race."""
+        w = self.w
+        stock = w.res
+        go = self.goal_order()
+        if go is not None:
+            cost = go[1]
+        elif self.goal == "influence":
+            k = min(6, self.temple_slots())
+            if k <= 0:
+                return None
+            tc = C.IMPROVEMENTS["temple"]["cost"]
+            cost = {"stone": tc["stone"] * k, "wood": 0, "gold": tc["gold"] * k}
+        else:
+            return None
+        miss = {r: max(0, cost.get(r, 0) - stock.get(r, 0)) for r in ("stone", "wood")}
+        gold_needed = cost.get("gold", 0) + sum(q * self.price(r) * 1.1 for r, q in miss.items())
+        return miss, max(0, int(gold_needed - stock.get("gold", 0)))
+
+    def temple_slots(self) -> int:
+        w = self.w
+        ok = C.IMPROVEMENTS["temple"]["terrain"]
+        return sum(1 for i in w.my_tiles if i not in w.cities and i not in w.improvement and w.terrain[i] in ok)
+
+    def trade_needs(self) -> tuple:
+        needs, gold = super().trade_needs()
+        w = self.w
+        sf = self.goal_shortfall()
+        go = self.goal_order()
+        if go is not None:
+            cost = go[1]
+            now = sf is not None and sf[1] <= 0
+            for r in ("stone", "wood"):
+                needs[r] = max(needs[r], cost[r] if now else min(cost[r], w.caps.get(r, C.STORAGE_BASE)))
+            gold += cost["gold"]
+        elif self.goal == "influence" and sf is not None:
+            k = min(6, self.temple_slots())
+            needs["stone"] = max(needs["stone"], 20 * k)
+            gold += 20 * k
+        elif self.goal == "economic":
+            gold = max(gold, w.res.get("gold", 0))      # gold is the race: spend none of it
+        if self.goal != "economic" and self.my_path != "economic":
+            # our stock feeds our own growth (settlers, buildings, the
+            # wonder): sell only what would overflow the storage cap
+            mods = season_mods(w.turn)
+            for r in CAPPED:
+                cap = w.caps.get(r, C.STORAGE_BASE)
+                inc = int(self.raw.get(r, 0) * mods.get(r, 1.0)) - (w.upkeep if r == "food" else 0)
+                needs[r] = max(needs[r], cap - max(0, inc))
+        return needs, gold
+
+    def trade_horizon(self):
+        # our instalments only matter until we expect to have won
+        if self.goal in ("wonder", "influence", "economic") and self.my_eta < self.remaining:
+            return int(self.my_eta) + 3
+        return None
+
+    def refuse_partner(self, q: str, deal: dict | None = None) -> bool:
+        if q == self.leader and (self.danger or danger(self.w, q) >= self.LEADER_REFUSE):
+            # ...except to borrow from it on our terms: the gold leaves the
+            # leader now and comes back (in part) only after we have won
+            return not (deal is not None and self.borrowing(deal))
+        return False
+
+    def borrowing(self, deal: dict) -> bool:
+        """Is ``deal`` a loan to us in a thread we opened (gold now, gold
+        per turn later)?"""
+        from .trading import deal_kind
+        w = self.w
+        if deal_kind(deal) != "loan":
+            return False
+        mine_out = deal.get("give") if deal.get("from") == w.me else deal.get("get")
+        mine_in = deal.get("get") if deal.get("from") == w.me else deal.get("give")
+        mine_out, mine_in = mine_out or {}, mine_in or {}
+        if not mine_out.get("per_turn") or any(mine_out.get(r) for r in C.TRADABLE) or set(mine_in) - {"gold"}:
+            return False
+        return deal.get("from") == w.me or self.my_last_offer(deal) is not None
+
+    def peace_bias(self) -> dict:
+        b = super().peace_bias()
+        w = self.w
+        raid = self.memory.get("raid")
+        targets = {self.memory.get("block_owner"), self.memory.get("prey_owner"),
+                   raid.get("owner") if isinstance(raid, dict) else None}
+        if self.danger:
+            targets.add(self.leader)
+        # contenders may have to be blocked: no peace with them
+        targets |= {q for q in w.rivals if self.contender(q)}
+        for q in targets:
+            if q is not None and q != w.me:
+                b[q] = b.get(q, 0.0) - 1000.0
+        return b
+
+    def counter_share(self, d: dict, n: int) -> float:
+        return max(self.MIN_SHARE, self.ANCHOR_SHARE - self.CONCESSION * n)
+
+    def rival_path(self, q: str):
+        et = self.etas.get(q, {})
+        return min(et, key=lambda k: (et[k], k)) if et else None
+
+    def contender(self, q: str) -> bool:
+        """A rival in the race with us: its victory ETA is not far behind
+        ours, or it has made real progress."""
+        w = self.w
+        if q is None or q == w.me:
+            return False
+        e = min(self.etas.get(q, {}).values(), default=INF)
+        mine = self.my_eta if self.my_eta < INF else w.max_turns - w.turn
+        if e <= 1.3 * mine + 10:
+            return True
+        prog = w.progress(q)
+        return max(float(prog.get(k, 0) or 0) for k in ("wonder", "influence", "relics", "economic")) >= 0.45
+
+    def veto(self, q: str, bundle_to_q: dict, deal: dict):
+        """Never pay instalments except for loans we asked for ourselves,
+        and never feed a contender's own race."""
+        from .trading import deal_kind
+        w = self.w
+        if bundle_to_q.get("per_turn"):
+            ours = deal.get("from") == w.me or self.my_last_offer(deal) is not None
+            if deal.get("peace"):
+                pass                 # tribute for peace: the valuation decides
+            elif not (ours and deal_kind(deal) == "loan"):
+                return "I only borrow on my own terms"
+        v = self.tv
+        if w.hostile(w.me, q) and (bundle_to_q.get("food", 0) or bundle_to_q.get("wood", 0)):
+            # don't arm an army that could march on us (or on anyone: conquest)
+            mp = float((w.players.get(q) or {}).get("military_power", 0) or 0)
+            mine = float((w.players.get(w.me) or {}).get("military_power", 0) or 0)
+            if mp >= 0.5 * max(1.0, mine) or self.arms_threat(q, bundle_to_q) or self.rival_path(q) == "conquest":
+                return "no war supplies for you"
+        if not self.contender(q) or self.borrowing(deal):
+            return None
+        path = self.rival_path(q)
+        val = {r: int(bundle_to_q.get(r, 0) or 0) * v.prices.get(r, 1.0) for r in C.TRADABLE}
+        per = bundle_to_q.get("per_turn") or {}
+        if per:
+            val["gold"] += v.installment(per) * int(bundle_to_q.get("turns", 0) or 0)
+        on_path = {"economic": ("gold",), "wonder": ("stone", "wood", "gold"),
+                   "influence": ("stone", "gold")}.get(path, ())
+        if sum(val[r] for r in on_path) >= 30:
+            return "you are racing me"
+        return None
+
+    def accept_threshold(self, d: dict, gain: float, their: float) -> float:
+        base = self.ACCEPT_MARGIN + self.ACCEPT_FRACTION * self.tv.size(d)
+        n = self.counters_in(d)
+        last = self.tmem.get("round", 0) >= 2 or int(d.get("expires_turn", 99999)) <= self.tw.turn
+        share = self.MIN_SHARE - 0.05 if last else max(self.MIN_SHARE, self.ANCHOR_SHARE - self.CONCESSION * (n + 1))
+        thr = max(base, share * (gain + their))
+        if self.contender(d.get("from")):
+            thr = max(thr, their + base)      # a rival in the race must not gain more than we do
+        return thr
+
+    def bargain_offers(self) -> list:
+        """Opponent modelling: offer to buy a partner's spare stock (all of
+        it, in one bundle) far below market value. Rational partners refuse
+        (and the offer then waits longer each time, 4 up to 16 turns);
+        partners that accept such offers get them again."""
+        w, v = self.tw, self.tv
+        out = []
+        gold = v.stock(w.me).get("gold", 0)
+        for q in self.partners():
+            get = {}
+            for r in CAPPED:
+                spare = int(v.stock(q).get(r, 0) - v.needs(q).get(r, 0))
+                if spare >= self.MIN_LOT:
+                    get[r] = min(spare, 300)
+            if not get:
+                continue
+            price = max(1, int(sum(k * v.prices[r] for r, k in get.items()) * self.BARGAIN_PRICE))
+            if price > gold // 3:
+                continue
+            deal = {"from": w.me, "to": q, "give": {"gold": price}, "get": get, "peace": None}
+            out.append({"to": q, "give": {"gold": price}, "get": get, "kind": "bargain",
+                        "value": v.deal_gain(deal), "text": f"{price} gold for all that?"})
+        out.sort(key=lambda p: -p["value"])
+        return out
+
+    def trade_proposals(self) -> list:
+        # sell only overflow (see trade_needs), and only at a real premium
+        out = self.sale_offers(share=self.ANCHOR_SHARE, exploit=True, min_price=self.SELL_PREMIUM)
+        sf = self.goal_shortfall()
+        if sf is not None:
+            miss, gold_short = sf
+            out += self.loan_requests(gold_short)
+            if gold_short <= 0:
+                out += self.purchase_bids(miss, share=self.ANCHOR_SHARE, exploit=True)
+            else:
+                # stock up (below the storage cap) on what the next stage
+                # needs: cheaper now from a player than in bulk on the market
+                w = self.tw
+                room = {r: min(q, max(0, w.caps.get(r, C.STORAGE_BASE) - w.res.get(r, 0)))
+                        for r, q in miss.items()}
+                if w.res.get("gold", 0) > 150:
+                    out += self.purchase_bids(room, share=self.ANCHOR_SHARE, exploit=True)
+        # peace with an army at our gates (contenders are excluded by the
+        # peace bias): cheaper than a war, and it marches on someone else
+        out += self.peace_offers(30, share=self.ANCHOR_SHARE, min_ratio=0.4)
+        out.sort(key=lambda p: -p.get("value", 0))
+        return out + self.bargain_offers()
+
+    def loan_requests(self, short: int) -> list:
+        """Borrow the gold our race is missing from a rich player (the
+        leader too: see :meth:`refuse_partner`)."""
+        w, v = self.tw, self.tv
+        if self.goal not in ("wonder", "influence") or self.my_eta > self.LOAN_ETA:
+            return []
+        go = self.goal_order()
+        if go is not None:
+            # pre-finance the stage after next as well (lenders only check
+            # whether the *next* stage becomes affordable)
+            st = w.cities[go[0]].get("wonder_stage", 0)
+            if st + 2 <= C.WONDER_VICTORY_STAGE:
+                after = building_cost("wonder", st + 2)
+                short = max(0, short) + int(0.5 * sum(q * (1.0 if r == "gold" else self.price(r))
+                                                      for r, q in after.items()))
+        if short < 60:
+            return []
+        if any(c.get("payer") == w.me for c in w.view.get("contracts", []) or []):
+            return []                       # one loan at a time
+        # instalments must stay small next to what we earn (else a default)
+        max_inst = self.LOAN_INCOME_SHARE * self.potential_gold_rate()
+        turns = min(C.DEAL_CONTRACT_MAX_TURNS, self.LOAN_TURNS, max(1, v.remaining - 2))
+        lenders = sorted((-v.stock(q).get("gold", 0), q) for q in w.rivals if v.stock(q).get("gold", 0) >= 400)
+        out = []
+        for g, q in lenders[:2]:
+            principal = int(min(self.LOAN_MAX, short + 50, -g // 2,
+                                max_inst * turns / (1 + self.LOAN_INTEREST)))
+            if principal < 100:
+                continue
+            inst = int(math.ceil(principal * (1 + self.LOAN_INTEREST) / turns))
+            give = {"per_turn": {"gold": inst}, "turns": turns}
+            get = {"gold": principal}
+            deal = {"from": w.me, "to": q, "give": give, "get": get, "peace": None}
+            if v.deal_gain(deal) < self.ACCEPT_MARGIN:
+                continue
+            out.append({"to": q, "give": give, "get": get, "kind": "loan", "value": v.deal_gain(deal),
+                        "text": f"lend me {principal} gold for {inst} gold/turn x{turns}"})
+        return out
 
     # ------------------------------------------------------------------
     # observation & ETA model
@@ -1356,6 +1679,19 @@ class StrategistBot(PlannerBot):
             nxt = w.step_towards(i, dist, enter)
             if nxt is not None:
                 self.safe_move(i, nxt, free, allow_fight=False)
+
+
+class StrategistNoTradeBot(StrategistBot):
+    """The strategist with trading disabled (never negotiates): the
+    ablation baseline measuring what barter is worth to a skilled bot."""
+
+    name = "strategist_notrade"
+    TRADE = False
+
+    def __init__(self, seed: int = 0):
+        super().__init__(seed)
+        # same random tie-breaks as the trading strategist: only trading differs
+        self.rng = random.Random(f"strategist:{seed}")
 
 
 class StrategistLiteBot(StrategistBot):

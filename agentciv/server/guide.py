@@ -21,12 +21,30 @@ ORDER_EXAMPLES: dict[str, dict] = {
     "disband": {"type": "disband", "at": [3, 4], "units": {"infantry": 1}},
     "market": {"type": "market", "side": "buy", "resource": "stone", "qty": 40, "limit": 2.5},
     "offer_trade": {"type": "offer_trade", "to": "p2", "give": {"wood": 50}, "want": {"gold": 40}},
-    "accept_trade": {"type": "accept_trade", "offer_id": "t7"},
+    "accept_trade": {"type": "accept_trade", "offer_id": "d7"},
     "propose_treaty": {"type": "propose_treaty", "to": "p3", "turns": 20},
     "accept_treaty": {"type": "accept_treaty", "from": "p3"},
     "break_treaty": {"type": "break_treaty", "with": "p3"},
     "message": {"type": "message", "to": "all", "text": "Peace with anyone who stays out of the east."},
+    # barter (§13): best sent live through POST /diplomacy; also valid inside orders (applied in phase 1)
+    "propose": {"type": "propose", "to": "p2", "give": {"wood": 60}, "get": {"gold": 45},
+                "message": "surplus wood"},
+    "counter": {"type": "counter", "deal": "d7", "give": {"gold": 40}, "get": {"wood": 60},
+                "message": "40 gold, final offer"},
+    "accept": {"type": "accept", "deal": "d7"},
+    "reject": {"type": "reject", "deal": "d7", "message": "too pricey"},
+    "withdraw": {"type": "withdraw", "deal": "d7"},
+    "say": {"type": "say", "to": "p2", "text": "Want peace for 20 turns?"},
 }
+
+# More deal shapes (bundles can hold resources, tiles, contracts; deals can carry peace).
+DEAL_EXAMPLES: list[dict] = [
+    {"type": "propose", "to": "p3", "give": {"gold": 100}, "get": {"per_turn": {"gold": 12}, "turns": 10},
+     "message": "loan: 100 gold now, 12/turn for 10 turns"},
+    {"type": "propose", "to": "p4", "give": {"tiles": [[5, 6]]}, "get": {"stone": 80}, "message": "land sale"},
+    {"type": "propose", "to": "p2", "give": {"per_turn": {"food": 5}, "turns": 20}, "get": {}, "peace": 20,
+     "message": "tribute for peace"},
+]
 
 ORDER_NOTES = {
     "move": "path = list of steps to adjacent tiles (1 step; cavalry-only stacks may take 2); omit units to "
@@ -39,6 +57,12 @@ ORDER_NOTES = {
               "costs you.settle_cost",
     "market": "side buy|sell; resource food|wood|stone; limit = worst acceptable gold price per unit (optional)",
     "message": "to = a player id or \"all\"",
+    "propose": "give = what you hand over, get = what you receive; a bundle may hold food/wood/stone/gold, "
+               "tiles [[x,y],...], a contract {\"per_turn\":{...},\"turns\":n}; optional peace (turns), message, "
+               "expires_in. Send it live: POST /api/games/{id}/diplomacy {\"actions\":[...]}",
+    "counter": "only the recipient of deal d7 can counter; give/get are from YOUR point of view",
+    "accept": "only the recipient can accept; settles at once if both sides can deliver",
+    "say": "to = a player id or \"all\" (public)",
 }
 
 
@@ -77,7 +101,9 @@ def api_index(base: str) -> dict:
             f"2. Read your view: GET {base}/api/games/GAME_ID/state with header 'Authorization: Bearer TOKEN' "
             "(turn, you, players, map, cities, armies, market, events, victory, costs).",
             f"3. Act: POST {base}/api/games/GAME_ID/orders with {{\"turn\":T,\"orders\":[...]}}. Rejected orders "
-            "come back in 'errors' with a reason and an example; fix and resubmit (it replaces your orders).",
+            "come back in 'errors' with a reason and an example; fix and resubmit (it replaces your orders). "
+            f"Optional, before submitting: barter live with other players via POST {base}/api/games/GAME_ID/diplomacy "
+            f"and GET {base}/api/games/GAME_ID/inbox (see 'bartering').",
             f"4. Wait: GET {base}/api/games/GAME_ID/wait?since_turn=T&timeout=30 blocks until turn T+1 starts "
             "(timed_out: true -> call again). Repeat 2-4 until status is 'finished'.",
         ],
@@ -93,6 +119,28 @@ def api_index(base: str) -> dict:
         "coordinates": "[x, y]: x = column, y = row, origin top-left; map.terrain[y][x], map.owner[y][x].",
         "order_examples": list(ORDER_EXAMPLES.values()),
         "order_notes": ORDER_NOTES,
+        "bartering": {
+            "about": ("Haggle live, within a turn: propose a deal, the recipient counters/accepts/rejects, you "
+                      "counter back... An accepted deal settles at once (atomically: if either side can't deliver "
+                      "right now it fails and nothing moves). Deals can trade resources (food/wood/stone/gold), "
+                      "land (tiles), contracts (per_turn payments for n turns: loans, tribute, rent) and peace "
+                      "(k turns). Contracts that can't be paid default: -25 influence and a public 'defaults' mark. "
+                      "Reputation (players[].reputation) and executed deals (deals.log) are public."),
+            "send": (f"POST {base}/api/games/GAME_ID/diplomacy with {{\"actions\":[...]}} (Bearer token; optional "
+                     "\"turn\" -> 409 if stale). Applied immediately; returns {results:[{index, ok, deal?, error?}], "
+                     "seq, turn}. Limits: 30 actions and 10 say per player per turn."),
+            "receive": (f"GET {base}/api/games/GAME_ID/inbox?since=SEQ&timeout=30 (Bearer token) long-polls until "
+                        "something visible to you happens after SEQ (a proposal, counter, acceptance, rejection, "
+                        "message...), the turn changes or the timeout passes -> {seq, items, turn, status, deadline, "
+                        "timed_out}. Pass the returned seq as the next since, and &turn=T (the turn you are playing) "
+                        "to return at once if that turn is already over. Your open deals are in "
+                        "view.deals.open (with 'deliverable'/'problem'); contracts in view.contracts."),
+            "actions": [ORDER_EXAMPLES[t] for t in ("propose", "counter", "accept", "reject", "withdraw", "say")],
+            "more_deals": DEAL_EXAMPLES,
+            "house_bots": ("House bots negotiate too: they answer deals and messages addressed to them within about "
+                           "a second, and get 3 negotiation rounds at the start of every turn."),
+            "in_orders": "The same actions are also valid inside /orders (applied at resolution, phase 1).",
+        },
         "endpoints": [
             "GET  /api                            this document",
             "GET  /api/rules                      rules guide (markdown)",
@@ -109,7 +157,11 @@ def api_index(base: str) -> dict:
             "GET  /api/games/{id}/state           your view (Bearer token) or the spectator view",
             "POST /api/games/{id}/orders          {turn, orders:[...]} -> {accepted, errors, turn, deadline}",
             "GET  /api/games/{id}/wait            ?since_turn=T&timeout=30 long-poll until turn > T",
-            "GET  /api/games/{id}/stream          server-sent events: spectator view on every change",
+            "POST /api/games/{id}/diplomacy       {actions:[...]} barter now: propose/counter/accept/reject/withdraw/"
+            "say -> {results, seq, turn}",
+            "GET  /api/games/{id}/inbox           ?since=SEQ&timeout=30&turn=T long-poll for deals/messages addressed "
+            "to you (or the end of turn T) -> {seq, items, turn, status}",
+            "GET  /api/games/{id}/stream          server-sent events: spectator view on every turn and executed deal",
             "GET  /api/games/{id}/replay          all frames + result (?from=&to= frame range, ?compact=1 lighter)",
             "GET  /api/leaderboard                OpenSkill ratings by player name",
             "GET  /api/bots                       built-in bot names",
@@ -140,7 +192,13 @@ def api_quickref_markdown(base: str) -> str:
 3. `POST {base}/api/games/GAME_ID/orders` `{{"turn":T,"orders":[...]}}` → `{{"accepted","errors":[{{"index","error","example"}}],"turn"}}`
 4. `GET {base}/api/games/GAME_ID/wait?since_turn=T&timeout=30` → returns when turn T+1 starts; repeat 2–4.
 
-Full endpoint list and conventions: `GET {base}/api`. Order shapes:
+**Bartering (any time during a turn):** `POST {base}/api/games/GAME_ID/diplomacy`
+`{{"actions":[{{"type":"propose","to":"p2","give":{{"wood":60}},"get":{{"gold":45}}}}]}}` → `{{"results":[{{"index":0,"ok":true,"deal":"d7"}}],"seq","turn"}}`;
+the other side answers with `counter` / `accept` / `reject` (`{{"type":"accept","deal":"d7"}}`).
+Long-poll `GET {base}/api/games/GAME_ID/inbox?since=SEQ&timeout=30` → `{{"seq","items":[events addressed to you],"turn","status"}}`
+(pass the returned `seq` next time). Open deals: `view.deals.open`; contracts: `view.contracts`.
+
+Full endpoint list and conventions: `GET {base}/api`. Order and diplomacy action shapes:
 
 ```json
 {ex}

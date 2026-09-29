@@ -124,10 +124,12 @@
       <section class="panel feed-panel">
         <div class="tabs" role="tablist">
           <button class="tab active" data-tab="events" role="tab">Events</button>
+          <button class="tab" data-tab="trade" role="tab" id="tab-btn-trade" title="Barter: deals, contracts, reputation">Trade<span class="tab-n" id="trade-n" hidden></span></button>
           <button class="tab" data-tab="diplo" role="tab">Messages &amp; diplomacy</button>
           <select id="feed-filter" class="feed-filter" aria-label="Filter by player"><option value="">All players</option></select>
         </div>
         <div class="tab-body" id="tab-events"><div class="feed" id="events"></div></div>
+        <div class="tab-body" id="tab-trade" hidden><div class="trade" id="trade"></div></div>
         <div class="tab-body" id="tab-diplo" hidden><div id="diplo"></div></div>
       </section>
     </aside>

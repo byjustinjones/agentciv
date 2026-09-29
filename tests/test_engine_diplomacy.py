@@ -104,23 +104,29 @@ def test_break_treaty_without_influence_fails():
 
 
 # ---------------------------------------------------------------- trades
+# offer_trade / accept_trade are aliases of the deal actions propose / accept
+# (DESIGN §13); the legacy ``trade_offers`` view field lists open
+# resource-only deals.
 def test_trade_offer_accept_and_privacy():
     g = world()
     ev = run_turn(g, {"p1": [{"type": "offer_trade", "to": "p2", "give": {"wood": 30}, "want": {"gold": 20}}]})
     offers = g.player_view("p2")["trade_offers"]
-    assert len(offers) == 1 and offers[0]["id"] == "t1"
-    assert offers[0]["expires_turn"] == 0 + C.TRADE_OFFER_TTL
+    assert len(offers) == 1 and offers[0]["id"] == "d1"
+    assert offers[0]["expires_turn"] == 0 + C.DEAL_DEFAULT_EXPIRES_IN
+    assert g.player_view("p2")["deals"]["open"][0]["get"] == {"gold": 20}
     assert g.player_view("p3")["trade_offers"] == []
-    assert not any(e["type"] == "trade_offered" for e in g.player_view("p3")["events"])
+    assert g.player_view("p3")["deals"]["open"] == []
+    assert not any(e["type"] == "deal_proposed" for e in g.player_view("p3")["events"])
+    assert events_of(ev, "deal_proposed")
     p1, p2 = g.player("p1"), g.player("p2")
     w1, g1, w2, g2 = p1.resources["wood"], p1.resources["gold"], p2.resources["wood"], p2.resources["gold"]
-    ev = run_turn(g, {"p2": [{"type": "accept_trade", "offer_id": "t1"}]})
+    ev = run_turn(g, {"p2": [{"type": "accept_trade", "offer_id": "d1"}]})
     st = g.stats()
     assert p1.resources["wood"] == w1 - 30 + st["p1"]["income"]["wood"]
     assert p1.resources["gold"] == g1 + 20 + st["p1"]["income"]["gold"]
     assert p2.resources["wood"] == w2 + 30 + st["p2"]["income"]["wood"]
     assert p2.resources["gold"] == g2 - 20 + st["p2"]["income"]["gold"]
-    assert events_of(ev, "trade_executed")
+    assert events_of(ev, "deal_executed")
     assert g.player_view("p2")["trade_offers"] == []
 
 
@@ -128,25 +134,33 @@ def test_trade_needs_both_to_pay_and_expires():
     g = world()
     run_turn(g, {"p1": [{"type": "offer_trade", "to": "p2", "give": {"wood": 30}, "want": {"gold": 20}}]})
     g.player("p1").resources["wood"] = 0
-    ev = run_turn(g, {"p2": [{"type": "accept_trade", "offer_id": "t1"}]})
-    assert "can no longer pay" in events_of(ev, "order_failed")[0]["reason"]
-    assert g.player_view("p2")["trade_offers"]            # still open
-    g.player("p1").resources["wood"] = 100
+    ev = run_turn(g, {"p2": [{"type": "accept_trade", "offer_id": "d1"}]})
+    assert "p1 is short of" in events_of(ev, "order_failed")[0]["reason"]
+    assert events_of(ev, "deal_failed")
+    assert g.player_view("p2")["trade_offers"] == []          # a failed accept closes the deal
+    assert g.player_view("p2")["deals"]["recent"][0]["status"] == "failed"
+    # the receiver must be able to pay too
+    run_turn(g, {"p1": [{"type": "offer_trade", "to": "p2", "give": {"wood": 1}, "want": {"gold": 20}}]})
     g.player("p2").resources["gold"] = 0
-    ev = run_turn(g, {"p2": [{"type": "accept_trade", "offer_id": "t1"}]})
-    assert "cannot pay" in events_of(ev, "order_failed")[0]["reason"]
-    run_turn(g)                                              # turn 3 = expires_turn
-    assert g.turn == 4 and g.player_view("p2")["trade_offers"] == []
-    assert g.submit_orders("p2", [{"type": "accept_trade", "offer_id": "t1"}])
+    ev = run_turn(g, {"p2": [{"type": "accept_trade", "offer_id": "d2"}]})
+    assert "p2 is short of 20 gold" in events_of(ev, "order_failed")[0]["reason"]
+    # expiry: made on turn 4, open through turn 4 + DEAL_DEFAULT_EXPIRES_IN
+    run_turn(g, {"p1": [{"type": "offer_trade", "to": "p2", "give": {"wood": 1}}]})
+    assert g.turn == 5 and g.player_view("p2")["trade_offers"][0]["expires_turn"] == 4 + C.DEAL_DEFAULT_EXPIRES_IN
+    run_turn(g)
+    ev = run_turn(g)
+    assert events_of(ev, "deal_expired")
+    assert g.turn == 7 and g.player_view("p2")["trade_offers"] == []
+    assert g.submit_orders("p2", [{"type": "accept_trade", "offer_id": "d3"}])
 
 
 def test_accept_trade_not_addressed_to_you():
     g = world()
     run_turn(g, {"p1": [{"type": "offer_trade", "to": "p2", "give": {"wood": 1}}]})
-    errs = g.submit_orders("p3", [{"type": "accept_trade", "offer_id": "t1"}, {"type": "accept_trade", "offer_id": "t2"}])
+    errs = g.submit_orders("p3", [{"type": "accept_trade", "offer_id": "d1"}, {"type": "accept_trade", "offer_id": "d2"}])
     # identical errors: probing must not reveal which private offers exist
-    assert errs[0]["error"].replace("t1", "tX") == errs[1]["error"].replace("t2", "tX")
-    assert "no open trade offer" in errs[0]["error"]
+    assert errs[0]["error"].replace("d1", "dX") == errs[1]["error"].replace("d2", "dX")
+    assert "no open deal" in errs[0]["error"]
 
 
 # ---------------------------------------------------------------- messages
@@ -182,11 +196,13 @@ def test_spectator_view_hides_private_diplomacy_until_the_game_ends():
                         {"type": "propose_treaty", "to": "p2", "turns": 20}]})
     v = g.spectator_view()
     assert v["messages"] == [] and v["trade_offers"] == [] and v["treaty_proposals"] == []
-    assert not {e["type"] for e in v["events"]} & {"trade_offered", "treaty_proposed", "order_failed"}
+    assert v["deals"]["open"] == [] and v["deals"]["recent"] == []
+    assert not {e["type"] for e in v["events"]} & {"deal_proposed", "say", "treaty_proposed", "order_failed"}
     assert "SECRET" not in str(v)
     full = g.spectator_view(full=True)
     assert full["messages"] and full["trade_offers"] and full["treaty_proposals"]
-    assert {"trade_offered", "treaty_proposed"} <= {e["type"] for e in full["events"]}
+    assert full["deals"]["open"]
+    assert {"deal_proposed", "treaty_proposed", "say"} <= {e["type"] for e in full["events"]}
     run_turn(g)
     assert g.finished
     assert [m["text"] for m in g.spectator_view()["messages"]] == ["SECRET plan"]  # revealed afterwards

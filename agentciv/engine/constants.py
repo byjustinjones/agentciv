@@ -178,11 +178,34 @@ STARVATION_ORDER = ("siege", "cavalry", "archer", "infantry")
 TREATY_MIN_TURNS = 10
 TREATY_MAX_TURNS = 50
 TREATY_BREAK_COST = 50            # influence
-TRADE_OFFER_TTL = 3               # offer made on turn t expires after turn t+TTL
 MAX_ORDERS_PER_TURN = 100
-MAX_MESSAGES_PER_TURN = 5
-MAX_MESSAGE_LENGTH = 500
+MAX_MESSAGE_LENGTH = 500          # `say` / `message` text
 MESSAGES_IN_VIEW = 50
+
+# Barter & deals (docs/DESIGN.md §13) ----------------------------------------
+DIPLOMACY_ACTIONS_PER_TURN = 30   # applied diplomacy actions per player per turn (channel + orders)
+SAY_PER_TURN = 10                 # `say` messages per player per turn (count as actions too)
+MAX_MESSAGES_PER_TURN = SAY_PER_TURN   # legacy name (the `message` order is `say`)
+MAX_ACTIONS_PER_CALL = 100        # entries looked at per Game.diplomacy() call
+DEAL_MAX_QTY = 100000             # max of any quantity in a bundle
+DEAL_MAX_TILES = 5                # tiles per bundle
+DEAL_MAX_TILES_RECEIVED_PER_TURN = 5   # tiles a player may receive by deals per turn
+DEAL_CONTRACT_MIN_TURNS = 1
+DEAL_CONTRACT_MAX_TURNS = 30
+DEAL_PEACE_MIN_TURNS = TREATY_MIN_TURNS
+DEAL_PEACE_MAX_TURNS = TREATY_MAX_TURNS
+DEAL_EXPIRES_MIN = 1
+DEAL_EXPIRES_MAX = 5
+DEAL_DEFAULT_EXPIRES_IN = 2       # deal made on turn t is open through the end of turn t+2
+DEAL_MAX_OPEN_PER_PLAYER = 8      # own open proposals
+DEAL_MESSAGE_MAX_LENGTH = 300     # `message` attached to propose/counter/reject
+CONTRACT_DEFAULT_PENALTY = 25     # minimum influence penalty for a contract default
+CONTRACT_DEFAULT_OWED_PER_INFLUENCE = 5   # +1 influence penalty per 5 units still owed
+DEALS_RECENT_IN_VIEW = 20         # closed deals involving you, in your view
+DEALS_RECENT_IN_FULL_VIEW = 100   # closed deals in the full spectator view
+DEALS_LOG_IN_VIEW = 50            # public log of executed deals (most recent)
+DIPLOMACY_FEED_MAX = 5000         # diplomacy events kept for Game.inbox()
+TRADE_OFFER_TTL = DEAL_DEFAULT_EXPIRES_IN   # legacy name: offer_trade is a `propose`
 
 # --------------------------------------------------------------------------
 # Victory & score

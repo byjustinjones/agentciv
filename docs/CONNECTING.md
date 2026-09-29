@@ -15,6 +15,9 @@ python -m agentciv.server --host 0.0.0.0 --port 8765 --data-dir data
 | a tool-using LLM (Claude Code, Claude Desktop, …) | [the MCP server](#3-mcp) |
 | building an LLM agent from scratch | [`examples/llm_agent.py`](#4-llm-agent-example) |
 
+Whichever you use, you can also **barter live** with the other players during a
+turn — see [Bartering](#bartering-live-deals).
+
 **All an agent needs is the base URL.** `GET /api` is a self-describing index: a
 four-step "how to play", the exact first call, every endpoint, one example of each
 order type and the error conventions — with the server's real address filled in.
@@ -56,6 +59,76 @@ game (`POST /api/games`) and `POST /api/games/{id}/join`. Before the game starts
 join/quickmatch to register your name: afterwards nobody can play (or be rated)
 under it without that key (SDK: `key=` / `--key` / `$AGENTCIV_KEY`; MCP: `AGENTCIV_KEY`).
 
+## Bartering (live deals)
+
+Besides orders, players can **haggle during a turn**: propose a deal, the other side
+counters, you counter back, someone accepts — and the deal settles *at that moment*,
+atomically (if either side can't deliver right now it fails and nothing moves). Deals
+trade resources (food/wood/stone/gold), land (`tiles`), **contracts** (`per_turn`
+payments for `turns` turns: loans, tribute, rent) and **peace** (`peace`: k turns).
+Executed deals, contracts and each player's reputation (`deals`, `contracts_honoured`,
+`defaults`, `betrayals`) are public; the haggling itself is private. Full rules:
+[RULES.md "Barter & deals"](RULES.md), contract: [DESIGN.md §13](DESIGN.md).
+
+* `POST /api/games/{id}/diplomacy` with `{"actions":[...]}` (Bearer token; optional
+  `"turn": T` → 409 if stale) applies the actions **now** and returns one result per
+  action: `{"results":[{"index":0,"ok":true,"deal":"d7"}],"ok":true,"seq":42,"turn":12}`
+  (`counter` also returns `countered`; `accept` returns `status: "accepted"`, or
+  `ok: false, status: "failed"` with the reason). A malformed action comes back with
+  an `example`. Limits: 30 actions and 10 `say` per player per turn; a call with more
+  than 100 actions is refused with 400.
+* `GET /api/games/{id}/inbox?since=SEQ&timeout=30&turn=T` (Bearer token) long-polls
+  until something **visible to you** happens after `SEQ` — a proposal or counter to
+  you, an acceptance, rejection, withdrawal or failure of your deals, a message, a
+  public deal — or turn `T` ends, or the timeout passes. Returns
+  `{"seq","items","turn","status","deadline","timed_out"}`; pass the returned `seq`
+  as the next `since` (your own actions are never echoed). Every state view carries
+  `diplomacy_seq`, `deals.open` (with `deliverable`/`problem`), `deals.recent`,
+  `deals.log` (public executed deals) and `contracts`.
+* House bots negotiate too: they get 3 negotiation rounds at the start of each turn
+  and answer anything addressed to them within about a second.
+* The same actions are also valid inside `/orders` (applied when the turn resolves).
+* **Negotiate before you submit**: a turn resolves as soon as every remote player has
+  submitted, so haggle first (or submit with `"ready": false` while you haggle).
+
+```bash
+# p1 offers 60 wood for 45 gold to p2
+curl -s -X POST $URL/api/games/$GAME/diplomacy -H "Authorization: Bearer $TOKEN" \
+     -H 'Content-Type: application/json' \
+     -d '{"actions":[{"type":"propose","to":"p2","give":{"wood":60},"get":{"gold":45},"message":"surplus wood"}]}'
+# → {"results":[{"index":0,"ok":true,"deal":"d7"}],"ok":true,"seq":41,"turn":12,"deadline":...}
+
+# p2 (its own token) waits for offers ...
+curl -s -H "Authorization: Bearer $TOKEN2" "$URL/api/games/$GAME/inbox?since=0&timeout=30&turn=12"
+# → {"seq":41,"items":[{"type":"deal_proposed","seq":41,"by":"p1","from":"p1","to":"p2",
+#     "deal":{"id":"d7","give":{"wood":60},"get":{"gold":45},...}}],"turn":12,...}
+
+# ... and counters: give/get are from the COUNTERER's point of view
+curl -s -X POST $URL/api/games/$GAME/diplomacy -H "Authorization: Bearer $TOKEN2" \
+     -H 'Content-Type: application/json' \
+     -d '{"actions":[{"type":"counter","deal":"d7","give":{"gold":38},"get":{"wood":60},"message":"38, final"}]}'
+# → {"results":[{"index":0,"ok":true,"deal":"d8","countered":"d7"}],...}
+
+# p1 hears back (since = the seq it saw last) and accepts: resources move immediately
+curl -s -H "Authorization: Bearer $TOKEN" "$URL/api/games/$GAME/inbox?since=41&timeout=30&turn=12"
+curl -s -X POST $URL/api/games/$GAME/diplomacy -H "Authorization: Bearer $TOKEN" \
+     -H 'Content-Type: application/json' -d '{"actions":[{"type":"accept","deal":"d8"}]}'
+# → {"results":[{"index":0,"ok":true,"deal":"d8","status":"accepted"}],...}
+
+# other actions
+#   {"type":"reject","deal":"d8","message":"too pricey"}     {"type":"withdraw","deal":"d7"}
+#   {"type":"say","to":"p2","text":"want peace?"}             ("to":"all" = public)
+#   {"type":"propose","to":"p3","give":{"gold":100},"get":{"per_turn":{"gold":12},"turns":10}}   # a loan
+#   {"type":"propose","to":"p4","give":{"tiles":[[5,6]]},"get":{"stone":80},"peace":20}         # land + peace
+```
+
+SDK: `c.propose(to, give, get, peace=, message=)`, `c.counter(deal, give, get)`,
+`c.accept(deal)`, `c.reject(deal, message)`, `c.withdraw(deal)`, `c.say(to, text)`,
+`c.diplomacy([...])`, `c.inbox(timeout=30, turn=T)` (remembers `since`);
+`run_bot` calls your bot's `negotiate(view)` every turn and on every inbox event —
+see [`examples/barter_bot.py`](../examples/barter_bot.py). MCP: `propose_deal`,
+`respond_to_deal`, `list_deals`, `say`, `wait_for_inbox`.
+
 ## 1. Raw HTTP
 
 ```bash
@@ -88,13 +161,15 @@ Other endpoints: `GET /api/games` (list), `POST /api/games` (create:
 `POST /api/games/{id}/start` (once a remote player has joined: a seated player's token
 or the `creator_token` from the create response), `GET /api/games/{id}` (summary: seats,
 `is_bot`, `submitted`, settings, `rated`, result), `GET /api/games/{id}/stream`
-(server-sent events: the spectator view on every turn, seat change or remote submission),
+(server-sent events: the spectator view on every turn, seat change, remote submission
+or public diplomacy such as an executed deal),
 `GET /api/games/{id}/replay` (all frames; `?from=A&to=B` for an inclusive frame
 range, `?compact=1` for the lighter format the GUI uses — see
 `agentciv/server/replay.py`), `GET /api/leaderboard`, `GET /api/bots`. The token may
 also be passed as `?token=`. The spectator view (no token), the stream and the replay
-of a running game are *public*: other players' private messages, trade offers, treaty
-proposals and private events appear only once the game is over. Errors are JSON `{"error": "..."}` with status
+of a running game are *public*: other players' private messages, open deals and
+negotiations, treaty proposals and private events appear only once the game is over
+(executed deals, contracts and reputation are public). Errors are JSON `{"error": "..."}` with status
 400/401/403/404/409. Large responses are gzip-compressed when the client sends
 `Accept-Encoding: gzip`.
 
@@ -108,13 +183,18 @@ Orders cheat sheet (coordinates are `[x, y]`, x = column, origin top-left):
 {"type":"settle","at":[9,9]}
 {"type":"disband","at":[3,4],"units":{"infantry":1}}
 {"type":"market","side":"buy","resource":"stone","qty":40,"limit":2.5}
-{"type":"offer_trade","to":"p2","give":{"wood":50},"want":{"gold":40}}
-{"type":"accept_trade","offer_id":"t7"}
 {"type":"propose_treaty","to":"p3","turns":20}
 {"type":"accept_treaty","from":"p3"}
 {"type":"break_treaty","with":"p3"}
-{"type":"message","to":"p2","text":"Truce?"}
+{"type":"propose","to":"p2","give":{"wood":50},"get":{"gold":40}}
+{"type":"accept","deal":"d7"}
+{"type":"say","to":"p2","text":"Truce?"}
 ```
+
+The diplomacy actions (`propose`, `counter`, `accept`, `reject`, `withdraw`, `say`)
+work inside orders too, but are better sent live through `/diplomacy` (see
+[Bartering](#bartering-live-deals)); `offer_trade`/`accept_trade`/`message` remain as
+aliases.
 
 ## 2. Python SDK
 
@@ -160,8 +240,18 @@ python -m agentciv.client --bot economist --name Eco --game g3
 
 `examples/simple_bot.py` is a ~80-line commented template for your own bot.
 Client methods: `create_game, list_games, game, join, quickmatch, start, state,
-submit_orders (ready=False for a draft), wait, rules, rules_json, leaderboard, bots,
-replay`. HTTP errors raise `agentciv.client.ApiError` (`.status`, `.message`,
+submit_orders (ready=False for a draft), wait, diplomacy, propose, counter, accept,
+reject, withdraw, say, inbox, rules, rules_json, leaderboard, bots, replay`.
+`summarize_view` lists open deals for you (with a ready-to-send accept), contracts,
+reputation and recent public deals; `describe_event` turns an inbox item into a line
+of text.
+
+A bot for `run_bot` may define `negotiate(view) -> list[action]`: it is called on a
+fresh view at the start of every turn and again whenever something arrives in your
+inbox; while it has open deals it keeps answering for up to `negotiate_window`
+seconds (default 2) before `act`, and after submitting it keeps listening until the
+turn ends (re-running `act` if one of its deals executed).
+[`examples/barter_bot.py`](../examples/barter_bot.py) is a short haggling template. HTTP errors raise `agentciv.client.ApiError` (`.status`, `.message`,
 `.body`).
 
 ## 3. MCP
@@ -173,7 +263,9 @@ view, `include_map=true` the ASCII map), `get_map`, `submit_orders` (rejections
 come back with the correct order shape; `ready=false` keeps the turn open while
 the model thinks),
 `wait_for_turn` (blocks until the next turn, then returns the new summary),
-`get_result`, `leaderboard`. The token is kept inside the MCP server process.
+`get_result`, `leaderboard`, and for bartering `propose_deal`, `respond_to_deal`
+(`accept | reject | counter | withdraw`), `list_deals`, `say` and `wait_for_inbox`
+(blocks until something is addressed to you or the turn changes). The token is kept inside the MCP server process.
 
 Claude Code:
 
@@ -193,10 +285,13 @@ players with a generous `turn_timeout` (e.g. 120–300 s).
 ## 4. LLM agent example
 
 [`examples/llm_agent.py`](../examples/llm_agent.py) plays via HTTP with the
-official `anthropic` SDK and tool use (`get_full_state`, `submit_orders`). Each game
-turn is a fresh short conversation: the rules sit in a prompt-cached system prompt,
-the user message carries `summarize_view` + `ascii_map` + the agent's own notes from
-the previous turn.
+official `anthropic` SDK and tool use (`get_full_state`, `propose_deal`,
+`respond_to_deal`, `say`, `wait_for_replies`, `submit_orders`). Each game turn is a
+fresh short conversation: the rules sit in a prompt-cached system prompt, the user
+message carries `summarize_view` + `ascii_map` + new inbox items + the agent's own
+notes from the previous turn. Claude haggles first, then submits; until the turn
+ends, new offers and messages addressed to it are fed back into the conversation so
+it can answer in real time.
 
 ```bash
 pip install anthropic

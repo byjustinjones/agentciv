@@ -18,6 +18,17 @@ Strategy
 
   The choice compares rough ETAs: remaining wonder cost / production value
   versus the time to build out temples and accumulate the influence target.
+
+Trading (§13)
+-------------
+* **Buys peace**: offers gold for a 30-turn peace to rivals whose armies
+  threaten its cities (it values peace 1.5× the threat-based estimate),
+  and accepts tribute demands when peace is worth more than the tribute.
+* **Buys stone/wood for its wonder** from players with spare stock in the
+  turn it can afford the next stage (cheaper than the market's buy price
+  with slippage and fee; nothing above the storage cap otherwise).
+* Sells surplus food; answers offers with the shared valuation (accept /
+  one fair counter / reject).
 """
 from __future__ import annotations
 
@@ -47,6 +58,64 @@ class TurtleBot(PlannerBot):
     INFLUENCE_SWITCH = 0.65          # go for influence only if clearly faster than the wonder
     INFLUENCE_MODE_WEIGHT = 9.0      # value of 1 influence when going for influence
     BUY_FOR_IMPROVEMENTS = True
+
+    # trading
+    PEACE_SCALE = 1.5
+    PEACE_TURNS = 30
+
+    def trade_setup(self, w) -> None:
+        super().trade_setup(w)
+        self.path = self.memory.get("path", "wonder")
+
+    def wonder_order(self):
+        """(city, next stage cost) of the wonder we are building, or None."""
+        w = self.w
+        if self.path != "wonder" or w.turn < self.PATH_START - 3:
+            return None
+        home = wonder_city(w) or self.home()
+        if home is None:
+            return None
+        stage = w.cities[home].get("wonder_stage", 0)
+        if stage >= C.WONDER_VICTORY_STAGE:
+            return None
+        return home, building_cost("wonder", stage + 1)
+
+    def build_turn_shortfall(self):
+        """Stone/wood missing for the next stage if the whole stage (buying
+        the rest at spot) is affordable right now, else None."""
+        wo = self.wonder_order()
+        if wo is None:
+            return None
+        cost = wo[1]
+        v = self.tv
+        stock = v.stock(self.w.me)
+        miss = {r: max(0, cost[r] - stock.get(r, 0)) for r in ("stone", "wood")}
+        need_gold = cost["gold"] + sum(q * v.prices[r] * 1.05 for r, q in miss.items())
+        if stock.get("gold", 0) < need_gold:
+            return None
+        return miss
+
+    def trade_needs(self) -> tuple:
+        needs, gold = super().trade_needs()
+        wo = self.wonder_order()
+        if wo is not None:
+            cost = wo[1]
+            now = self.build_turn_shortfall() is not None
+            for r in ("stone", "wood"):
+                needs[r] = max(needs[r], cost[r] if now else min(cost[r], self.w.caps.get(r, C.STORAGE_BASE)))
+            gold += cost["gold"]
+        return needs, gold
+
+    def trade_proposals(self) -> list:
+        out = self.peace_offers()
+        miss = self.build_turn_shortfall()
+        if miss:
+            out += self.purchase_bids(miss, share=0.5)
+        out += self.sale_offers(resources=("food",), share=0.5)
+        return out
+
+    def peace_offers(self, turns: int = 30, share: float = 0.5, min_ratio: float = 0.5) -> list:
+        return super().peace_offers(self.PEACE_TURNS, share, min_ratio)
 
     def pipeline(self):
         return [self.diplomacy, self.food_safety, self.choose_path, self.plan_site, self.defend,

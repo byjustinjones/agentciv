@@ -24,8 +24,20 @@ built-in bot::
     from agentciv.client import run_bot
     run_bot("strategist", "http://localhost:8765", quickmatch=True, name="my-strategist")
 
+Barter live with other players during a turn (docs/DESIGN.md §13)::
+
+    r = c.propose("p2", give={"wood": 60}, get={"gold": 45}, message="surplus wood")
+    box = c.inbox(timeout=20)               # long-poll: proposals, counters, acceptances, messages
+    for ev in box["items"]:
+        if ev["type"] == "deal_countered" and ev["to"] == c.player_id:
+            c.accept(ev["new"]["id"])       # or c.counter(...), c.reject(...)
+
+A bot passed to :func:`run_bot` may define ``negotiate(view) -> list[action]``:
+it is called at the start of every turn and whenever something arrives in
+your inbox, until shortly before the deadline.
+
 Also included: :func:`summarize_view` (compact text summary of a view, handy for
-LLM agents) and :func:`ascii_map`.
+LLM agents), :func:`ascii_map`, :func:`bundle_str` and :func:`describe_event`.
 
 Command line::
 
@@ -35,6 +47,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 import time
@@ -74,6 +87,7 @@ class AgentCivClient:
         self.player_id = player_id
         self.timeout = timeout
         self.creator_tokens: dict[str, str] = {}  # game_id -> creator_token of games this client created
+        self.inbox_seq = 0  # diplomacy_seq seen by the last inbox() call (the default ``since`` of the next)
 
     # ------------------------------------------------------------ transport
     def _request(self, method: str, path: str, body: Any = None, query: dict | None = None,
@@ -116,6 +130,7 @@ class AgentCivClient:
         self.game_id = res["game_id"]
         self.player_id = res["player_id"]
         self.token = res["token"]
+        self.inbox_seq = 0
         return res
 
     # ------------------------------------------------------------ lobby
@@ -192,6 +207,89 @@ class AgentCivClient:
         return self._request("GET", f"/api/games/{self._gid(game_id)}/wait",
                              query={"since_turn": since_turn, "timeout": timeout}, timeout=timeout + 15)
 
+    # ------------------------------------------------------------ barter (§13)
+    def diplomacy(self, actions, turn: int | None = None, game_id: str | None = None) -> dict:
+        """Send diplomacy actions (``propose``, ``counter``, ``accept``,
+        ``reject``, ``withdraw``, ``say``); they apply immediately. ``actions``
+        is a list (or one action dict). With ``turn``, a stale turn raises
+        ApiError(409). Returns ``{"results": [{"index","ok","deal"?,"error"?}],
+        "ok", "seq", "turn", "deadline"}``."""
+        if isinstance(actions, dict):
+            actions = [actions]
+        body: dict = {"actions": list(actions)}
+        if turn is not None:
+            body["turn"] = turn
+        return self._request("POST", f"/api/games/{self._gid(game_id)}/diplomacy", body, auth=True)
+
+    def _one(self, action: dict) -> dict:
+        res = self.diplomacy([action])
+        out = dict(res["results"][0]) if res.get("results") else {"ok": False, "error": "no result"}
+        out.setdefault("seq", res.get("seq"))
+        return out
+
+    @staticmethod
+    def _terms(action: dict, give, get, peace, message, expires_in) -> dict:
+        action["give"] = give or {}
+        action["get"] = get or {}
+        if peace:
+            action["peace"] = peace
+        if message:
+            action["message"] = message
+        if expires_in is not None:
+            action["expires_in"] = expires_in
+        return action
+
+    def propose(self, to: str, give: dict | None = None, get: dict | None = None, peace: int | None = None,
+                message: str | None = None, expires_in: int | None = None) -> dict:
+        """Propose a deal to ``to``: you hand over ``give`` and receive ``get``.
+        A bundle holds resources (``{"wood": 60}``), ``"tiles": [[x, y]]`` and/or
+        a contract ``"per_turn": {"gold": 5}, "turns": 10``; ``peace`` = k
+        turns of peace on acceptance. Returns ``{"index","ok","deal"|"error","seq"}``."""
+        return self._one(self._terms({"type": "propose", "to": to}, give, get, peace, message, expires_in))
+
+    def counter(self, deal: str, give: dict | None = None, get: dict | None = None, peace: int | None = None,
+                message: str | None = None, expires_in: int | None = None) -> dict:
+        """Counter a deal proposed to you; ``give``/``get`` are from YOUR point
+        of view. The old deal closes; the result's ``deal`` is the new one."""
+        return self._one(self._terms({"type": "counter", "deal": deal}, give, get, peace, message, expires_in))
+
+    def accept(self, deal: str) -> dict:
+        """Accept a deal proposed to you: it settles at once (``status``
+        ``accepted``) or fails (``ok`` false, ``status`` ``failed``) if either
+        side can't deliver right now."""
+        return self._one({"type": "accept", "deal": deal})
+
+    def reject(self, deal: str, message: str | None = None) -> dict:
+        a = {"type": "reject", "deal": deal}
+        if message:
+            a["message"] = message
+        return self._one(a)
+
+    def withdraw(self, deal: str) -> dict:
+        """Withdraw one of your own open proposals."""
+        return self._one({"type": "withdraw", "deal": deal})
+
+    def say(self, to: str, text: str) -> dict:
+        """Send a message to a player (private) or to ``"all"`` (public)."""
+        return self._one({"type": "say", "to": to, "text": text})
+
+    def inbox(self, since: int | None = None, timeout: float = 30.0, turn: int | None = None,
+              game_id: str | None = None) -> dict:
+        """Long-poll for diplomacy addressed to / visible to you with ``seq >
+        since`` (default: where the previous call left off). Returns
+        ``{"seq","items","turn","status","deadline","timed_out"}`` as soon as
+        there are items, the turn or status changes, or ``timeout`` passes.
+        ``turn``: the turn you are playing — returns at once if the game has
+        moved on (otherwise a turn that ended just before the call is missed)."""
+        if since is None:
+            since = self.inbox_seq
+        res = self._request("GET", f"/api/games/{self._gid(game_id)}/inbox",
+                            query={"since": since, "timeout": timeout, "turn": turn}, auth=True,
+                            timeout=timeout + 15)
+        if game_id in (None, self.game_id):
+            self.inbox_seq = max(self.inbox_seq, int(res.get("seq") or 0))
+        return res
+
     # ------------------------------------------------------------ info
     def rules(self) -> str:
         """The rules guide (markdown)."""
@@ -211,10 +309,15 @@ class AgentCivClient:
 
 
 # ====================================================================== run_bot
-def _as_act(bot_or_callable, seed: int = 0) -> Callable[[dict], list]:
+def _as_bot(bot_or_callable, seed: int = 0):
     if isinstance(bot_or_callable, str):
         from .bots import get_bot
-        bot_or_callable = get_bot(bot_or_callable, seed)
+        return get_bot(bot_or_callable, seed)
+    return bot_or_callable
+
+
+def _as_act(bot_or_callable, seed: int = 0) -> Callable[[dict], list]:
+    bot_or_callable = _as_bot(bot_or_callable, seed)
     if hasattr(bot_or_callable, "act"):
         return bot_or_callable.act
     if callable(bot_or_callable):
@@ -222,10 +325,31 @@ def _as_act(bot_or_callable, seed: int = 0) -> Callable[[dict], list]:
     raise TypeError("expected a Bot, a callable view -> orders, or a built-in bot name")
 
 
+def _negotiate_fn(bot) -> Callable[[dict], list] | None:
+    """``bot.negotiate`` unless missing or the do-nothing default of Bot."""
+    fn = getattr(bot, "negotiate", None)
+    if not callable(fn) or isinstance(bot, type):
+        return None
+    try:
+        from .bots.base import Bot
+        base = getattr(Bot, "negotiate", None)
+    except Exception:  # pragma: no cover - the bots package is optional for the SDK
+        base = None
+    if base is not None and getattr(type(bot), "negotiate", None) is base:
+        return None
+    return fn
+
+
+def _involved(view: dict, pid: str) -> list:
+    return [d for d in ((view.get("deals") or {}).get("open") or []) if pid in (d.get("from"), d.get("to"))]
+
+
 def run_bot(bot_or_callable, base_url: str = DEFAULT_URL, game_id: str | None = None,
             name: str | None = None, quickmatch: bool = False, players: int = 6,
             turn_timeout: float | None = None, client: AgentCivClient | None = None,
-            verbose: bool = False, seed: int = 0, key: str | None = None) -> dict:
+            verbose: bool = False, seed: int = 0, key: str | None = None,
+            negotiate: Callable[[dict], list] | None = None, negotiate_window: float = 2.0,
+            deadline_margin: float = 1.0) -> dict:
     """Play one game remotely and return a result dict.
 
     ``bot_or_callable`` is a :class:`agentciv.bots.base.Bot`, any callable
@@ -234,9 +358,20 @@ def run_bot(bot_or_callable, base_url: str = DEFAULT_URL, game_id: str | None = 
     ``client``. Loops wait → state → act → submit until the game finishes.
     ``key`` registers/proves ownership of ``name`` (see :meth:`AgentCivClient.join`).
 
+    **Bartering.** If the bot has ``negotiate(view) -> list[action]`` (or
+    ``negotiate=`` is given), every turn it is called on a fresh view before
+    ``act``; its actions go out through ``/diplomacy`` at once. While it has
+    open deals it keeps answering inbox events for up to ``negotiate_window``
+    seconds before acting; after submitting orders it keeps polling the inbox
+    (negotiating on every new item, and re-running ``act`` when one of its
+    deals executed) until the turn ends or ``deadline_margin`` seconds before
+    the deadline.
+
     Returns ``{"game_id","player_id","name","result","place","won","turns"}``.
     """
-    act = _as_act(bot_or_callable, seed)
+    bot = _as_bot(bot_or_callable, seed)
+    act = _as_act(bot)
+    negotiate = negotiate or _negotiate_fn(bot)
     if name is None:
         name = (bot_or_callable if isinstance(bot_or_callable, str)
                 else getattr(bot_or_callable, "name", "bot")) + "-remote"
@@ -250,6 +385,85 @@ def run_bot(bot_or_callable, base_url: str = DEFAULT_URL, game_id: str | None = 
             raise ValueError("pass game_id=..., quickmatch=True, or a joined client")
     say = (lambda *a: print(*a, file=sys.stderr, flush=True)) if verbose else (lambda *a: None)
     say(f"[{name}] joined {c.game_id} as {c.player_id}")
+
+    def run_negotiate(view: dict) -> bool:
+        """negotiate + send; True if one of our own ``accept``s executed a deal
+        (the inbox never shows our own actions, so this is how we learn it)."""
+        try:
+            actions = negotiate(view) or []
+            if isinstance(actions, dict):
+                actions = [actions]
+        except Exception as e:
+            say(f"[{name}] negotiate error on turn {view.get('turn')}: {type(e).__name__}: {e}")
+            return False
+        if not actions:
+            return False
+        try:
+            res = c.diplomacy(actions, turn=view["turn"])
+        except (ApiError, OSError) as e:
+            say(f"[{name}] diplomacy failed: {e}")
+            return False
+        results = res.get("results", [])
+        bad = [r for r in results if not r.get("ok")]
+        if bad:
+            say(f"[{name}] turn {view['turn']}: {len(bad)} diplomacy errors, e.g. {bad[0]}")
+        return any(r.get("ok") and r.get("status") == "accepted" for r in results)
+
+    def submit(orders, turn: int) -> None:
+        try:
+            res = c.submit_orders(orders or [], turn=turn)
+            if res.get("errors"):
+                say(f"[{name}] turn {turn}: {len(res['errors'])} order errors, e.g. {res['errors'][0]}")
+        except ApiError as e:
+            if e.status != 409:  # 409: the turn already resolved; just move on
+                say(f"[{name}] submit failed: {e}")
+        except OSError as e:
+            say(f"[{name}] submit failed: {e}")
+
+    def act_safe(view: dict) -> list:
+        try:
+            return act(view)
+        except Exception as e:
+            say(f"[{name}] bot error on turn {view.get('turn')}: {type(e).__name__}: {e}")
+            return []
+
+    def poll(turn: int, until: float, before_orders: bool) -> bool:
+        """Answer inbox events (negotiate on a fresh view) until the turn
+        changes or ``until``; before the orders are in, also stop once we have
+        no open deals. After the orders are in, returns True as soon as one of
+        our deals executed, including one we just accepted ourselves (the
+        orders should be recomputed)."""
+        while True:
+            left = until - time.time()
+            if left <= 0:
+                return False
+            if before_orders:
+                try:
+                    if not _involved(c.state(), c.player_id):
+                        return False
+                except (ApiError, OSError):
+                    return False
+            try:
+                box = c.inbox(timeout=min(left, 10.0), turn=turn)
+            except (ApiError, OSError):
+                return False
+            if box.get("status") != "running" or box.get("turn") != turn:
+                return False
+            items = box.get("items") or []
+            if not items:
+                continue
+            executed = any(e.get("type") == "deal_executed" and c.player_id in (e.get("from"), e.get("to"))
+                           for e in items)
+            try:
+                view = c.state()
+            except (ApiError, OSError):
+                return False
+            if view.get("turn") != turn or view.get("status") != "running":
+                return False
+            if run_negotiate(view):
+                executed = True
+            if executed and not before_orders:
+                return True
 
     last = -1
     failures = 0
@@ -278,20 +492,32 @@ def run_bot(bot_or_callable, base_url: str = DEFAULT_URL, game_id: str | None = 
         you = view.get("you") or {}
         if not you.get("alive", True):
             continue  # eliminated: just follow the game to the end
+        if negotiate is None:
+            submit(act_safe(view), turn)
+            continue
+        # --- bartering turn: negotiate, answer for a moment, act, keep answering until the turn ends
+        deadline = view.get("deadline")
+        now = time.time()
+        end = (deadline - deadline_margin) if deadline else math.inf
+        c.inbox_seq = max(c.inbox_seq, int(view.get("diplomacy_seq") or 0))
+        run_negotiate(view)
+        window = min(now + negotiate_window, now + max(0.0, (end - now) * 0.4)) if deadline else now + negotiate_window
+        poll(turn, window, before_orders=True)
         try:
-            orders = act(view)
-        except Exception as e:
-            say(f"[{name}] bot error on turn {turn}: {type(e).__name__}: {e}")
-            orders = []
-        try:
-            res = c.submit_orders(orders or [], turn=turn)
-            if res.get("errors"):
-                say(f"[{name}] turn {turn}: {len(res['errors'])} order errors, e.g. {res['errors'][0]}")
-        except ApiError as e:
-            if e.status != 409:  # 409: the turn already resolved; just move on
-                say(f"[{name}] submit failed: {e}")
-        except OSError as e:
-            say(f"[{name}] submit failed: {e}")
+            view = c.state()
+        except (ApiError, OSError):
+            pass
+        if view.get("turn") != turn or view.get("status") != "running":
+            continue
+        submit(act_safe(view), turn)
+        while poll(turn, end, before_orders=False):  # one of our deals executed: recompute orders
+            try:
+                view = c.state()
+            except (ApiError, OSError):
+                break
+            if view.get("turn") != turn or view.get("status") != "running":
+                break
+            submit(act_safe(view), turn)
 
     result = (view or {}).get("victory", {}).get("result") or {}
     places = result.get("placements") or []
@@ -314,6 +540,14 @@ def _owner_symbol(pid: str | None) -> str:
         return _OWNER_SYMBOLS[int(pid[1:]) - 1]
     except (ValueError, IndexError):
         return "?"
+
+
+def _reputation_str(p: dict) -> str:
+    rep = p.get("reputation")
+    if not isinstance(rep, dict):
+        return f" | betrayals {p['betrayals']}" if p.get("betrayals") else ""
+    return (f" | deals {rep.get('deals', 0)}, honoured {rep.get('contracts_honoured', 0)}, "
+            f"defaults {rep.get('defaults', 0)}, betrayals {rep.get('betrayals', 0)}")
 
 
 def _units_str(units: dict) -> str:
@@ -373,9 +607,111 @@ def ascii_map(view: dict, pid: str | None = None) -> str:
     return "\n".join(lines)
 
 
-def summarize_view(view: dict, pid: str | None = None, max_events: int = 12, max_messages: int = 6) -> str:
+def bundle_str(b: dict | None) -> str:
+    """Human-readable deal bundle, e.g. ``60 wood + tiles [5,6] + 5 gold/turn for 10 turns``."""
+    b = b or {}
+    parts = [f"{b[r]} {r}" for r in ("food", "wood", "stone", "gold") if b.get(r)]
+    if b.get("tiles"):
+        parts.append("tile" + ("s " if len(b["tiles"]) > 1 else " ") + " ".join(f"[{x},{y}]" for x, y in b["tiles"]))
+    if b.get("per_turn"):
+        per = ", ".join(f"{v} {r}" for r, v in b["per_turn"].items())
+        parts.append(f"{per}/turn for {b.get('turns')} turns")
+    return " + ".join(parts) or "nothing"
+
+
+def _deal_terms(d: dict) -> str:
+    txt = f"{d['from']} gives {bundle_str(d.get('give'))}; {d['to']} gives {bundle_str(d.get('get'))}"
+    if d.get("peace"):
+        txt += f"; peace {d['peace']} turns"
+    return txt
+
+
+def _deals_lines(deals: dict, contracts: list, pid: str | None, max_deals: int) -> list[str]:
+    out: list[str] = []
+    opened = deals.get("open") or []
+    if pid:
+        incoming = [d for d in opened if d.get("to") == pid]
+        outgoing = [d for d in opened if d.get("from") == pid]
+    else:
+        incoming, outgoing = [], opened
+    if incoming or outgoing:
+        out.append("\nOpen deals (barter; answer with propose/counter/accept/reject/withdraw):")
+    for d in incoming[:max_deals]:
+        ok = "deliverable now" if d.get("deliverable", True) else f"NOT deliverable now: {d.get('problem')}"
+        msg = f' — "{d["message"]}"' if d.get("message") else ""
+        out.append(f"  {d['id']} TO YOU from {d['from']}: {_deal_terms(d)} (expires after turn "
+                   f"{d.get('expires_turn')}; {ok}){msg} — accept with {{\"type\":\"accept\",\"deal\":\"{d['id']}\"}}")
+    for d in outgoing[:max_deals]:
+        who = "yours, waiting for" if pid else "awaiting"
+        out.append(f"  {d['id']} ({who} {d['to']}): {_deal_terms(d)} (expires after turn {d.get('expires_turn')})")
+    recent = (deals.get("recent") or [])[:max(3, max_deals // 2)]
+    if recent and pid:
+        out.append("Your recently closed deals: " + "; ".join(
+            f"{d['id']} {d.get('status')}" + (f" ({d['reason']})" if d.get("reason") and d.get("status") != "accepted"
+                                                else "") for d in recent))
+    if contracts:
+        mine = [k for k in contracts if pid in (k.get("payer"), k.get("payee"))] if pid else []
+        others = [k for k in contracts if k not in mine]
+        out.append("Contracts (paid each turn after yields, before upkeep; a missed payment = default, -25 "
+                   "influence):")
+        for k in (mine + others)[:max_deals]:
+            tag = " <- you pay" if k.get("payer") == pid else (" <- you receive" if k.get("payee") == pid else "")
+            per = ", ".join(f"{v} {r}" for r, v in (k.get("per_turn") or {}).items())
+            out.append(f"  {k['id']}: {k['payer']} pays {k['payee']} {per}/turn, {k.get('turns_left')} turns left{tag}")
+    log = (deals.get("log") or [])[-max(3, max_deals // 2):]
+    if log:
+        out.append("Recent public deals: " + "; ".join(
+            f"t{e.get('turn')} {e['id']}: {_deal_terms(e)}" for e in reversed(log)))
+    return out
+
+
+def describe_event(ev: dict, pid: str | None = None) -> str:
+    """One line of text for a diplomacy event from :meth:`AgentCivClient.inbox`."""
+    t = ev.get("type")
+    who = lambda p: "you" if p and p == pid else p  # noqa: E731
+    if t == "deal_proposed":
+        d = ev.get("deal") or {}
+        msg = f' — "{d["message"]}"' if d.get("message") else ""
+        return (f"{who(ev.get('from'))} proposed deal {d.get('id')} to {who(ev.get('to'))}: {_deal_terms(d)} "
+                f"(expires after turn {d.get('expires_turn')}){msg}")
+    if t == "deal_countered":
+        d = ev.get("new") or {}
+        msg = f' — "{d["message"]}"' if d.get("message") else ""
+        return (f"{who(d.get('from'))} countered deal {ev.get('deal')} with {d.get('id')} to {who(d.get('to'))}: "
+                f"{_deal_terms(d)}{msg}")
+    if t == "deal_executed":
+        c = f"; contracts {', '.join(ev['contracts'])}" if ev.get("contracts") else ""
+        return f"deal {ev.get('deal')} EXECUTED: {_deal_terms(ev)}{c}"
+    if t == "deal_rejected":
+        m = f': "{ev["message"]}"' if ev.get("message") else ""
+        return f"{who(ev.get('by'))} rejected deal {ev.get('deal')}{m}"
+    if t == "deal_withdrawn":
+        return f"deal {ev.get('deal')} withdrawn ({ev.get('reason')})"
+    if t == "deal_failed":
+        return f"deal {ev.get('deal')} FAILED on acceptance: {ev.get('reason')}"
+    if t == "deal_expired":
+        return f"deal {ev.get('deal')} expired"
+    if t == "contract_paid":
+        paid = ", ".join(f"{v} {r}" for r, v in (ev.get("paid") or {}).items())
+        return (f"contract {ev.get('contract')}: {who(ev.get('payer'))} paid {who(ev.get('payee'))} {paid} "
+                f"({ev.get('turns_left')} turns left)")
+    if t == "contract_completed":
+        return f"contract {ev.get('contract')} completed ({who(ev.get('payer'))} → {who(ev.get('payee'))})"
+    if t == "contract_default":
+        return (f"contract {ev.get('contract')} DEFAULTED: {who(ev.get('payer'))} could not pay "
+                f"{who(ev.get('payee'))} (penalty {ev.get('penalty')} influence)")
+    if t == "say":
+        to = "everyone" if ev.get("to") == "all" else who(ev.get("to"))
+        return f"{who(ev.get('from'))} → {to}: {ev.get('text')}"
+    fields = {k: v for k, v in ev.items() if k not in ("type", "turn", "seq")}
+    return f"{t}: {json.dumps(fields, separators=(',', ':'))[:200]}"
+
+
+def summarize_view(view: dict, pid: str | None = None, max_events: int = 12, max_messages: int = 6,
+                   max_deals: int = 10) -> str:
     """A compact, LLM-friendly text summary of a view: your economy, cities,
-    armies, nearby threats, diplomacy, market, victory progress and a
+    armies, nearby threats, diplomacy (open deals for you, contracts,
+    reputation, recent public deals), market, victory progress and a
     leaderboard of all players."""
     you = view.get("you") or {}
     pid = pid or you.get("id")
@@ -455,10 +791,14 @@ def summarize_view(view: dict, pid: str | None = None, max_events: int = 12, max
     for p in props:
         out.append(f"Treaty proposal from {p['from']} ({p['turns']} turns) — accept THIS turn with "
                    f"{{\"type\":\"accept_treaty\",\"from\":\"{p['from']}\"}}")
-    for o in view.get("trade_offers", []):
-        direction = "to you" if o["to"] == pid else ("from you" if o["from"] == pid else "")
-        out.append(f"Trade offer {o['id']} {o['from']}→{o['to']} {direction}: gives "
-                   f"{_units_str(o['give'])} for {_units_str(o['want'])} (expires after turn {o['expires_turn']})")
+    deals = view.get("deals")
+    if deals is None:  # an older server: only resource-for-resource offers
+        for o in view.get("trade_offers", []):
+            direction = "to you" if o["to"] == pid else ("from you" if o["from"] == pid else "")
+            out.append(f"Trade offer {o['id']} {o['from']}→{o['to']} {direction}: gives "
+                       f"{_units_str(o['give'])} for {_units_str(o['want'])} (expires after turn {o['expires_turn']})")
+    else:
+        out += _deals_lines(deals, view.get("contracts") or [], pid, max_deals)
 
     mk = view.get("market") or {}
     if mk.get("prices"):
@@ -472,7 +812,8 @@ def summarize_view(view: dict, pid: str | None = None, max_events: int = 12, max
                    f"{thr.get('wonder_stage')}, influence {thr.get('influence')}, relics "
                    f"{thr.get('relics_needed')}/{thr.get('relics_total')} held for {thr.get('relic_turns')} turns, "
                    f"economic {thr.get('economic_gold')} gold, else best score at turn {thr.get('max_turns')}.")
-    out.append("Players (score | cities tiles | power | gold infl | wonder relics | best victory progress):")
+    out.append("Players (score | cities tiles | power | gold infl | wonder relics | best victory progress | "
+               "reputation):")
     for p in sorted(players.values(), key=lambda p: -p.get("score", 0)):
         vp = {k: v for k, v in (p.get("victory_progress") or {}).items() if k != "score"}
         best = max(vp.items(), key=lambda kv: kv[1]) if vp else ("-", 0)
@@ -482,7 +823,7 @@ def summarize_view(view: dict, pid: str | None = None, max_events: int = 12, max
         out.append(f"  {p['id']} {p['name']}{flag}{me_tag}: {p.get('score')} | {p.get('cities')} {p.get('tiles')} | "
                    f"{p.get('military_power')} | {r.get('gold', 0)} {r.get('influence', 0)} | "
                    f"{p.get('wonder_stage', 0)} {p.get('relics_held', 0)} | {best[0]} {best[1] * 100:.0f}%"
-                   + (f" | betrayals {p['betrayals']}" if p.get("betrayals") else ""))
+                   + _reputation_str(p))
     relics = (view.get("map") or {}).get("relics", [])
     if relics:
         out.append("Relics: " + ", ".join(f"[{r['x']},{r['y']}] {r['owner'] or 'unowned'}" for r in relics))
@@ -492,7 +833,7 @@ def summarize_view(view: dict, pid: str | None = None, max_events: int = 12, max
         mine = [e for e in events if e.get("type") == "order_failed" and e.get("player") == pid]
         others = [e for e in events if e not in mine and e.get("type") in (
             "battle", "city_captured", "city_founded", "eliminated", "treaty_signed", "treaty_broken",
-            "wonder_stage", "starvation", "trade_executed", "victory", "tile_captured")]
+            "wonder_stage", "starvation", "trade_executed", "victory", "tile_captured", "contract_default")]
         if mine:
             out.append("\nYour failed orders last turn:")
             out += [f"  #{e.get('index')} {e.get('order_type')}: {e.get('reason')}" for e in mine[:max_events]]

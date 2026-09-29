@@ -13,8 +13,9 @@ doc when they change).
 * Resource management is the heart of the game; combat is **optional** — there
   are multiple peaceful paths to victory and enforceable peace treaties.
 * **Skill must dominate luck.** Combat is deterministic, information is complete
-  (except private messages / trade offers / treaty proposals between other
-  players — hidden from spectators too until the game ends, §10), map starts are
+  (except private messages / deals under negotiation / treaty proposals
+  between other players — hidden from spectators too until the game ends,
+  §10, §13.5), map starts are
   templated to be equal, and turns are simultaneous with a deadline so reaction
   speed does not matter. The only randomness is the seeded map generator.
 * Agents must be able to connect trivially: HTTP+JSON, a stdlib-only Python SDK,
@@ -30,12 +31,16 @@ state and the orders.
 
 Resolution phases, in order:
 
-1. **Diplomacy** — messages queued for delivery; `break_treaty` processed;
-   `accept_treaty` for proposals made last turn; new `propose_treaty` stored.
-2. **Trades** — `accept_trade` executes if the offer is still open and both
-   parties can pay; new `offer_trade` stored (visible next turn). Accepts are
-   processed player by player starting from a player that rotates every turn
-   (`turn % alive_count`).
+1. **Diplomacy** — diplomacy actions placed inside orders (§13.2: `propose`,
+   `counter`, `accept`, `reject`, `withdraw`, `say` and the legacy
+   `offer_trade`/`accept_trade`/`message`) are applied exactly as if sent
+   through `Game.diplomacy` at that moment, interleaved round-robin (every
+   player's 1st diplomacy order, then every player's 2nd, …) starting from a
+   player that rotates every turn (`turn % alive_count`). Failures are
+   `order_failed` events. (Actions sent through the diplomacy channel during
+   the turn have already taken effect.)
+2. **Treaties** — `break_treaty` processed; `accept_treaty` for proposals made
+   last turn; new `propose_treaty` stored.
 3. **Market** — batch auction per resource (§6).
 4. **Actions** — each player's `build`, `claim`, `settle`, `recruit`, `disband`
    orders executed **in the order submitted**, paying costs at execution time
@@ -49,14 +54,15 @@ Resolution phases, in order:
    anyway contest nothing (so they can't be used to block rivals for free).
    Recruits are *queued* (units appear in phase 6). Players' action
    lists are interleaved round-robin (every player's 1st action, then every
-   player's 2nd, …), starting from the rotating player of phase 2.
+   player's 2nd, …), starting from the rotating player of phase 1.
 5. **Movement & combat** (§7), then captures.
 6. **Spawn** — queued recruits appear in their city if the recruiter still
    owns it and no hostile units stand on it (otherwise lost).
-7. **Economy** — yields ×season, deposit depletion, influence income, upkeep &
-   starvation, storage caps, market reversion.
-8. **Bookkeeping** — eliminations, relic streaks, victory checks, score.
-   `turn += 1`.
+7. **Economy** — yields ×season, deposit depletion, influence income,
+   contract instalments (§13.3), upkeep & starvation, storage caps, market
+   reversion.
+8. **Bookkeeping** — eliminations, relic streaks, treaty expiry, treaty
+   proposal and deal expiry (§13.2), victory checks, score. `turn += 1`.
 
 ## 3. Map
 
@@ -325,7 +331,8 @@ If both partners order `break_treaty` in the same turn, both pay and both get
 a betrayal (whoever can pay; no seat order advantage).
 A treaty accepted on turn t for `turns` k has `until_turn = t + k` and is
 removed at the end of turn `until_turn`. Treaty proposals can be accepted only
-on the turn after they were made.
+on the turn after they were made. A deal with `"peace": k` (§13) signs (or
+extends) a treaty immediately on acceptance.
 
 **Disband** `{at, units}` removes your units (no refund).
 
@@ -375,12 +382,13 @@ Every order is an object with `"type"`. Coordinates are `[x, y]`.
 {"type":"settle","at":[9,9]}
 {"type":"disband","at":[3,4],"units":{"infantry":1}}
 {"type":"market","side":"buy","resource":"stone","qty":40,"limit":2.5}
-{"type":"offer_trade","to":"p2","give":{"wood":50},"want":{"gold":40}}
-{"type":"accept_trade","offer_id":"t7"}
+{"type":"offer_trade","to":"p2","give":{"wood":50},"want":{"gold":40}}  // = propose (§13)
+{"type":"accept_trade","offer_id":"d7"}                                 // = accept (§13)
 {"type":"propose_treaty","to":"p3","turns":20}
 {"type":"accept_treaty","from":"p3"}
 {"type":"break_treaty","with":"p3"}
-{"type":"message","to":"p2","text":"Truce?"}          // "to":"all" = public
+{"type":"message","to":"p2","text":"Truce?"}          // = say; "to":"all" = public
+{"type":"propose","to":"p2","give":{"wood":60},"get":{"gold":45}}  // any §13.2 action
 ```
 
 `move` also accepts `"to":[x,y]` as shorthand for a 1-step path; omitting
@@ -388,9 +396,12 @@ Every order is an object with `"type"`. Coordinates are `[x, y]`.
 `disband` without `units` removes the whole stack. `recruit` accepts `"at"` as
 an alias of `"city"` and `count` defaults to 1 (max 50). Coordinates may also
 be `{"x":..,"y":..}`; integer-valued floats/strings are accepted.
-`submit_orders` also accepts `{"orders":[...]}`. Trade offers expire after 3
-turns (`expires_turn = turn_made + 3`, acceptable through that turn).
-At most 100 orders per turn; messages ≤ 500 chars; at most 5 messages per turn.
+`submit_orders` also accepts `{"orders":[...]}`. `offer_trade` creates a
+resource-only deal (§13; `want` = `get`, it expires like any deal) and
+`accept_trade` accepts one (`offer_id` = the deal id; an integer `n`, `"n"`
+or the old `"tn"` form means `"dn"`). At most 100 orders per turn; messages
+≤ 500 chars; at most 10 messages (`say`) and 30 diplomacy actions per turn
+(§13.2; the limits are shared with the diplomacy channel).
 
 `Game.submit_orders` performs **pre-validation** against the current state and
 returns a list of `{"index": i, "error": "..."}` for malformed/impossible orders
@@ -402,18 +413,24 @@ resolution (e.g. insufficient resources) — such failures appear as
 
 `Game.player_view(pid)` and `Game.spectator_view(full=False)` return the same
 shape; players see public messages and messages to/from themselves (the last
-50 visible messages are included), and trade offers/treaty proposals
-involving them. The spectator view has `"you": null` and, because it is served
+50 visible messages are included), and deals/treaty proposals
+involving them (§13.5). The spectator view has `"you": null` and, because it is served
 without authentication, is **public while the game is not finished**: only
-public messages and public events, no `trade_offers`, no `treaty_proposals`
-(otherwise any player could drop their token and read everyone's private
+public messages and public events, no open/recent deals (only
+`deals.log` and `contracts`), no `trade_offers`, no `treaty_proposals`,
+`diplomacy_seq: null` (the counter would reveal how much private haggling
+goes on) (otherwise any player could drop their token and read everyone's private
 diplomacy). Once the game is finished — or with `full=True` (offline
 tournaments, finished replays) — it shows all messages, offers, proposals and
 events. Views are freshly built on
 every call (callers may mutate them). Additional fields beyond the example:
 top-level `name`; `you.alive`, `you.market_fee`, `you.capital` ([x,y]);
-`players[].upkeep`; `trade_offers[].turn`; `players[].relics_guarded` and
-`map.relics[].guarded` (relics whose owner has units on them).
+`players[].upkeep`; `players[].relics_guarded` and
+`map.relics[].guarded` (relics whose owner has units on them);
+`players[].reputation`, `deals`, `contracts`, `diplomacy_seq` (§13.5).
+`trade_offers` is kept for backward compatibility: the open **resource-only**
+deals (no tiles, contract or peace) the viewer may see, as
+`{id, from, to, give, want (= get), turn, expires_turn}`.
 
 ```json
 {
@@ -450,7 +467,8 @@ top-level `name`; `you.alive`, `you.market_fee`, `you.capital` ([x,y]);
              "history":[{"turn":11,"prices":{"food":1.0,"wood":1.5,"stone":2.0}}]},
   "treaties": [{"a":"p1","b":"p2","until_turn":40}],
   "treaty_proposals": [{"from":"p3","to":"p1","turns":20,"turn":11}],
-  "trade_offers": [{"id":"t7","from":"p2","to":"p1","give":{"wood":50},"want":{"gold":40},"expires_turn":14}],
+  "trade_offers": [{"id":"d7","from":"p2","to":"p1","give":{"wood":50},"want":{"gold":40},"turn":12,"expires_turn":14}],
+  "deals": {"open":[...], "recent":[...], "log":[...]}, "contracts": [...], "diplomacy_seq": 57,
   "messages": [{"turn":11,"from":"p2","to":"all","text":"hello"}],
   "events": [{"turn":11,"type":"battle","x":5,"y":5,"sides":["p1","p2"],"winner":"p1","losses":{...}}],
   "victory": {"thresholds":{"conquest_capitals":4,"wonder_stage":5,"influence":3350,
@@ -469,9 +487,11 @@ events generated while resolving the previous turn (players only see events
 public or involving them; most events are public). Event types include:
 `battle, city_captured, city_founded, tile_captured, claim, build, recruit,
 disband, wonder_stage, starvation, eliminated, treaty_proposed, treaty_signed,
-treaty_broken, treaty_expired, trade_offered, trade_executed, market,
-order_failed, victory` (private: `order_failed`, `treaty_proposed`,
-`trade_offered`, `trade_executed`). Every event has `turn` and `type`;
+treaty_broken, treaty_expired, market, order_failed, victory` and the deal
+events of §13.5 (private: `order_failed`, `treaty_proposed` and the private
+deal events). Events of diplomacy actions sent through the channel during
+turn t are reported with the events of turn t (after it resolves) and are
+immediately available through `Game.inbox`. Every event has `turn` and `type`;
 `battle` has `x, y, sides, winner (null = both destroyed), losses, powers,
 clash` (+ `to` for border clashes); `order_failed` has `player, index,
 order_type, reason`.
@@ -491,6 +511,9 @@ g.result -> dict | None            # same as victory.result
 g.player_view(pid) -> dict
 g.spectator_view(full=False) -> dict  # public while running; full=True: everything
 g.alive_players() -> list[str]
+g.diplomacy(pid, actions) -> list  # §13: immediate; [{"index","ok","deal"?,"error"?}]
+g.inbox(pid, since=0) -> dict      # {"seq","items"}: diplomacy events for pid
+g.diplomacy_log -> list            # {"turn","seq","pid","action","via"}
 ```
 
 Also: `g.stats()` (per-player derived stats), `Game.rules()` / `rules_json()`,
@@ -565,7 +588,9 @@ display rating = mu − 3·sigma).
 * **Spectators and private information.** The unauthenticated spectator
   endpoints (`/state` without a token, `/stream`, `/replay`) serve the
   *public* view while a game is not finished: public messages and events
-  only, no `trade_offers` or `treaty_proposals`, no private events. Once the
+  only, no open/recent deals, `trade_offers` or `treaty_proposals`, no
+  private events, `diplomacy_seq` null (the public deal log and contracts
+  are shown). Once the
   game is finished, `/state`, `/stream` and the replay (file and endpoint)
   carry the full spectator view (all messages, offers, proposals, events).
 * **Starting a lobby.** `POST /start` needs no token while no remote player
@@ -639,8 +664,12 @@ bound by a peace treaty for k turns (extends an existing treaty to the later
 
 Validity at proposal time: both parties alive, `from ≠ to`, at least one
 non-empty term, quantities are non-negative integers ≤ 100000, `turns` 1–30
-when `per_turn` is present, ≤ 5 tiles per bundle, tiles currently owned by the
-bundle's giver. Each player may have at most 8 of its own proposals open.
+when `per_turn` is present (required with it), ≤ 5 tiles per bundle (no
+duplicates), tiles currently owned by the bundle's giver and not a city or
+relic, resources only `food/wood/stone/gold` (influence is not tradable),
+and every tile passes the **adjacency rule** of §13.2 (checked here and
+again on accept). Each player may have at most 8 of its own proposals open. Whether the giver
+can currently *deliver* is **not** checked at proposal time (only on accept).
 
 ### 13.2 Diplomacy actions
 
@@ -648,7 +677,10 @@ Actions can be sent **at any time while the game is running** through the
 diplomacy channel (`Game.diplomacy(pid, actions)` / `POST /diplomacy`) and
 take effect **immediately**; they may also be included in a turn's orders, in
 which case they are processed in phase 1 (Diplomacy) of resolution, players
-round-robin from the rotating start player.
+round-robin from the rotating start player. Inside orders they are
+pre-validated against the state at submission (bad ones are returned as
+`{"index","error"}` like other orders; a list may not use the same deal
+twice) and checked again when applied.
 
 ```json
 {"type":"propose","to":"p2","give":{"wood":60},"get":{"gold":45},"message":"surplus wood"}
@@ -667,28 +699,63 @@ round-robin from the rotating start player.
   deal fails (status `failed`, both are told why) — nothing partially moves.
   On success resources and tiles transfer at once (improvements go with tiles;
   armies on a traded tile stay), contracts are created and peace is signed.
+  **Land rules** (checked on accept; a violating deal fails like an
+  undeliverable one):
+  - *Adjacency* (also checked on propose/counter): each traded tile must be
+    4-adjacent to land its receiver already owns — not counting tiles the
+    receiver hands over in the same deal — or to another tile of the same
+    bundle that is. Land sales move a border; they cannot plant a third
+    party's territory (impassable to that party's treaty partners, §7)
+    around somebody's city, or create enclaves.
+  - *No foreign units*: a tile cannot be transferred while units of anyone
+    other than its receiver stand on it (even a treaty partner's, and even
+    when the deal carries peace — the army would take the tile back when
+    the treaty ends, and blocks the new owner meanwhile).
+  - *Per-turn cap*: a player may receive at most
+    `DEAL_MAX_TILES_RECEIVED_PER_TURN` = 5 tiles by deals per turn (counted
+    from the deal log of the current turn), which bounds last-turn land
+    gifts that would pick the score winner.
+  Storage caps apply only at the end of the turn (phase 7), as for the market.
 * A deal is `expired` at the end of turn `expires_turn`. A deal is
   auto-withdrawn if either party is eliminated.
 * Limits per player per turn: 30 diplomacy actions and 10 `say` messages
-  (excess rejected with an error). Text is capped (say 500, message 300 chars).
+  (a `say` counts toward both; excess rejected with an error). Text is capped (say 500, message 300 chars).
+  Only *applied* actions count (an `accept` whose settlement failed counts;
+  actions rejected with a validation error do not). Channel actions and
+  actions inside orders share the limits. At most 100 actions are looked at
+  per `diplomacy` call.
+* On a deal nobody else can see, `counter`/`accept`/`reject`/`withdraw` fail
+  with the same error as for a non-existent deal (no probing).
 * Every action gets an immediate result
-  `{"index":i,"ok":true,"deal":"d9"}` or `{"index":i,"ok":false,"error":"..."}`.
+  `{"index":i,"ok":true,"deal":"d9"}` or `{"index":i,"ok":false,"error":"..."}`
+  (`counter` also returns `"countered":<old id>`; `accept` returns
+  `"status":"accepted"`, or `ok:false` with `"deal"` and `"status":"failed"`
+  when settlement failed; `say` returns no `deal`).
 
 ### 13.3 Contracts
 
 A contract `{id, payer, payee, per_turn:{...}, turns_left, deal}` pays during
 phase 7 (Economy) **after yields, before upkeep**. If the payer cannot pay the
 full instalment the contract **defaults**: nothing is paid that turn, the
-contract is cancelled, the payer loses 25 influence (floored at 0) and its
-public `defaults` counter increments. A completed contract increments the
+contract is cancelled, the payer is fined `max(25, ceil(owed / 5))`
+influence (`owed` = the sum of all units of the remaining instalments,
+`turns_left × Σ per_turn`; `CONTRACT_DEFAULT_PENALTY`,
+`CONTRACT_DEFAULT_OWED_PER_INFLUENCE`) and its public `defaults` counter
+increments. The part of the fine its influence stock cannot cover becomes
+public `influence_debt`, taken from its influence at the start of every
+later contract payment step (phase 7, after yields) until paid — so
+spending influence before defaulting does not dodge the fine. A completed contract increments the
 payer's `contracts_honoured`. Contracts are public (everyone sees who pays
 whom), which makes tribute and alliances visible. Contracts die with an
-eliminated party.
+eliminated party. Contracts pay in creation order (an instalment received
+earlier in the list can fund a later payment); the first instalment is paid
+in phase 7 of the turn in which the deal was accepted.
 
 ### 13.4 Reputation (public)
 
 `players[].reputation = {"deals":n, "contracts_honoured":n, "defaults":n,
-"betrayals":n}` (`betrayals` is the treaty counter from §7).
+"betrayals":n, "influence_debt":n}` (`betrayals` is the treaty counter from
+§7; `influence_debt` the unpaid default fines of §13.3).
 
 ### 13.5 Visibility
 
@@ -711,28 +778,84 @@ View additions (player view; spectator gets public parts while running):
 "diplomacy_seq": 57
 ```
 
-`diplomacy_seq` increases with every diplomacy action/event in the game;
+`diplomacy_seq` increases with every diplomacy action/event in the game
+(null in the public spectator view of a running game);
 agents long-poll `GET /api/games/{id}/inbox?since=<seq>` to be woken when
 something addressed to them happens (new proposal, counter, acceptance,
 rejection, message).
 
-Events: `deal_proposed, deal_countered, deal_accepted` (= `deal_executed`,
-public), `deal_rejected, deal_withdrawn, deal_expired, deal_failed,
-contract_paid, contract_default (public), contract_completed, say`.
+Events: `deal_proposed, deal_countered, deal_executed` (the acceptance
+event; public), `deal_rejected, deal_withdrawn, deal_expired, deal_failed,
+contract_paid, contract_default (public), contract_completed, say` (public
+when `to` is `"all"`). The others are visible to the two parties only. Every
+diplomacy event carries `seq` and, when a player caused it, `by` (null for
+an automatic withdrawal on elimination). Fields: `deal_proposed {deal:
+<open-deal object>, from, to}`, `deal_countered {deal: old id, new: <deal>,
+from, to}`, `deal_executed {deal, thread, from, to, give, get, peace,
+contracts: [ids]}`, `deal_rejected {deal, message}`, `deal_withdrawn {deal,
+reason}`, `deal_failed {deal, reason}`, `deal_expired {deal}`, `contract_paid
+{contract, payer, payee, paid, turns_left}`, `contract_completed {contract,
+payer, payee, deal}`, `contract_default {contract, payer, payee, per_turn,
+turns_left, penalty, debt, deal}` (`penalty` = the whole fine, `debt` = the
+part added to `influence_debt`), `say {from, to, text}`. A deal's peace also
+emits the public `treaty_signed {a, b, until_turn, deal}`.
+
+Open deals in views also carry `deliverable` (bool) and `problem` (null or
+why accepting it right now would fail — computed from public information).
+`deals.recent` is newest first, with `reason` and `closed_turn`; the full
+spectator view lists every open deal and the last 100 closed ones.
+`deals.log` holds the last 50 executed deals.
 
 ### 13.6 Engine / server / bots
 
-* Engine: `Game.diplomacy(pid, actions) -> list[result]` (never raises);
-  every applied action is appended to `Game.diplomacy_log` with
-  `(turn, seq, pid, action)` so a game is reproducible from its orders +
-  diplomacy log. Mid-turn changes are visible in views immediately; already
-  submitted orders are re-checked at resolution as usual.
-* Server: `POST /api/games/{id}/diplomacy {"actions":[...]}` (auth) → results;
-  `GET /api/games/{id}/inbox?since=SEQ&timeout=30` (auth) → `{"seq":n,
-  "items":[events/deals addressed to you with seq > since]}`; turns also
-  accept diplomacy actions inside `/orders`. SSE pushes on executed deals.
+* Engine: `Game.diplomacy(pid, actions) -> list[result]` (never raises;
+  also accepts `{"actions":[...]}` or a single action object); every applied
+  action is appended to `Game.diplomacy_log` as `{"turn", "seq", "pid",
+  "action" (canonical form), "via": "channel"|"orders"}` so a game is
+  reproducible from its orders + diplomacy log: for each turn, apply that
+  turn's `via: "channel"` entries in log order, submit the turn's orders,
+  step (`"orders"` entries are informational — they are re-created by the
+  orders). The replay is exact when orders were (re)submitted after that
+  turn's channel actions, which is how bots negotiate (rounds before
+  `act()`); an order list submitted *before* a channel action can differ in
+  pre-validation errors only. `diplomacy_seq` grows by one per applied action
+  and per diplomacy event. `Game.inbox(pid, since)` returns `{"seq",
+  "items"}`: diplomacy events visible to `pid` with `seq > since`, except
+  those `by` `pid` (the last 5000 diplomacy events are kept). Mid-turn
+  changes are visible in views immediately; already submitted orders are
+  re-checked at resolution as usual. Constants: `constants.py` (`DEAL_*`,
+  `DIPLOMACY_*`, `SAY_PER_TURN`, `CONTRACT_DEFAULT_*`), exposed under
+  `rules_json()["diplomacy"]["deals"]`.
+* Helpers for bots/SDK (`agentciv.engine.deals`, pure, work on a JSON view):
+  `parse_bundle`/`check_bundle` (normalise/validate a bundle),
+  `parse_action` (canonical action), `view_delivery_problem(view, pid,
+  bundle, receiver=None, leaving=())` / `view_deal_problem(view, deal)` (can
+  it settle now? includes the land rules), `land_problem`, `tiles_received`,
+  `default_penalty(per_turn, turns_left)`,
+  `bundle_value(bundle, prices, tile_value, discount)` (rough gold value).
+* Server: `POST /api/games/{id}/diplomacy {"actions":[...]}` (auth; also a
+  bare list or one action object; optional `"turn"` → 409 if stale; 409 in
+  the lobby, when finished or eliminated; 400 for a body that is not an
+  action list or holds more than 100 actions) → `{"results":[...], "ok": all ok, "seq", "turn",
+  "deadline"}` (a malformed action's result also carries an `example`/`hint`);
+  `GET /api/games/{id}/inbox?since=SEQ&timeout=30&turn=T` (auth; `since`
+  default 0, `timeout` ≤ 120 s) → `{"seq":n, "items":[Game.inbox items with
+  seq > since], "turn", "status", "deadline", "timed_out"}`, returning as
+  soon as there are items, the status or turn changes (or the current turn
+  is not `T`), or on timeout. Turns also accept diplomacy actions inside
+  `/orders`. `/stream` pushes a spectator frame whenever public diplomacy
+  happens mid-turn (an executed deal, a public `say`). Engine calls happen
+  under the session lock, so channel actions are serialised with turn
+  resolution (an action lands in whichever turn is current).
 * Bots: `Bot.negotiate(view) -> list[actions]` (default `[]`). The tournament
   runner and the server give every bot **3 negotiation rounds per turn**
   before `act()` (each round: every bot, in rotating seat order, sees a fresh
   view and returns actions, applied immediately). The server additionally
-  runs a house bot's `negotiate` shortly after anything is addressed to it.
+  runs a house bot's `negotiate` shortly after anything is addressed to it
+  (0.25 s debounce, ≤ 1 s; at most 10 such calls per bot per turn), and
+  re-runs its `act()` (resubmitting its orders) when one of its deals executed
+  after it acted — always before the turn resolves, and even once its
+  negotiate budget is used up. Server details: bots run outside the game lock; a bot whose
+  `negotiate` is missing or the `Bot` default is skipped; `negotiate` raising
+  or returning a non-list means no actions; the 3 rounds stop early after
+  `min(5 s, max(0.5 s, turn_timeout/4))`.

@@ -1,6 +1,7 @@
 """HTTP front-end (stdlib ``http.server``) for the AgentCiv server.
 
-Implements every endpoint of docs/DESIGN.md §12 plus a few conveniences
+Implements every endpoint of docs/DESIGN.md §12 and the barter endpoints of
+§13 (``POST /diplomacy``, ``GET /inbox``) plus a few conveniences
 (``GET /api`` endpoint index, ``GET /api/games/{id}`` summary). JSON in, JSON
 out, permissive CORS, and every error is a JSON ``{"error": ...}`` with a
 proper status code. Nothing a client sends can crash the server thread.
@@ -363,6 +364,14 @@ class Handler(BaseHTTPRequestHandler):
             if self.command == "HEAD":
                 timeout = 0.0  # HEAD must not block
             return self._json(game.wait(since, timeout))
+        if action == "inbox":
+            pid = self._player(game_id, query, required=True)
+            since = self._int_query(query, "since", None)
+            timeout = self._float_query(query, "timeout", 30.0)
+            timeout = min(max(timeout, 0.0), MAX_WAIT)
+            if self.command == "HEAD":
+                timeout = 0.0
+            return self._json(game.inbox(pid, since, timeout, self._int_query(query, "turn", None)))
         if action == "replay":
             compact = (query.get("compact") or ["0"])[0].lower() in ("1", "true", "yes")
             lo = self._int_query(query, "from", None)
@@ -402,7 +411,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _stream(self, game) -> None:
         """Server-sent events: ``event: state`` with the spectator view on
-        connect and after every turn; ``: keep-alive`` comments in between.
+        connect, after every turn and on public diplomacy (an executed deal,
+        a public message); ``: keep-alive`` comments in between.
         The stream ends after the final (finished) frame."""
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -463,6 +473,9 @@ class Handler(BaseHTTPRequestHandler):
         if action == "orders":
             pid = self._player(game_id, query, required=True)
             return self._json(game.submit(pid, body))
+        if action == "diplomacy":
+            pid = self._player(game_id, query, required=True)
+            return self._json(game.diplomacy(pid, body))
         raise ApiError(404, f"no such endpoint: POST {path} (GET /api lists the endpoints)")
 
     def _may_start(self, game, query: dict) -> bool:

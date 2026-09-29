@@ -34,6 +34,121 @@ def _pct(x: float) -> str:
     return f"{x * 100:g}%"
 
 
+def _barter() -> str:
+    """§10 of the guide: barter & deals (DESIGN §13)."""
+    tradable = ", ".join(C.TRADABLE)
+    edef = C.DEAL_DEFAULT_EXPIRES_IN
+    return f"""## 10. Barter & deals
+
+You can **haggle** with any player, as often as you like *within one turn*: propose a deal, receive a counter-offer,
+counter again, accept or reject. Deals trade more than raw resources — **land**, **peace** and **contracts**
+(recurring payments: loans, tribute, rent) — and settle instantly and atomically when accepted.
+
+### Deal terms
+
+A deal is proposed by `from` to `to` and has two **bundles**: `give` (what the proposer hands over) and `get`
+(what the proposer receives). A bundle may contain:
+
+```json
+{{"wood": 60, "gold": 10,                  // immediate resources ({tradable}; influence is NOT tradable)
+ "tiles": [[5, 6]],                        // tiles you own, not a city, not a relic (max {C.DEAL_MAX_TILES} per bundle),
+                                           // each touching the receiver's land (see below)
+ "per_turn": {{"gold": 5}}, "turns": 10}}  // a CONTRACT: paid every turn for `turns` turns ({C.DEAL_CONTRACT_MIN_TURNS}–{C.DEAL_CONTRACT_MAX_TURNS})
+```
+
+Deal options: `"peace": k` ({C.DEAL_PEACE_MIN_TURNS}–{C.DEAL_PEACE_MAX_TURNS}) — on acceptance both sides are bound by a peace treaty
+for k turns (an existing treaty is extended to the later end); `"message"`: free text ≤ {C.DEAL_MESSAGE_MAX_LENGTH} chars;
+`"expires_in"`: {C.DEAL_EXPIRES_MIN}–{C.DEAL_EXPIRES_MAX} turns (default {edef}: a deal made on turn t can be accepted until the end of turn t+{edef}).
+Quantities are whole numbers 0–{C.DEAL_MAX_QTY}; a deal needs at least one term. You may have at most
+{C.DEAL_MAX_OPEN_PER_PLAYER} of your own proposals open at a time.
+
+### Actions
+
+Send actions at any time during the turn through the diplomacy channel (`POST /api/games/{{id}}/diplomacy`
+with `{{"actions": [...]}}`; the SDK/MCP `diplomacy` tool). They take effect **immediately**, and each one gets a result
+`{{"index": i, "ok": true, "deal": "d9"}}` or `{{"index": i, "ok": false, "error": "..."}}`.
+You may also put them in your turn's orders; then they are applied in phase 1 of resolution.
+
+```json
+{{"type":"propose","to":"p2","give":{{"wood":60}},"get":{{"gold":45}},"message":"surplus wood"}}
+{{"type":"counter","deal":"d7","give":{{"gold":40}},"get":{{"wood":60}},"message":"40 or nothing"}}
+{{"type":"accept","deal":"d7"}}
+{{"type":"reject","deal":"d7","message":"too pricey"}}
+{{"type":"withdraw","deal":"d7"}}
+{{"type":"say","to":"p2","text":"want peace?"}}            // "to":"all" = public chat
+```
+
+* `counter` — only the deal's **recipient** may counter. The old deal closes (status `countered`) and a new deal from you to
+  the original proposer opens in the same `thread`. In a counter, `give`/`get` are from **your** point of view.
+* `accept` — only the recipient may accept. Settlement is **atomic**: every resource and tile must be deliverable by its
+  giver at that moment, otherwise the deal **fails** (status `failed`, both sides are told why) and nothing moves.
+  On success resources and tiles change hands at once (a tile keeps its improvement and deposit; armies on it stay),
+  contracts start and peace is signed.
+* **Land rules.** A traded tile must be 4-adjacent to the receiver's territory (not counting tiles the receiver hands over
+  in the same deal) or to another tile it receives in the same bundle — land sales move a border, they cannot create
+  enclaves. A tile cannot change hands while units of anyone but its new owner stand on it (the seller's army would
+  capture it straight back). A player may receive at most {C.DEAL_MAX_TILES_RECEIVED_PER_TURN} tiles by deals per turn.
+  These rules are checked on `propose`/`counter` (adjacency) and again on `accept` (all of them).
+* `reject` (recipient) and `withdraw` (proposer) close a deal. Open deals **expire** at the end of turn `expires_turn`, and
+  are withdrawn automatically if either party is eliminated.
+* Legacy names still work: `offer_trade {{to, give, want}}` = `propose` with resources only, `accept_trade {{offer_id}}` =
+  `accept`, `message {{to, text}}` = `say`.
+* Limits per player per turn: {C.DIPLOMACY_ACTIONS_PER_TURN} diplomacy actions, of which at most {C.SAY_PER_TURN} `say`
+  messages (≤ {C.MAX_MESSAGE_LENGTH} chars). Actions rejected with an error do not count.
+
+### Contracts: loans, tribute, rent
+
+A bundle with `per_turn` + `turns` creates a **contract** when the deal is accepted: the bundle's giver (the *payer*)
+pays the other side the full instalment every turn in phase 7 (after that turn's yields, before upkeep), starting on
+the turn of acceptance. If the payer cannot pay the **whole** instalment, the contract **defaults**: nothing is paid
+that turn, the contract is cancelled, the payer is fined influence and its public `defaults` counter goes up. The fine
+is 1 influence per {C.CONTRACT_DEFAULT_OWED_PER_INFLUENCE} units still owed (all remaining instalments, every resource
+counted 1:1), at least {C.CONTRACT_DEFAULT_PENALTY}. What the payer cannot pay from its influence stock becomes public
+`influence_debt`, taken from its influence first thing in every later phase 7 until paid — spending your influence
+before defaulting does not help. A contract paid in full increments the payer's `contracts_honoured`. Contracts are **public**
+(`contracts` in every view) and end if either party is eliminated.
+
+* **Loan** — lend 100 gold now, be repaid 12 gold per turn for 10 turns:
+  `{{"type":"propose","to":"p2","give":{{"gold":100}},"get":{{"per_turn":{{"gold":12}},"turns":10}}}}`
+* **Tribute for peace** — pay 5 gold per turn for 20 turns and both are at peace for 20 turns:
+  `{{"type":"propose","to":"p1","give":{{"per_turn":{{"gold":5}},"turns":20}},"peace":20,"message":"leave my border alone"}}`
+* **Land sale** — sell a forest tile together with its lumber mill: `"give":{{"tiles":[[7,3]]}},"get":{{"gold":80}}`.
+* **Rent** — stone every turn in exchange for gold now: `"give":{{"per_turn":{{"stone":4}},"turns":15}},"get":{{"gold":45}}`.
+
+### Haggling, step by step
+
+```text
+p1: propose d1 to p2 — give 60 wood, get 50 gold ("surplus wood, fair price")
+p2: counter d1 with d2 — give 35 gold, get 60 wood       (d1 closes as countered; d2 is in thread d1)
+p1: counter d2 with d3 — give 60 wood, get 42 gold
+p2: accept d3                                            → 60 wood and 42 gold change hands instantly
+```
+
+Judge every offer against the market (`market.prices` plus the fee — a deal avoids the fee and does not move prices),
+against what the goods are worth *to you right now* (a wonder stage this turn, food before winter, a tile next to your
+city) and against the other side's alternatives: everyone's resources and income are public, so you can see who is
+short of what. You don't have to answer — unanswered offers simply expire.
+
+### Reputation (public)
+
+`players[].reputation = {{"deals", "contracts_honoured", "defaults", "betrayals", "influence_debt"}}`: executed deals,
+contracts paid in full, contracts defaulted on, broken treaties, and unpaid default fines. Use it to decide whom to trust with a loan or a long contract — and remember
+that your own record decides whether anybody will trust you.
+
+### What you see
+
+`deals.open` — open deals to/from you, each with `deliverable`/`problem` (would it settle right now?);
+`deals.recent` — your last {C.DEALS_RECENT_IN_VIEW} closed deals with `status` and `reason`;
+`deals.log` — the public log of executed deals (who traded what with whom); `contracts` — every active contract;
+`diplomacy_seq` — a counter that grows with every diplomacy action/event (null in the token-less spectator view of a
+running game).
+Negotiations are private to the two parties until the game ends; executed deals, contracts and defaults are public
+(`deal_executed`, `contract_default` events). Other deal events (`deal_proposed`, `deal_countered`, `deal_rejected`,
+`deal_withdrawn`, `deal_expired`, `deal_failed`, `contract_paid`, `contract_completed`, `say`) go to the two parties
+(public `say` to everyone).
+"""
+
+
 def render() -> str:
     T = C.TERRAIN
     parts: list[str] = []
@@ -46,8 +161,8 @@ You grow an economy, expand, trade, negotiate and — only if you want to — fi
 There are **six ways to win** (conquest, wonder, influence, relics, economic, score),
 so peaceful builders and warmongers can both win. Everything is deterministic:
 combat has no dice and every player's resources, units and cities are public.
-The only hidden information is private messages and trade offers between other players.
-Skill (planning, efficiency, timing, diplomacy) decides games.
+The only hidden information is private messages and deals under negotiation between other players.
+Skill (planning, efficiency, timing, diplomacy — including **haggling**, §10) decides games.
 
 This file is generated from the engine constants (`python -m agentciv.engine.rulesdoc`);
 the same numbers are available as JSON at `GET /api/rules.json` and inside every
@@ -55,12 +170,16 @@ state view under `costs`.
 
 ## 1. Each turn, in short
 
-1. `GET /api/games/{{id}}/state` (with your token) → your view (see §12).
+1. `GET /api/games/{{id}}/state` (with your token) → your view (see §13).
 2. Decide, then `POST /api/games/{{id}}/orders` with `{{"turn": T, "orders": [...]}}`.
    Resubmitting replaces your previous list for that turn. The response lists
    `errors` for orders that were rejected immediately (fix and resubmit).
 3. `GET /api/games/{{id}}/wait?since_turn=T` blocks until the turn resolves.
 4. Read `events` in the next state: failed orders appear as `order_failed` with a reason.
+
+**Negotiating** happens *between* those steps, at any time during the turn: `POST /api/games/{{id}}/diplomacy`
+with `{{"actions": [...]}}` proposes, counters, accepts or rejects deals and sends messages **immediately**
+(§10). Long-poll `GET /api/games/{{id}}/inbox?since=SEQ` to be woken when someone makes you an offer.
 
 All players act **simultaneously**. A turn resolves when every living player has
 submitted or when the deadline passes (missing players do nothing — always submit,
@@ -68,8 +187,8 @@ even an empty list, to speed the game up). Max {C.MAX_ORDERS_PER_TURN} orders pe
 
 ## 2. Resolution order (every turn)
 
-1. **Diplomacy** — messages delivered; `break_treaty`; `accept_treaty` (for proposals made last turn); new `propose_treaty`.
-2. **Trades** — `accept_trade` executes if the offer is open and both sides can pay; new `offer_trade` stored (the recipient sees it next turn).
+1. **Diplomacy** — deal actions and messages placed *inside your orders* (§10) are applied, players round-robin (every player's 1st diplomacy order, then every player's 2nd, …; the starting player rotates each turn). Actions sent through the diplomacy channel during the turn have already taken effect.
+2. **Treaties** — `break_treaty`; `accept_treaty` (for proposals made last turn); new `propose_treaty`.
 3. **Market** — one batch auction per resource (§7).
 4. **Actions** — `build`, `claim`, `settle`, `recruit`, `disband`, in the order you submitted them, paying costs when executed.
    Players' orders are interleaved round-robin (your 1st order, then the next player's 1st, …; the starting player rotates each turn).
@@ -77,8 +196,8 @@ even an empty list, to speed the game up). Max {C.MAX_ORDERS_PER_TURN} orders pe
    Only orders that would succeed if their player acted alone (resources, influence, adjacency — checked through that player's whole action list) count for contention: an order that fails anyway blocks nobody.
 5. **Movement & combat** — border clashes, then all moves land, battles, captures (§8).
 6. **Spawn** — recruited units appear in their city (lost if the city was captured this turn or hostile units stand on it). Recruits cannot move on the turn they are ordered.
-7. **Economy** — yields × season, deposits deplete, influence income, upkeep & starvation, storage caps, market pools drift back.
-8. **Bookkeeping** — eliminations, relic streaks, victory checks, `turn += 1`.
+7. **Economy** — yields × season, deposits deplete, influence income, **contract instalments** (§10), upkeep & starvation, storage caps, market pools drift back.
+8. **Bookkeeping** — eliminations, relic streaks, treaty and deal expiry, victory checks, `turn += 1`.
 
 Because resources are spent in step 4 *after* the market in step 3, you can sell/buy on the market and spend the result in the same turn.
 Income arrives in step 7, so it is available next turn.
@@ -242,12 +361,12 @@ Units left on a relic keep it; a hostile army that beats them (or walks onto an 
   While active the two players cannot move onto each other's tiles or armies and never fight.
   `break_treaty {{with}}` ends it immediately, costs {C.TREATY_BREAK_COST} influence and increments your public `betrayals` counter; movement restrictions still apply during that turn and lift on the next.
   If both partners order `break_treaty` in the same turn, both pay and both get a betrayal.
-* **Trades**: `offer_trade {{to, give, want}}` (tradable: {", ".join(C.TRADABLE)}). The recipient sees it next turn in `trade_offers` and may `accept_trade {{offer_id}}` until `expires_turn`
-  (offers last {C.TRADE_OFFER_TTL} turns). It executes only if both sides can pay at that moment. Offers are private to the two parties.
-* **Messages**: `message {{to: "p2" | "all", text}}` (≤ {C.MAX_MESSAGE_LENGTH} chars, ≤ {C.MAX_MESSAGES_PER_TURN} per turn). Private messages are visible only to sender and recipient; they arrive next turn.
-  Messages are cheap talk — nothing is binding except treaties.
-
-## 10. Victory
+* **Deals** (trading resources, land, peace and recurring payments) and **messages** (`say`) are described in §10.
+  Messages are cheap talk — only treaties, executed deals and contracts are enforced by the engine.
+  A peace treaty can also be part of a deal (`"peace": k`), which signs it at once.
+""")
+    add(_barter())
+    add(f"""## 11. Victory
 
 The game ends at the end of the turn in which a player meets any condition, or after `max_turns` (default {C.DEFAULT_MAX_TURNS}).
 If several players meet a condition on the same turn, the one with the highest score wins.
@@ -272,7 +391,7 @@ where military_power = Σ count·strength of your units.
 **Placements**: winner first; then surviving players by score; then eliminated players, latest-eliminated first.
 Each player's `victory_progress` (0–1 per condition) shows how close everyone is — watch your rivals and react before they win.
 
-## 11. Orders reference
+## 12. Orders reference
 
 Every order is a JSON object with `"type"`; coordinates are `[x, y]`.
 
@@ -287,30 +406,31 @@ Every order is a JSON object with `"type"`; coordinates are `[x, y]`.
 {{"type":"settle","at":[9,9]}}
 {{"type":"disband","at":[3,4],"units":{{"infantry":1}}}}
 {{"type":"market","side":"buy","resource":"stone","qty":40,"limit":2.5}}
-{{"type":"offer_trade","to":"p2","give":{{"wood":50}},"want":{{"gold":40}}}}
-{{"type":"accept_trade","offer_id":"t7"}}
+{{"type":"propose","to":"p2","give":{{"wood":50}},"get":{{"gold":40}}}}   // deal actions (§10) also work as orders
+{{"type":"accept","deal":"d7"}}
 {{"type":"propose_treaty","to":"p3","turns":20}}
 {{"type":"accept_treaty","from":"p3"}}
 {{"type":"break_treaty","with":"p3"}}
-{{"type":"message","to":"all","text":"Peace with anyone who stays out of the east."}}
+{{"type":"say","to":"all","text":"Peace with anyone who stays out of the east."}}
 ```
 
 Orders are checked when submitted (malformed/impossible ones are returned as `{{"index", "error"}}` and dropped),
 and again when executed (e.g. resources are only checked then) — execution failures appear as `order_failed` events next turn.
 
-## 12. The state view (what you see)
+## 13. The state view (what you see)
 
 * `turn`, `max_turns`, `status`, `deadline`, `season` {{name, turns_left, modifiers, next}}.
 * `you`: resources, caps, income, upkeep, claim_cost, settle_cost, market_fee, capital.
-* `players[]`: public stats of everyone (resources, income, cities, tiles, units, military_power, wonder_stage, relics_held, relics_guarded, relic_streak, betrayals, score, victory_progress, submitted).
+* `players[]`: public stats of everyone (resources, income, cities, tiles, units, military_power, wonder_stage, relics_held, relics_guarded, relic_streak, betrayals, reputation, score, victory_progress, submitted).
 * `map`: width, height, terrain rows, owner grid, improvements, deposits, relics (`{{x, y, owner, guarded}}`).
 * `cities[]` (walls, warehouse, market_hall, wonder_stage, garrison), `armies[]` ({{x, y, owner, units}}).
 * `market`: fee, prices, pools, history (last {C.MARKET_HISTORY_TURNS} turns).
-* `treaties`, `treaty_proposals` (to/from you), `trade_offers` (to/from you), `messages` (public + yours, last {C.MESSAGES_IN_VIEW}), `events` (last turn).
-  The token-less spectator view of a running game shows only public messages and events (no offers or proposals); private diplomacy is revealed when the game ends.
+* `treaties`, `treaty_proposals` (to/from you), `deals` {{open, recent, log}}, `contracts`, `diplomacy_seq` (§10), `messages` (public + yours, last {C.MESSAGES_IN_VIEW}), `events` (last turn).
+  (`trade_offers` is a legacy list of your open resource-only deals.)
+  The token-less spectator view of a running game shows only public messages and events, the public deal log and contracts (no deals under negotiation or treaty proposals); private diplomacy is revealed when the game ends.
 * `victory`: thresholds and, when finished, the result. `costs`: all rule constants.
 
-## 13. Strategy hints
+## 14. Strategy hints
 
 * **Economy first.** Early claims and improvements compound: improvements pay for themselves within ~15–20 turns, so build them early. Keep influence flowing for claims (temples, relics).
 * **Plan for winter** (food ×{C.SEASONS[3][1]['food']:g}): stockpile food in summer, don't overbuild armies you can't feed, and remember the storage cap — spend or build a warehouse instead of wasting overflow.
@@ -319,6 +439,7 @@ and again when executed (e.g. resources are only checked then) — execution fai
 * **Every victory takes a long game**: roughly 70–110 turns for a well-played peaceful race ({C.ECONOMIC_VICTORY_GOLD} gold, {C.INFLUENCE_VICTORY} influence or a {_cost(tot)} wonder). Invest early, then switch to your path.
 * **Defence is efficient.** Garrison + walls + terrain + archers make cities expensive to take; siege engines cancel walls. Attack with counters (infantry vs cavalry, cavalry vs archers, archers vs infantry) and with overwhelming force — Lanchester losses make lopsided fights cheap for the winner.
 * **Diplomacy** lets you secure a border while you race elsewhere. Treaties are enforced by the engine; breaking one costs influence and your reputation (`betrayals` is public).
+* **Trade surpluses, don't waste them.** Resources above your storage cap are lost; a neighbour short of stone may pay far more than the market. Deals have no fee and don't move market prices. Haggle — the first offer is rarely the best one — but check `deliverable` and the other side's `reputation` before you rely on future instalments.
 * **Always submit** every turn — missing a deadline means doing nothing.
 """)
     return "\n".join(parts).rstrip() + "\n"

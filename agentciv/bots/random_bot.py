@@ -5,12 +5,22 @@ tile, build a random fitting improvement or city building, recruit a random
 unit, move random stacks one step in a random direction, and now and then
 trade on the market or propose a treaty. It never plans, so it wastes
 resources and wanders its army around.
+
+In negotiations (§13) it now and then proposes a random resource-for-gold
+swap at a random price and accepts (25%) or rejects (25%) incoming deals
+at random — the only built-in bot that takes losing deals, within limits
+(it fills seats in rated games, so it must not be a free buffet): it never
+hands over land or a contract, at most half of any stock, at most 1.5x the
+market value it receives, and it accepts at most one deal per turn.
 """
 from __future__ import annotations
 
-from agentciv.engine import constants as C
+import random
 
-from .common import Plan, SafeBot, World
+from agentciv.engine import constants as C
+from agentciv.engine.deals import bundle_value
+
+from .common import Plan, SafeBot, World, spot_prices
 
 
 class RandomBot(SafeBot):
@@ -26,6 +36,65 @@ class RandomBot(SafeBot):
             rng.choice(actions)(w, p)
         self._moves(w, p)
         return p.orders
+
+    def decide_deals(self, view: dict) -> list:
+        rng = self.__dict__.get("_nrng")
+        if rng is None:
+            rng = self.__dict__["_nrng"] = random.Random(f"negotiate:{self.name}:{self.seed}")
+        me = view["you"]["id"]
+        res = view["you"].get("resources", {}) or {}
+        out = []
+        turn = view.get("turn", 0)
+        stamp = [view.get("game_id"), turn]
+        for d in (view.get("deals") or {}).get("open") or []:
+            if d.get("to") != me or d.get("status", "open") != "open":
+                continue
+            x = rng.random()
+            if x < 0.25 and d.get("deliverable", True) and self.memory.get("accepted") != stamp \
+                    and self.tolerable(view, d, res):
+                self.memory["accepted"] = stamp
+                out.append({"type": "accept", "deal": d["id"]})
+                break                  # one per turn
+            if x < 0.5:
+                out.append({"type": "reject", "deal": d["id"], "message": "no"})
+        if self.memory.get("neg_turn") == turn:
+            return out
+        self.memory["neg_turn"] = turn
+        rivals = [p["id"] for p in view.get("players", []) if p.get("alive") and p["id"] != me]
+        if not rivals or rng.random() >= 0.15:
+            return out
+        w = World(view)
+        prices = spot_prices(w)
+        to = rng.choice(rivals)
+        r = rng.choice(C.MARKET_RESOURCES)
+        if rng.random() < 0.5:
+            qty = rng.randint(5, max(5, res.get(r, 0) // 3))
+            if qty > res.get(r, 0):
+                return out
+            gold = max(1, int(qty * prices[r] * rng.uniform(0.6, 1.5)))
+            give, get = {r: qty}, {"gold": gold}
+        else:
+            qty = rng.randint(5, 60)
+            gold = max(1, int(qty * prices[r] * rng.uniform(0.6, 1.5)))
+            if gold > res.get("gold", 0):
+                return out
+            give, get = {"gold": gold}, {r: qty}
+        out.append({"type": "propose", "to": to, "give": give, "get": get, "expires_in": 1,
+                    "message": "[random] how about this?"})
+        return out
+
+    @staticmethod
+    def tolerable(view: dict, deal: dict, res: dict) -> bool:
+        """A bad deal random may take, but not one that guts it: no land or
+        contract out, at most half of any stock, at most 1.5x the market
+        value it gets (received land counts nothing, contracts discounted)."""
+        out, inn = deal.get("get") or {}, deal.get("give") or {}
+        if out.get("tiles") or out.get("per_turn"):
+            return False
+        if any(int(out.get(r, 0) or 0) > int(res.get(r, 0) or 0) // 2 for r in C.TRADABLE):
+            return False
+        prices = (view.get("market") or {}).get("prices") or {}
+        return bundle_value(out, prices) <= 1.5 * bundle_value(inn, prices, discount=0.9)
 
     def _claim(self, w: World, p: Plan) -> None:
         cands = sorted({j for i in w.my_tiles for j in w.nb[i]
