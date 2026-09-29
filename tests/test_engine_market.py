@@ -125,7 +125,8 @@ def test_pool_reverts_toward_initial():
     g.pools["food"] = [400.0, 1600.0]
     run_turn(g)
     init = g.pool_init["food"]
-    assert g.pools["food"] == pytest.approx([400 + (init[0] - 400) * 0.05, 1600 + (init[1] - 1600) * 0.05])
+    k = C.MARKET_REVERSION
+    assert g.pools["food"] == pytest.approx([400 + (init[0] - 400) * k, 1600 + (init[1] - 1600) * k])
 
 
 def test_clear_resource_pure():
@@ -153,3 +154,79 @@ def test_market_history_limited():
     v = g.spectator_view()
     assert len(v["market"]["history"]) == C.MARKET_HISTORY_TURNS
     assert v["market"]["history"][-1]["turn"] == 59
+
+
+# ------------------------------------------------- phantom orders (regressions)
+def five():
+    from agentciv.engine.testing import new_game
+    return new_game(5, seed=3)
+
+
+def test_broke_players_buys_cannot_trigger_depletion_drop():
+    """A player with 0 gold submitting huge buys used to get a real 400-stone
+    buy dropped as 'pool depleted' and then lose its own orders for free."""
+    g = five()
+    g.player("p1").resources["gold"] = 3000
+    g.player("p5").resources["gold"] = 0
+    ev = run_turn(g, {"p1": [buy("stone", 400)], "p5": [buy("stone", 399) for _ in range(4)]})
+    fills = events_of(ev, "market")
+    assert [(e["player"], e["qty"]) for e in fills] == [("p1", 400)]
+    assert not [e for e in events_of(ev, "order_failed") if e["player"] == "p1"]
+
+
+def test_phantom_buys_do_not_move_the_price():
+    def run(griefer):
+        g = five()
+        g.player("p1").resources["gold"] = 3000
+        orders = {"p1": [buy("wood", 100, limit=1.8)]}
+        if griefer:
+            for r in g.player("p5").resources:
+                g.player("p5").resources[r] = 0
+            orders["p5"] = [buy("wood", 499) for _ in range(3)] + [sell("wood", 499)]
+        return [(e["player"], e["qty"], e["price"]) for e in events_of(run_turn(g, orders), "market")]
+    assert run(True) == run(False) == [("p1", 100, run(False)[0][2])]
+
+
+def test_layered_limits_cannot_block_a_resource():
+    """Layered buy/sell limits used to force a violator in every one of the
+    5+1 rounds, so every stone order of every player failed ('did not
+    converge') and a rival could not buy the stone for a wonder stage."""
+    g = five()
+    R, G = g.pools["stone"]
+    price = lambda n: M.auction_price(R, G, n)
+    need = 160
+    gap = 1
+    a, b1, s2, b2, s3, b3 = gap, 2 * gap + 1, 3 * gap + 2, 4 * gap + 3, 5 * gap + 4, 1
+    base = (b1 + b2 + b3) - (a + s2 + s3) + need
+    n = [base, base + a, base + a - b1, base + a - b1 + s2, base + a - b1 + s2 - b2, base + a - b1 + s2 - b2 + s3]
+    mid = lambda x, y: (price(x) + price(y)) / 2
+    griefer = [sell("stone", a, 1e9), buy("stone", b1, mid(n[0], n[1])), sell("stone", s2, mid(n[2], n[0])),
+               buy("stone", b2, mid(n[1], n[3])), sell("stone", s3, mid(n[4], n[2])), buy("stone", b3, mid(n[3], n[5]))]
+    v, gr = g.player("p1"), g.player("p2")
+    cap = g.cities[v.capital]
+    cap.wonder_stage, v.wonder_city, cap.warehouse = 3, v.capital, 1
+    v.resources.update(stone=500, wood=500, gold=3000)
+    gr.resources.update(stone=a + s2 + s3, gold=150)
+    ev = run_turn(g, {"p1": [buy("stone", need), {"type": "build", "at": [cap.x, cap.y], "building": "wonder"}],
+                      "p2": griefer})
+    assert cap.wonder_stage == 4
+    assert not any("converge" in e["reason"] for e in events_of(ev, "order_failed"))
+
+
+def test_clearing_is_always_valid_and_terminates():
+    import random
+    rng = random.Random(7)
+    for _ in range(300):
+        pool = [2000.0, 4000.0]
+        players = [f"p{i}" for i in range(1, 6)]
+        bal = {p: {"gold": rng.choice([0, 50, 300, 2000]), "stone": rng.choice([0, 20, 200])} for p in players}
+        gold0 = {p: b["gold"] for p, b in bal.items()}
+        orders = [M.MarketOrder(p, rng.choice(["buy", "sell"]), "stone", rng.randint(1, 500),
+                                rng.choice([None, round(rng.uniform(0.5, 6), 2)]), k)
+                  for p in players for k in range(rng.randint(0, 4))]
+        fills, fails, price = M.clear_resource(pool, orders, bal, {})
+        assert len(fills) + len(fails) == len(orders)
+        for o, _ in fills:
+            assert o.limit is None or (price <= o.limit + 1e-9 if o.side == "buy" else price >= o.limit - 1e-9)
+        assert all(b["gold"] >= 0 and b["stone"] >= 0 for b in bal.values())
+        assert all(bal[p]["gold"] >= 0 for p in gold0) and pool[0] > 0

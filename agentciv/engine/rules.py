@@ -18,17 +18,21 @@ def map_size(n_players: int) -> int:
 
 
 def relic_count(n_players: int) -> int:
-    return n_players // 2 + C.RELIC_BASE
+    return max(1, C.RELICS_PER_PLAYER * n_players)
 
 
 def relics_needed(n_relics: int) -> int:
-    return n_relics // 2 + 1
+    """Relics to hold for the relic victory: half of them (rounded up), but
+    a majority when there are fewer than RELIC_HALF_MIN relics."""
+    if n_relics < C.RELIC_HALF_MIN:
+        return n_relics // 2 + 1
+    return (n_relics + 1) // 2
 
 
 def conquest_capitals(n_players: int) -> int:
     if n_players <= C.CONQUEST_SMALL_GAME:
         return n_players
-    return math.ceil(n_players / 2)
+    return n_players // 2 + 1
 
 
 def claim_cost(owned_tiles: int) -> int:
@@ -122,7 +126,7 @@ def _build_rules() -> dict:
             "city_yield": dict(C.CITY_YIELD),
             "capital_extra_influence": C.CAPITAL_EXTRA_INFLUENCE,
             "city_claim_radius": C.CITY_CLAIM_RADIUS,
-            "relics": f"n // 2 + {C.RELIC_BASE}",
+            "relics": f"{C.RELICS_PER_PLAYER} * n" if C.RELICS_PER_PLAYER != 1 else "n",
         },
         "start": {"resources": dict(C.START_RESOURCES), "units": dict(C.START_UNITS)},
         "resources": list(C.RESOURCES),
@@ -161,7 +165,7 @@ def _build_rules() -> dict:
             "reversion": C.MARKET_REVERSION,
             "max_order_fraction": C.MARKET_MAX_ORDER_FRACTION,
             "max_net_fraction": C.MARKET_MAX_NET_FRACTION,
-            "max_iterations": C.MARKET_MAX_ITERATIONS,
+            "readmit_passes": C.MARKET_READMIT_PASSES,
         },
         "combat": {
             "counter_multiplier": C.COUNTER_MULTIPLIER,
@@ -190,10 +194,10 @@ def _build_rules() -> dict:
             "max_message_length": C.MAX_MESSAGE_LENGTH,
         },
         "victory": {
-            "conquest": f"own >= ceil(n/2) original capitals (all of them if n <= {C.CONQUEST_SMALL_GAME}), or be the last player standing",
+            "conquest": f"own >= floor(n/2)+1 original capitals (all of them if n <= {C.CONQUEST_SMALL_GAME}), or be the last player standing",
             "wonder_stage": C.WONDER_VICTORY_STAGE,
             "influence": C.INFLUENCE_VICTORY,
-            "relics_needed": "floor(R/2) + 1",
+            "relics_needed": f"ceil(R/2) (floor(R/2)+1 if R < {C.RELIC_HALF_MIN})",
             "relic_turns": C.RELIC_VICTORY_TURNS,
             "economic_gold": C.ECONOMIC_VICTORY_GOLD,
             "default_max_turns": C.DEFAULT_MAX_TURNS,

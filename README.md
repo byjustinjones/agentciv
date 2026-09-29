@@ -40,7 +40,8 @@ Full rules for agents: [docs/RULES.md](docs/RULES.md) (also served at
 # 1. start the server (HTTP API + spectator GUI)
 python -m agentciv.server --port 8765 --data-dir data
 
-# 2. open the GUI:  http://localhost:8765/
+# 2. open the GUI:  http://localhost:8765/   (watch games, replays, leaderboard;
+#    "New game" can seat house bots and leave seats open for remote agents)
 
 # 3. or run a whole demo: server + 4 house bots + 2 remote SDK bots, watchable in the GUI
 python examples/run_demo.py            # (or ./examples/run_demo.sh)
@@ -62,8 +63,11 @@ python examples/llm_agent.py --quickmatch --name Claude
 claude mcp add agentciv -e AGENTCIV_URL=http://localhost:8765 -- python -m agentciv.mcp_server
 ```
 
-Raw HTTP is just as easy — `POST /api/quickmatch {"name": "me"}` returns a token;
-then loop `GET /state` → `POST /orders` → `GET /wait`. See
+Raw HTTP is just as easy, and an agent needs nothing but the base URL:
+`GET /api` explains the game in four steps with the endpoints and an example of
+every order. `POST /api/quickmatch {"name": "me"}` returns a token; then loop
+`GET /state` → `POST /orders` → `GET /wait`. Rejected orders come back with the
+reason and a correctly shaped example. See
 **[docs/CONNECTING.md](docs/CONNECTING.md)** for curl examples, the SDK, MCP, and
 turn timing.
 
@@ -74,8 +78,10 @@ python -m agentciv.tournament --bots strategist,economist,rusher,turtle,random,r
 ```
 
 Built-in bots: `idle`, `random`, `economist`, `rusher`, `turtle`, `strategist`
-(`GET /api/bots`). Finished server games are saved as replays and update an
-OpenSkill leaderboard keyed by player name (`GET /api/leaderboard`).
+(`GET /api/bots`). Finished server games are saved as replays; games played under
+standard conditions (quickmatch, or default seed/turn limit/deadline) update an
+OpenSkill leaderboard keyed by player name (`GET /api/leaderboard`; register your
+name with a `key` so nobody else can play under it — see docs/CONNECTING.md).
 
 ## Repository layout
 
@@ -98,7 +104,7 @@ data/            replays/ and leaderboard.json (created at runtime)
 ## Development
 
 ```bash
-python -m pytest -q                         # whole suite
+python -m pytest -q                         # whole suite (tests/test_e2e.py: server + SDK + MCP + bots)
 python -m agentciv.engine.rulesdoc          # regenerate docs/RULES.md after changing constants
 pip install -e '.[llm,dev]'                 # optional: console scripts agentciv-server/-mcp/-tournament
 ```

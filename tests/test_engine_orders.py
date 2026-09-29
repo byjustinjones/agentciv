@@ -223,7 +223,8 @@ def test_settle_rules():
     g.player("p1").resources.update(food=300, wood=300, stone=300, gold=300)
     errs = g.submit_orders("p1", [{"type": "settle", "at": [5, 3]}])
     assert "too close" in errs[0]["error"]
-    errs = g.submit_orders("p1", [{"type": "settle", "at": [9, 9]}])
+    far = next((x, y) for x, y in [(9, 9), (9, 11), (11, 9), (10, 10)] if g.idx(x, y) not in g.relic_set)
+    errs = g.submit_orders("p1", [{"type": "settle", "at": list(far)}])
     assert "adjacent" in errs[0]["error"]
     r = g.relics[0]
     errs = g.submit_orders("p1", [{"type": "settle", "at": [r % g.width, r // g.width]}])
@@ -369,3 +370,85 @@ def test_action_order_is_submission_order():
     ]})
     assert g.improvement[g.idx(5, 3)] == "farm" and g.improvement[g.idx(3, 5)] is None
     assert failed(ev, "p1")[0]["index"] == 1
+
+
+# ------------------------------------------------ contention: phantom orders
+def test_unaffordable_claim_does_not_contest():
+    """Regression: a broke player's claim used to void a rival's claim of the
+    same tile every turn at no cost."""
+    g = sandbox(2)
+    g.add_city(3, 3, "p1", capital=True)
+    g.add_city(9, 3, "p2", capital=True)
+    g.set_owner(5, 3, "p1")
+    g.set_owner(7, 3, "p2")
+    g.player("p1").resources["influence"] = 0
+    g.player("p2").resources["influence"] = 100
+    ev = run_turn(g, {"p1": [{"type": "claim", "at": [6, 3]}], "p2": [{"type": "claim", "at": [6, 3]}]})
+    assert g.owner[g.idx(6, 3)] == "p2"
+    assert "influence" in failed(ev, "p1")[0]["reason"] and not failed(ev, "p2")
+
+
+def test_unaffordable_settle_and_claim_chain_do_not_contest():
+    g = sandbox(2)
+    g.add_city(3, 3, "p1", capital=True)
+    g.add_city(12, 3, "p2", capital=True)
+    p1 = g.player("p1")
+    for r in ("food", "wood", "stone", "gold"):
+        p1.resources[r] = 0
+    for x in (5, 6):
+        g.set_owner(x, 3, "p1")
+    for x in (8, 9, 10):
+        g.set_owner(x, 3, "p2")
+    g.player("p2").resources.update(food=300, wood=300, stone=300, gold=300)
+    ev = run_turn(g, {"p1": [{"type": "settle", "at": [7, 3]}], "p2": [{"type": "settle", "at": [8, 3]}]})
+    assert g.cities.get(g.idx(8, 3)) is not None and g.cities[g.idx(8, 3)].owner == "p2"
+    assert "afford" in failed(ev, "p1")[0]["reason"]
+    # a claim chain the player can't pay for (pre-validation accepts it) blocks nothing either
+    g = sandbox(2)
+    g.add_city(2, 2, "p1", capital=True)
+    g.add_city(13, 13, "p2", capital=True)
+    g.player("p1").resources["influence"] = 3      # enough for one claim only
+    for y in range(3, 13):
+        g.set_owner(13, y, "p2")
+    g.player("p2").resources.update(food=300, wood=300, stone=300, gold=300)
+    chain = [{"type": "claim", "at": [x, 2]} for x in range(4, 12)] + [{"type": "settle", "at": [12, 2]}]
+    assert g.submit_orders("p1", chain) == []
+    ev = run_turn(g, {"p2": [{"type": "settle", "at": [13, 4]}]})
+    assert g.cities.get(g.idx(13, 4)) is not None
+    assert not any("contested" in e["reason"] for e in failed(ev))
+
+
+def test_settle_made_unaffordable_by_earlier_actions_does_not_contest():
+    """Contention viability follows the player's whole action list (a recruit
+    that spends the food first makes the settle fail, so it blocks nobody)."""
+    g = sandbox(2)
+    g.add_city(2, 2, "p1", capital=True)
+    g.add_city(12, 2, "p2", capital=True)
+    for x in range(3, 12):
+        g.set_owner(x, 2, "p1" if x < 7 else "p2")
+    p1, p2 = g.player("p1"), g.player("p2")
+    p1.resources.update(food=60, wood=50, stone=20, gold=25)      # settle cost + a bit
+    p2.resources.update(food=300, wood=300, stone=300, gold=300)
+    ev = run_turn(g, {"p1": [{"type": "recruit", "city": [2, 2], "unit": "infantry"},
+                             {"type": "settle", "at": [6, 2]}],
+                      "p2": [{"type": "settle", "at": [8, 2]}]})
+    assert g.cities.get(g.idx(8, 2)) is not None and g.cities[g.idx(8, 2)].owner == "p2"
+    assert g.idx(6, 2) not in g.cities
+    assert failed(ev, "p1") and not any("contested" in e["reason"] for e in failed(ev))
+    # the tentative check left p1's state untouched: one recruit, paid once
+    assert len(events_of(ev, "recruit")) == 1 and len(g.cities) == 3
+    assert g.armies[g.idx(2, 2)] == {"p1": {"infantry": 1}}
+
+
+def test_viable_contention_still_applies():
+    g = sandbox(2)
+    g.add_city(2, 2, "p1", capital=True)
+    g.add_city(12, 2, "p2", capital=True)
+    for x in range(3, 12):
+        g.set_owner(x, 2, "p1" if x < 7 else "p2")
+    for p in g.players:
+        p.resources.update(food=300, wood=300, stone=300, gold=300)
+    before = g.player("p1").resources["gold"]
+    ev = run_turn(g, {"p1": [{"type": "settle", "at": [6, 2]}], "p2": [{"type": "settle", "at": [8, 2]}]})
+    assert len(g.cities) == 2 and len(failed(ev)) == 2
+    assert g.player("p1").resources["gold"] >= before

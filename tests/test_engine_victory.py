@@ -16,11 +16,14 @@ def world(n=4, max_turns=150):
 
 
 def test_thresholds():
-    assert [conquest_capitals(n) for n in (2, 3, 4, 5, 6, 8, 12)] == [2, 3, 2, 3, 3, 4, 6]
+    # a majority of the original capitals (all of them in games of 2-3)
+    assert [conquest_capitals(n) for n in (2, 3, 4, 5, 6, 8, 12)] == [2, 3, 3, 3, 4, 5, 7]
     g = new_game(6)
     thr = g.spectator_view()["victory"]["thresholds"]
-    assert thr == {"conquest_capitals": 3, "wonder_stage": 5, "influence": 600, "relics_needed": 3,
-                   "relics_total": 5, "relic_turns": 10, "economic_gold": 2000, "max_turns": 150}
+    assert thr == {"conquest_capitals": 4, "wonder_stage": C.WONDER_VICTORY_STAGE,
+                   "influence": C.INFLUENCE_VICTORY, "relics_needed": 3, "relics_total": 6,
+                   "relic_turns": C.RELIC_VICTORY_TURNS, "economic_gold": C.ECONOMIC_VICTORY_GOLD,
+                   "max_turns": 150}
 
 
 def test_economic_victory():
@@ -53,12 +56,18 @@ def test_wonder_victory():
     assert g.result["winner"] == "p1" and g.result["condition"] == "wonder"
 
 
+def guard(g, pid, relics):
+    """Own the relics and put one infantry on each (a guarded relic)."""
+    for r in relics:
+        g._set_owner(r, pid)
+        g.place_units(r % g.width, r // g.width, pid, {"infantry": 1})
+    g._invalidate()
+
+
 def test_relic_victory_needs_streak():
     g = world()
     need = relics_needed(len(g.relics))
-    for r in g.relics[:need]:
-        g._set_owner(r, "p4")
-    g._invalidate()
+    guard(g, "p4", g.relics[:need])
     for t in range(C.RELIC_VICTORY_TURNS - 1):
         run_turn(g)
         assert not g.finished
@@ -72,25 +81,31 @@ def test_relic_victory_needs_streak():
 def test_relic_streak_resets():
     g = world()
     need = relics_needed(len(g.relics))
-    for r in g.relics[:need]:
-        g._set_owner(r, "p4")
+    guard(g, "p4", g.relics[:need])
     run_turn(g)
     run_turn(g)
     assert g.player("p4").relic_streak == 2
     g._set_owner(g.relics[0], None)
+    g.armies.pop(g.relics[0], None)
     run_turn(g)
     assert g.player("p4").relic_streak == 0
     assert g.spectator_view()["players"][3]["victory_progress"]["relics"] == 0.0
 
 
 def test_conquest_by_capitals():
-    g = world(4)                       # need 2 capitals
+    g = world(4)                       # need 3 of the 4 original capitals
     g.player("p2").resources["gold"] = 0
-    # p1 takes p2's capital (garrison 20) with 3 infantry
-    g.place_units(12, 2, "p1", {"infantry": 3})
+    c3 = g.cities[g.idx(2, 13)]        # p1 already took p3's capital
+    c3.owner = "p1"
+    g._set_owner(c3.idx, "p1")
+    g._invalidate()
+    run_turn(g)
+    assert not g.finished and not g.player("p3").alive
+    # p1 takes p2's capital (garrison 40) with 5 infantry (50)
+    g.place_units(12, 2, "p1", {"infantry": 5})
     run_turn(g, {"p1": [{"type": "move", "from": [12, 2], "to": [13, 2]}]})
     assert g.result["winner"] == "p1" and g.result["condition"] == "conquest"
-    assert g.result["placements"][-1] == "p2"            # eliminated this turn
+    assert g.result["placements"][-2:] == ["p2", "p3"]   # latest-eliminated first
 
 
 def test_conquest_last_player_standing():
@@ -162,4 +177,5 @@ def test_victory_progress_values():
     g.player("p1").resources.update(gold=1000, influence=150)
     g._invalidate()
     vp = g.spectator_view()["players"][0]["victory_progress"]
-    assert vp == {"conquest": 0.5, "wonder": 0.0, "influence": 0.25, "relics": 0.0, "economic": 0.5, "score": 0.0}
+    assert vp == {"conquest": round(1 / 3, 3), "wonder": 0.0, "influence": round(150 / C.INFLUENCE_VICTORY, 3),
+                  "relics": 0.0, "economic": round(1000 / C.ECONOMIC_VICTORY_GOLD, 3), "score": 0.0}

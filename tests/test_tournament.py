@@ -79,3 +79,14 @@ def test_parallel_matches_serial():
     a = T.run_tournament(["economist", "turtle", "random"], jobs=1, **kw)
     b = T.run_tournament(["economist", "turtle", "random"], jobs=2, **kw)
     assert [r["placements"] for r in a["results"]] == [r["placements"] for r in b["results"]]
+
+
+def test_summary_reports_median_seats_and_start_slots():
+    s = T.run_tournament(["economist", "turtle", "random"], games=4, players=3, seed=3, max_turns=15, jobs=1)
+    assert s["median_turns"] > 0
+    assert sum(r["games"] for r in s["seats"]) == 12
+    assert sorted(r["seat"] for r in s["start_slots"]) == [0, 1, 2]
+    assert sum(r["wins"] for r in s["start_slots"]) == 4
+    for r in s["results"]:
+        assert sorted(seat["slot"] for seat in r["seats"]) == [0, 1, 2]
+    assert "by start slot" in T.format_summary(s)

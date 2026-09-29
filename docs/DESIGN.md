@@ -13,7 +13,8 @@ doc when they change).
 * Resource management is the heart of the game; combat is **optional** — there
   are multiple peaceful paths to victory and enforceable peace treaties.
 * **Skill must dominate luck.** Combat is deterministic, information is complete
-  (except private messages / trade offers between other players), map starts are
+  (except private messages / trade offers / treaty proposals between other
+  players — hidden from spectators too until the game ends, §10), map starts are
   templated to be equal, and turns are simultaneous with a deadline so reaction
   speed does not matter. The only randomness is the seeded map generator.
 * Agents must be able to connect trivially: HTTP+JSON, a stdlib-only Python SDK,
@@ -41,12 +42,17 @@ Resolution phases, in order:
    (an order that can't be paid is skipped with an error event). Contention:
    if two players `claim` or `settle` the same tile (or settle within 3
    Chebyshev of each other) in the same turn, all those orders fail and are
-   refunded. Recruits are *queued* (units appear in phase 6). Players' action
+   refunded. Only orders that would succeed if their player acted alone count
+   for contention: each player's action list is first executed tentatively
+   against the current state (costs, influence, real adjacency incl. its own
+   earlier claims/settles; then rolled back), and orders that would fail
+   anyway contest nothing (so they can't be used to block rivals for free).
+   Recruits are *queued* (units appear in phase 6). Players' action
    lists are interleaved round-robin (every player's 1st action, then every
    player's 2nd, …), starting from the rotating player of phase 2.
 5. **Movement & combat** (§7), then captures.
 6. **Spawn** — queued recruits appear in their city if the recruiter still
-   owns it (otherwise lost).
+   owns it and no hostile units stand on it (otherwise lost).
 7. **Economy** — yields ×season, deposit depletion, influence income, upkeep &
    starvation, storage caps, market reversion.
 8. **Bookkeeping** — eliminations, relic streaks, victory checks, score.
@@ -75,18 +81,51 @@ Resolution phases, in order:
 * **Start positions** are spread evenly on a *diamond* around the centre (a
   circle in the 4-directional path metric, so every start has the same path
   distance to the centre), maximising the Chebyshev spacing between starts
-  (≥ 7 whenever the map allows; ≥ 5 always). An 11×11 terrain template
-  (`START_TEMPLATE`, rotated by quarter turns to face outward) is stamped
-  around every start onto the tiles strictly closer to that start than to any
-  other ("Voronoi stamping"): the core radius `stamp_radius = min(3, (d−1)//2)`
-  (d = min start spacing) is identical for every player and most of the rest
-  is too. Which player gets which start is shuffled by the seed. Map
-  generation produces several candidates from the seed, discards those where
-  starts/relics are not mutually reachable, and keeps the one with the most
-  even path distances to the relics / nearest rival and land mix.
-* **Relics**: `R = n // 2 + 2` relic tiles placed on plains on a smaller
-  diamond around the map centre (off the start templates), positioned to make
-  the per-start sorted relic distances as equal as possible.
+  (≥ 7 whenever the map allows; ≥ 5 always). Unless the layout has a
+  quarter-turn symmetry, starts whose `x+y` parity differs from the majority
+  are moved by one tile (keeping the half-turn symmetry), so that every pair
+  of neighbouring capitals has tiles at exactly equal path distance (needed
+  for fair relics). An 11×11 terrain template (`START_TEMPLATE`,
+  mirror-symmetric about its facing axis, rotated by quarter turns to face
+  outward) is stamped around every start onto the tiles strictly closer to
+  that start than to any other ("Voronoi stamping"): the core radius
+  `stamp_radius = min(3, (d−1)//2)` (d = min start spacing) is identical for
+  every player and most of the rest is too.
+* **Equal land.** Each start's *region* is the passable land closer (path
+  distance) to it than to any other start; land tied between two starts is
+  contested. Land is sunk (turned into water, farthest first, random
+  tie-breaks, never within `stamp_radius+1` of a start or next to a relic)
+  until every region has the same number of *uncontested* tiles (±1;
+  `MAPGEN_CONTESTED_LAND_VALUE` = 0 is the weight of contested land), and then the farthest tiles of each region are converted so that every
+  region has the same number of hills, forest and gold tiles (±1).
+* Map generation produces several candidates from the seed, discards those
+  where starts/relics are not mutually reachable, and keeps the one with the
+  most even path distances to the relics / nearest rival and land mix. The
+  finished map is **turned/mirrored by the seed** (one of the 8 symmetries of
+  the square), and which player gets which start is shuffled by the seed.
+* **Relics**: `R = n` relic tiles (plains): one in every angular gap between
+  two neighbouring starts, on a ring around the centre whose radius is drawn
+  per map (0.45–1.0 × the start radius), locally optimised so that each relic
+  is (nearly) equidistant from the two capitals flanking it and every capital
+  sees the same sorted relic distances, keeping the symmetries of the start
+  layout; relics are ≥ 3 apart (Chebyshev). Relics are never claimed: they
+  are taken by occupation (§7).
+* **How equal is it, per player count?** Exact equality needs a grid
+  symmetry mapping every start onto every other; odd `n ≥ 7` (and to a
+  lesser degree 10 and 12) have none, so there the relic and nearest-rival
+  guarantees are only approximate. Measured over seeds 0–39 (`map_info`
+  reports the per-map values; relic spread = Σ over the `ceil(R/2)` nearest
+  relics of max−min path distance between capitals, start spread = max−min
+  path distance to the nearest rival capital):
+
+  | n | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 |
+  |---|---|---|---|---|---|---|---|---|---|---|---|
+  | relic spread (max) | 0 | 1 | 0 | 2 | 0 | 5 | 0 | **21** | 6 | 18 | 13 |
+  | start spread (max) | 0 | 2 | 0 | 2 | 2 | 4 | 0 | 4 | 2 | 4 | 3 |
+
+  The terrain mix (hills/forest/gold per region, ±1) holds for every n. At
+  9 players the nearest relic can be up to 4 steps farther for some capitals
+  (6 of 40 seeds), so for rated/fair play prefer 4–6, 8 or 10 players.
 * A city tile yields 2 food, 1 wood, 1 stone, 2 gold, 1 influence (capital +1
   extra influence) regardless of terrain.
 
@@ -122,7 +161,8 @@ Resources: `food`, `wood`, `stone`, `gold` (tradable) and `influence`
   If food would go below 0, food becomes 0 and the player loses
   `ceil(deficit / 2)` units (highest-upkeep units first, from their largest
   stack first). This is **starvation**.
-* **Influence income**: city 1 (+1 capital), temple 2, each relic held 3.
+* **Influence income**: city 1 (+1 capital), temple 1, each relic owned 2
+  (guarded or not).
 
 ### Tile improvements (one per owned non-city tile)
 
@@ -132,7 +172,7 @@ Resources: `food`, `wood`, `stone`, `gold` (tradable) and `influence`
 | lumber_mill  | forest             | 15 wood, 10 gold           | +2 wood |
 | quarry       | hills              | 25 wood, 10 gold           | +2 stone (depletes deposit) |
 | mine         | gold               | 25 wood, 20 stone          | +2 gold (depletes deposit) |
-| temple       | plains/forest/hills| 30 stone, 30 gold          | +2 influence (tile keeps base yield) |
+| temple       | plains/forest/hills| 20 stone, 20 gold          | +1 influence (tile keeps base yield) |
 
 ### City buildings (built on a city tile)
 
@@ -141,20 +181,23 @@ Resources: `food`, `wood`, `stone`, `gold` (tradable) and `influence`
 | walls       | 3   | level k: 40·k stone, 20·k wood         | defence (§7) |
 | warehouse   | 1   | 50 wood, 30 stone                      | +200 storage cap |
 | market_hall | 1   | 40 wood, 40 stone                      | +3 gold/turn, your market fee 2% instead of 5% |
-| wonder      | 5   | stage k: 60·k stone, 40·k wood, 40·k gold | Wonder victory at stage 5 |
+| wonder      | 5   | stage k: 165·k stone, 120·k wood, 130·k gold | Wonder victory at stage 5 (total 2475 stone, 1800 wood, 1950 gold) |
 
 Wonder rules: a player may have a wonder in only one city (the first city
 where they build a stage); at most one stage per turn. If that city is
 captured the wonder is destroyed (progress 0) and the player may start again.
+Later stages cost more than the storage cap: buy the missing stone/wood on the
+market in the same turn (the market resolves before actions and caps apply
+only at the end of the turn).
 
 ### Expansion
 
-* `claim` an unowned passable tile 4-adjacent to your territory with no hostile
-  units on it. Cost: `2 + floor(owned_tiles / 8)` influence.
+* `claim` an unowned passable non-relic tile 4-adjacent to your territory with
+  no hostile units on it. Cost: `2 + floor(owned_tiles / 8)` influence.
 * `settle` a new city on a tile you own, or an unowned passable tile 4-adjacent
   to your territory, at Chebyshev distance ≥ 4 from every city, with no hostile
   units. Cost: (60 food, 40 wood, 20 stone, 20 gold) × `(1 + 0.5·(cities_owned − 1))`.
-  Claims the unowned passable tiles within Chebyshev radius 1.
+  Claims the unowned passable non-relic tiles within Chebyshev radius 1.
 
 ## 6. Market
 
@@ -171,13 +214,32 @@ Each turn, per resource, **batch auction**: net quantity `N = Σbuy − Σsell` 
 traded against the pool; the average execution price `p = |Δgold| / |N|`
 (or the spot price if `N = 0`) applies to **every** participant. Buyers pay
 `q·p·(1+fee)`, sellers receive `q·p·(1−fee)` (fee 5%, 2% with a market_hall).
-Orders whose `limit` is violated (buy with `p > limit`, sell with `p < limit`) or
-that the player can't afford/deliver are dropped and the auction re-computed (at
-most 5 iterations; if it still does not settle, the remaining orders for that
-resource fail). Buyers pay `ceil(...)`, sellers receive `floor(...)` gold. Each
-turn every pool reverts 5% of the way toward its initial reserves. No single
+Clearing (`market.clear_resource`), designed so that orders which can't fill
+never move the price or knock out anyone else's order ("phantom orders"):
+
+1. Sell orders the player can't deliver (cumulative per player, in order) fail
+   at once — this does not depend on the price.
+2. While the order set is invalid, exactly **one** order is dropped and the
+   price recomputed. If the net buy volume would exceed 90% of the pool's
+   resource reserve, the buy with the lowest price it could pay (its `limit`,
+   or its player's gold / (cumulative qty·(1+fee))) is dropped. Otherwise the
+   order furthest from valid at the current price is dropped: a buy whose
+   `limit` is below `p` or whose player can't pay `ceil(q·p·(1+fee))`
+   (score `p / max price it can pay`), or a sell whose `limit` is above `p`
+   (score `limit / p`); ties drop the later-submitted order.
+3. Dropped orders are then re-admitted (most nearly valid first, up to
+   `MARKET_READMIT_PASSES` = 3 passes) whenever the whole set stays valid with
+   them.
+
+Every round drops an order, so clearing always terminates with a valid (maybe
+empty) set; there is no "did not converge" failure. Buyers pay `ceil(...)`,
+sellers receive `floor(...)` gold. Each
+turn every pool reverts 25% of the way toward its initial reserves (outside
+demand and supply: a price pushed down by heavy selling recovers within a few
+turns, and the price everyone gets depends on how much is sold right now).
+No single
 order may exceed 25% of the pool's resource reserve, and the net buy volume may
-not exceed 90% of it (the largest buy orders are dropped first).
+not exceed 90% of it (step 2 above).
 
 ## 7. Military
 
@@ -194,8 +256,8 @@ archer → infantry. Archers defending a city tile get ×1.5 strength.
 **Movement.** `move` orders take units from a stack on a tile you occupy and
 move them along a `path` of 1 step (or 2 steps if every moved unit is cavalry).
 Paths may not enter impassable tiles, tiles owned by a treaty partner, and a
-2-step path's first step may not contain a hostile army at the start of the
-turn. A stack can be split by several `move` orders; the total moved per unit
+2-step path's first step may not contain a hostile army or a hostile city (its
+garrison blocks the way) at the start of the turn. A stack can be split by several `move` orders; the total moved per unit
 type can't exceed what is there at the start of the turn. Recruits can't move
 on the turn they're queued.
 
@@ -209,14 +271,21 @@ level and siege_count is the number of attacking siege units. Siege units count
 ×4 strength when attacking a city.
 
 A city always has an intrinsic **garrison** added to its owner's defending side:
-10 strength (20 for an original capital), subject to the walls multiplier.
+15 strength (40 for an original capital — more than the 30 of the starting
+army, so an undefended capital cannot be sniped with the starting units),
+subject to the walls multiplier.
 
 **Resolution** (deterministic):
 
 1. *Border clashes*: when A moves X→Y and hostile B moves Y→X in the same turn
    (first step of their paths), the two moving groups fight first (no
    terrain/walls/garrison, no defender: ties destroy both). The survivors
-   continue.
+   continue. Then the same is done for every edge crossed in opposite
+   directions where at least one crossing is the second step of a cavalry
+   move (e.g. cavalry X→Y→Z against a hostile stack Z→Y, or two cavalry
+   stacks swapping places), using only the survivors. Groups that merely pass
+   through the same intermediate tile without crossing an edge in opposite
+   directions do not fight.
 2. All moves land. On each tile with hostile sides present, sides are sorted by
    raw power (Σ count·strength) ascending; the weakest side fights the weakest
    side hostile to it; the winner (with losses) re-enters the queue; repeat until
@@ -227,15 +296,24 @@ A city always has an intrinsic **garrison** added to its owner's defending side:
 3. A battle between sides with powers `Pw > Pl`: the loser is destroyed; the
    winner loses `round(count_t · (1 − sqrt(1 − (Pl/Pw)²)))` of each unit type
    (Lanchester square law).
-4. **Capture**: after battles, if every unit on a tile belongs to one player P
-   and the tile is owned by a hostile player Q, the tile becomes P's. A city is
+4. **Capture**: after battles all units left on a tile belong to players at
+   peace with each other. If the tile is owned by Q, Q has no units there and
+   some of them are hostile to Q, the tile becomes P's, where P is the one of
+   those hostile to Q with the largest military power (Σ count·strength; ties:
+   lowest seat) — so allies attacking a city together capture it. A city is
    captured only if its garrison was defeated. On city capture: the city's
    walls drop one level; tiles owned by Q in the city's Chebyshev radius 1
    transfer to P (except tiles holding units of another player); a wonder in
    the city is destroyed; if it was Q's original capital, P plunders 50%
-   (floored) of Q's food, wood, stone and gold. Relic tiles are captured like
-   any tile. Captures are checked on every tile holding units, so units left
-   on a hostile tile capture it on the next turn.
+   (floored) of Q's food, wood, stone and gold. Relic tiles are never
+   transferred with a city. Captures are checked on every tile holding units,
+   so units left on a hostile tile capture it on the next turn.
+5. **Relics** change hands only by occupation: if units stand on a relic
+   tile, its owner (if any) has none there and some of them are hostile to
+   the owner (anyone, for an unowned relic), P chosen as in 4 becomes its owner (`tile_captured` event with
+   `"relic": true`, `from` may be null). A relic is **guarded** while its
+   owner has units on it; owned relics give influence and score whether
+   guarded or not, but only guarded relics count for the relic victory.
 
 **Treaties.** `propose_treaty {to, turns (10–50)}`; the target may
 `accept_treaty {from}` on the next turn. While active, the two players can't
@@ -243,6 +321,8 @@ move onto each other's tiles or armies and never fight. `break_treaty {with}`
 ends it immediately, costs 50 influence (the order fails if you can't pay) and
 increments your public `betrayals` counter; the two are hostile (can fight)
 from that turn on, but movement restrictions lift only on the following turn.
+If both partners order `break_treaty` in the same turn, both pay and both get
+a betrayal (whoever can pay; no seat order advantage).
 A treaty accepted on turn t for `turns` k has `until_turn = t + k` and is
 removed at the end of turn `until_turn`. Treaty proposals can be accepted only
 on the turn after they were made.
@@ -256,28 +336,32 @@ or after `max_turns` (default 150). Thresholds for n players:
 
 | condition  | requirement |
 |------------|-------------|
-| conquest   | own ≥ `ceil(n/2)` original capitals (n ≥ 4) or all of them (n ≤ 3), or be the last player standing |
+| conquest   | own ≥ `floor(n/2)+1` original capitals (a majority; n ≥ 4) or all of them (n ≤ 3), or be the last player standing |
 | wonder     | complete wonder stage 5 |
-| influence  | influence ≥ 600 |
-| relics     | hold ≥ `floor(R/2)+1` relics for 10 consecutive turn-ends |
-| economic   | gold ≥ 2000 |
+| influence  | influence ≥ 3350 |
+| relics     | own **and guard** (units on the tile) ≥ `ceil(R/2)` relics (`floor(R/2)+1` if R < 4) at 16 consecutive turn-ends |
+| economic   | gold ≥ 13500 |
 | score      | highest score when `max_turns` is reached |
+
+Balance rationale and measurements: docs/BALANCE.md (each peaceful race takes
+roughly 70–110 turns when played well).
 
 Several players meeting conditions on the same turn → highest score wins
 (then lowest seat index). The reported condition is the first met in the order
 conquest, wonder, relics, influence, economic. Conquest needs n ≥ 2 players.
 
-**Score** = 2·tiles + 15·cities + 25·capitals_held + 20·wonder_stage +
-floor(influence/5) + floor(gold/20) + 10·relics_held + floor(military_power/20),
-where `military_power = Σ count·strength`.
+**Score** = 2·tiles + 15·cities + 50·capitals_held + 60·wonder_stage +
+floor(influence/6) + floor(gold/25) + 15·relics_held + floor(military_power/20),
+where `military_power = Σ count·strength` and `relics_held` counts owned
+relics (guarded or not).
 
 **Placements**: winner first; other surviving players by score (desc); then
 eliminated players, latest-eliminated first.
 
 **Victory progress** reported per player as 0.0–1.0 per condition (conquest:
-capitals/required, wonder: stage/5, influence: influence/600, relics:
-streak/10 if currently holding the required count else 0, economic: gold/2000,
-score: turn/max_turns).
+capitals/required, wonder: stage/5, influence: influence/3350, relics:
+streak/16 if currently guarding the required count else 0, economic:
+gold/13500, score: turn/max_turns).
 
 ## 9. Orders (JSON)
 
@@ -316,13 +400,20 @@ resolution (e.g. insufficient resources) — such failures appear as
 
 ## 10. State views (JSON)
 
-`Game.player_view(pid)` and `Game.spectator_view()` return the same shape;
-spectator has `"you": null` and sees all messages; players see public messages
-and messages to/from themselves (the last 50 visible messages are included),
-and trade offers/treaty proposals involving them. Views are freshly built on
+`Game.player_view(pid)` and `Game.spectator_view(full=False)` return the same
+shape; players see public messages and messages to/from themselves (the last
+50 visible messages are included), and trade offers/treaty proposals
+involving them. The spectator view has `"you": null` and, because it is served
+without authentication, is **public while the game is not finished**: only
+public messages and public events, no `trade_offers`, no `treaty_proposals`
+(otherwise any player could drop their token and read everyone's private
+diplomacy). Once the game is finished — or with `full=True` (offline
+tournaments, finished replays) — it shows all messages, offers, proposals and
+events. Views are freshly built on
 every call (callers may mutate them). Additional fields beyond the example:
 top-level `name`; `you.alive`, `you.market_fee`, `you.capital` ([x,y]);
-`players[].upkeep`; `trade_offers[].turn`.
+`players[].upkeep`; `trade_offers[].turn`; `players[].relics_guarded` and
+`map.relics[].guarded` (relics whose owner has units on them).
 
 ```json
 {
@@ -340,7 +431,7 @@ top-level `name`; `you.alive`, `you.market_fee`, `you.capital` ([x,y]);
     {"id":"p1","name":"Alpha","color":"#e6194b","alive":true,"eliminated_turn":null,
      "resources":{...}, "income":{...}, "cities":2,"tiles":14,"capitals_held":1,
      "military_power":30,"units":{"infantry":3,"archer":0,"cavalry":0,"siege":0},
-     "wonder_stage":0,"relics_held":0,"relic_streak":0,"betrayals":0,"score":61,
+     "wonder_stage":0,"relics_held":0,"relics_guarded":0,"relic_streak":0,"betrayals":0,"score":61,
      "submitted": true,
      "victory_progress":{"conquest":0.33,"wonder":0.0,"influence":0.02,"relics":0.0,"economic":0.03,"score":0.08}}
   ],
@@ -349,10 +440,10 @@ top-level `name`; `you.alive`, `you.market_fee`, `you.capital` ([x,y]);
           "owner":  [["p1",null,...], ...],
           "improvements":[{"x":5,"y":4,"building":"farm"}],
           "deposits":[{"x":6,"y":2,"resource":"stone","remaining":280}],
-          "relics":[{"x":11,"y":10,"owner":null}]},
+          "relics":[{"x":11,"y":10,"owner":null,"guarded":false}]},
   "cities": [{"x":3,"y":4,"owner":"p1","name":"Alpha-1","capital":true,"original_owner":"p1",
               "buildings":{"walls":0,"warehouse":0,"market_hall":0},"wonder_stage":0,
-              "garrison":20}],
+              "garrison":40}],
   "armies": [{"x":3,"y":4,"owner":"p1","units":{"infantry":3}}],
   "market": {"fee":0.05,"prices":{"food":1.0,"wood":1.5,"stone":2.0},
              "pools":{"food":{"resource":2400,"gold":2400}, "...":{}},
@@ -362,9 +453,9 @@ top-level `name`; `you.alive`, `you.market_fee`, `you.capital` ([x,y]);
   "trade_offers": [{"id":"t7","from":"p2","to":"p1","give":{"wood":50},"want":{"gold":40},"expires_turn":14}],
   "messages": [{"turn":11,"from":"p2","to":"all","text":"hello"}],
   "events": [{"turn":11,"type":"battle","x":5,"y":5,"sides":["p1","p2"],"winner":"p1","losses":{...}}],
-  "victory": {"thresholds":{"conquest_capitals":3,"wonder_stage":5,"influence":600,
-                            "relics_needed":3,"relics_total":5,"relic_turns":10,
-                            "economic_gold":2000,"max_turns":150},
+  "victory": {"thresholds":{"conquest_capitals":4,"wonder_stage":5,"influence":3350,
+                            "relics_needed":3,"relics_total":6,"relic_turns":16,
+                            "economic_gold":13500,"max_turns":150},
               "result": null},
   "costs": { "units":{...}, "buildings":{...} }
 }
@@ -398,13 +489,16 @@ events = g.step()                  # resolves current turn
 g.finished -> bool
 g.result -> dict | None            # same as victory.result
 g.player_view(pid) -> dict
-g.spectator_view() -> dict
+g.spectator_view(full=False) -> dict  # public while running; full=True: everything
 g.alive_players() -> list[str]
 ```
 
 Also: `g.stats()` (per-player derived stats), `Game.rules()` / `rules_json()`,
 `g.placements()`, `g.deadline` (set by the server, echoed in views) and
-`g.status` (`lobby|running|finished`). `player_view` raises `KeyError` for an
+`g.status` (`lobby|running|finished`), `g.relic_guarded(tile)`,
+`g.start_slots` (`{pid: slot}`: index of the player's start in
+`mapgen.start_layout(n)`, for fairness statistics; not in the views) and
+`g.map_info` (map generation details incl. `orientation`). `player_view` raises `KeyError` for an
 unknown id; `add_player`/`start` raise `RuntimeError` when misused.
 `agentciv.engine.testing` has helpers for building hand-made situations.
 All constants live in `agentciv/engine/constants.py`; after changing them run
@@ -425,14 +519,14 @@ actions: header `Authorization: Bearer <token>` (or `?token=`).
 | GET | `/api/rules.json` | | constants/cost tables |
 | GET | `/api/games` | | `[{"game_id","name","status","turn","players":[{"id","name","is_bot"}],"max_players","created"}]` |
 | POST | `/api/games` | `{"name?","max_players":6,"min_players":2,"turn_timeout":30,"max_turns":150,"seed?":int,"bots?":["strategist","rusher"],"fill_with_bots?":false,"lobby_timeout?":null}` | `{"game_id"}` |
-| POST | `/api/games/{id}/join` | `{"name"}` | `{"game_id","player_id","token"}` |
-| POST | `/api/games/{id}/start` | | `{"ok":true}` (fills empty seats with bots if `fill_with_bots`) |
-| GET | `/api/games/{id}/state` | token optional | player view, or spectator view without token |
+| POST | `/api/games/{id}/join` | `{"name","key?"}` | `{"game_id","player_id","token"}` |
+| POST | `/api/games/{id}/start` | token (see below) | `{"ok":true}` (fills empty seats with bots if `fill_with_bots`) |
+| GET | `/api/games/{id}/state` | token optional | player view, or the public spectator view without token |
 | POST | `/api/games/{id}/orders` | `{"turn":12,"orders":[...]}` | `{"accepted":k,"errors":[...],"turn":12}` (409 if `turn` stale) |
 | GET | `/api/games/{id}/wait` | `?since_turn=12&timeout=30` | `{"turn","status"}` when turn > since_turn or finished or timeout |
-| GET | `/api/games/{id}/stream` | | SSE: `event: state` with spectator view each turn |
-| GET | `/api/games/{id}/replay` | | `{"frames":[spectator_view per turn], "result"}` |
-| POST | `/api/quickmatch` | `{"name","players?":6,"turn_timeout?":30}` | joins the open quickmatch lobby (creating one if needed); `{"game_id","player_id","token"}` |
+| GET | `/api/games/{id}/stream` | | SSE: `event: state` with the public spectator view each turn |
+| GET | `/api/games/{id}/replay` | | `{"frames":[spectator_view per turn], "result"}` (public frames while running) |
+| POST | `/api/quickmatch` | `{"name","key?","players?":6,"turn_timeout?":30}` | joins the open quickmatch lobby (creating one if needed); `{"game_id","player_id","token"}` |
 | GET | `/api/leaderboard` | | `[{"name","rating","mu","sigma","games","wins","avg_place"}]` |
 | GET | `/api/bots` | | list of built-in bot names |
 
@@ -459,13 +553,45 @@ display rating = mu − 3·sigma).
   `"rated?": true` (false = keep off the leaderboard). `turn_timeout: 0`
   means *no deadline* (wait for every living remote player); positive values
   below 0.05 s are raised to 0.05 s. Responses to join/quickmatch/create/start
-  also include `status`; `start` returns `{"ok":true,"started":bool}` and is
+  also include `status` (create also `creator_token`, `rated`,
+  `unrated_reason`); `start` returns `{"ok":true,"started":bool}` and is
   idempotent on a running game (409 only on a finished game or too few
   players).
 * `POST /api/quickmatch` also accepts `max_turns`, `lobby_timeout` (default
-  30 s) and `fill_with_bots` (default true): a quickmatch lobby starts when
-  full or, after `lobby_timeout`, fills the empty seats with house bots.
-  Lobbies are matched on (`players`, `turn_timeout`, `max_turns`).
+  30 s; 0 = start at once) and `fill_with_bots` (default true): a quickmatch
+  lobby starts when full or, after `lobby_timeout`, fills the empty seats
+  with house bots. Lobbies are matched on (`players`, `turn_timeout`,
+  `max_turns`, `lobby_timeout`, `fill_with_bots`).
+* **Spectators and private information.** The unauthenticated spectator
+  endpoints (`/state` without a token, `/stream`, `/replay`) serve the
+  *public* view while a game is not finished: public messages and events
+  only, no `trade_offers` or `treaty_proposals`, no private events. Once the
+  game is finished, `/state`, `/stream` and the replay (file and endpoint)
+  carry the full spectator view (all messages, offers, proposals, events).
+* **Starting a lobby.** `POST /start` needs no token while no remote player
+  is seated; after that it needs a seated player's token or the
+  `creator_token` returned by `POST /api/games` (403 otherwise). Quickmatch
+  lobbies have no creator token.
+* **Ratings.** A game is rated only if created with `rated: true` (default)
+  *and* under standard conditions: no creator-chosen `seed`,
+  `max_turns ≥ 150`, `0 < turn_timeout ≤ 300`, no creator-picked `idle` or
+  `random` house bots; and it needs ≥ 2 seats and ≥ 1 remote player. Game
+  summaries and the `POST /api/games` response carry `rated` and
+  `unrated_reason`. `--open-ratings` (server flag) rates every `rated` game.
+  Players tied on score (same alive state/elimination turn) share a rank; a
+  winner by a victory condition ranks alone. House bots get secret random
+  seeds (not derived from the published game seed).
+* **Registered names.** `join`/`quickmatch` accept `"key"` (8–200 chars):
+  the first use registers the name with that key (`data/names.json`, hashed);
+  afterwards the name can only be joined with its key (403). Leaderboard rows
+  carry `verified` (registered name or house bot).
+* **Limits.** At most 512 open connections (then 503), 30 s socket timeout;
+  at most 200 live games and 50 open lobbies (then 503 on create/quickmatch);
+  a lobby not started within 1 h is closed; house bots of bot-only games
+  share 2 compute slots. Finished games move from memory to their replay
+  file (the 16 newest stay in memory for ≤ 5 min); their tokens keep
+  resolving (409 on `/orders`). `GET /api/games?limit=N` (default 100) lists
+  every live game plus the newest archived ones up to N.
 * `/orders` accepts `turn` omitted (= current turn) and a bare order list as
   the body; errors: 400 malformed, 401 missing/invalid token, 403 token of
   another game, 409 stale turn / lobby / finished / eliminated (409 bodies

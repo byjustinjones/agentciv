@@ -5,11 +5,14 @@ Layout under ``data_dir``::
     replays/<game_id>.json   {"game_id","summary","result","frames":[...]}
     replays/index.json       {game_id: summary}   (rebuilt from the files if missing)
     leaderboard.json         {name: {"mu","sigma","games","wins","total_place"}}
+    names.json               {casefolded name: sha256(key)}   (names registered with a key)
 
 All writes are atomic (write to a temp file, then ``os.replace``).
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -44,10 +47,13 @@ class Storage:
         self.replay_dir = self.root / "replays"
         self.index_path = self.replay_dir / "index.json"
         self.leaderboard_path = self.root / "leaderboard.json"
+        self.names_path = self.root / "names.json"
         self._lock = threading.Lock()
+        self._write_lock = threading.Lock()  # serialises replay-file writes (outside the index lock)
         self.replay_dir.mkdir(parents=True, exist_ok=True)
         self.index: dict[str, dict] = self._load_index()
         self.table: dict[str, dict] = self._load_json(self.leaderboard_path, {})
+        self.claims: dict[str, str] = self._load_json(self.names_path, {})
 
     # ------------------------------------------------------------ helpers
     @staticmethod
@@ -95,10 +101,12 @@ class Storage:
             return
         head = _dumps({"game_id": game_id, "summary": summary, "result": result})
         body = head[:-1] + b',"frames":[' + b",".join(frames) + b"]}"
-        with self._lock:
+        with self._write_lock:  # the (large) replay file is written without blocking index lookups
             _atomic_write(path, body)
-            self.index[game_id] = summary
-            _atomic_write(self.index_path, _dumps(self.index))
+            with self._lock:
+                self.index[game_id] = summary
+                index_bytes = _dumps(self.index)
+            _atomic_write(self.index_path, index_bytes)
 
     def read_replay(self, game_id: str) -> bytes | None:
         path = self.replay_path(game_id)
@@ -114,20 +122,78 @@ class Storage:
         with self._lock:
             return dict(self.index)
 
+    def summary(self, game_id: str) -> dict | None:
+        """One archived game's summary (no copy of the whole index)."""
+        with self._lock:
+            s = self.index.get(game_id)
+            return dict(s) if s is not None else None
+
+    def recent(self, limit: int, exclude: set | frozenset = frozenset()) -> list[dict]:
+        """The ``limit`` most recently created archived summaries, newest first."""
+        with self._lock:
+            items = [v for k, v in self.index.items() if k not in exclude]
+        items.sort(key=lambda s: s.get("created", 0) if isinstance(s, dict) else 0, reverse=True)
+        return [dict(v) for v in items[:max(0, limit)]]
+
+    def archived_ids(self) -> list[str]:
+        with self._lock:
+            return list(self.index)
+
+    # ------------------------------------------------------------ registered names
+    @staticmethod
+    def _hash_key(key: str) -> str:
+        return hashlib.sha256(("agentciv-name-key:" + key).encode()).hexdigest()
+
+    def check_name(self, name: str, key: str | None) -> bool:
+        """Name registration. A name registered with a key can only be used
+        with that key (else ValueError). An unregistered name used with a key
+        gets registered. Returns True when the seat is key-verified."""
+        folded = name.casefold()
+        with self._lock:
+            stored = self.claims.get(folded)
+            if stored is None:
+                if key is None:
+                    return False
+                self.claims[folded] = self._hash_key(key)
+                _atomic_write(self.names_path, _dumps(self.claims))
+                return True
+        if key is None or not hmac.compare_digest(stored, self._hash_key(key)):
+            raise ValueError(name)
+        return True
+
+    def is_registered(self, name: str) -> bool:
+        with self._lock:
+            return name.casefold() in self.claims
+
     # ------------------------------------------------------------ leaderboard
-    def record_result(self, placements: list[str]) -> None:
-        """Update ratings from an ordered list of player names (winner first).
-        Duplicate names keep their best placement; < 2 names is ignored."""
+    def record_result(self, placements: list[str], ranks: list[int] | None = None) -> None:
+        """Update ratings from an ordered list of player names (winner first);
+        ``ranks`` (optional, 1 = best, equal = tie). Duplicate names keep
+        their best placement; < 2 names is ignored."""
+        if ranks is None:
+            ranks = list(range(1, len(placements) + 1))
         seen: list[str] = []
-        for name in placements:
+        seen_ranks: list[int] = []
+        for name, rank in zip(placements, ranks):
             if name not in seen:
                 seen.append(name)
+                seen_ranks.append(rank)
         if len(seen) < 2:
             return
+        # re-number so ranks stay 1..n with ties preserved after dropping duplicates
+        dense, prev, out = 0, None, []
+        for i, r in enumerate(seen_ranks):
+            if r != prev:
+                dense = i + 1
+                prev = r
+            out.append(dense)
         with self._lock:
-            ratings.update(self.table, seen)
+            ratings.update(self.table, seen, out)
             _atomic_write(self.leaderboard_path, json.dumps(self.table, indent=1, sort_keys=True).encode())
 
     def leaderboard(self) -> list[dict]:
         with self._lock:
-            return ratings.leaderboard(self.table)
+            rows = ratings.leaderboard(self.table)
+            for r in rows:  # registered names can only be played with their key (see check_name)
+                r["verified"] = r["name"].casefold() in self.claims
+            return rows

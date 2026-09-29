@@ -587,6 +587,8 @@ class Plan:
         w = self.w
         if self.full() or i in self.claimed or i in self.settles or not w.passable(i) or w.owner[i] is not None:
             return False
+        if i in w.relic_set:            # relics are taken by occupation only
+            return False
         if not w.adjacent_to(w.me, i, self.claimed):
             return False
         if w.hostile_units_on(w.me, i):
@@ -741,8 +743,10 @@ class Plan:
         for k, step in enumerate(path):
             if step not in w.nb[prev] or not enter(step):
                 return False
-            if len(path) == 2 and k == 0 and w.hostile_units_on(w.me, step):
-                return False
+            if len(path) == 2 and k == 0:
+                city = w.cities.get(step)
+                if w.hostile_units_on(w.me, step) or (city is not None and w.hostile(w.me, city["owner"])):
+                    return False  # hostile army or hostile city: no passing through
             prev = step
         for u, c in req.items():
             self.moved[(src, u)] = self.moved.get((src, u), 0) + c

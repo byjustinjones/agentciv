@@ -43,23 +43,24 @@ CITY_CLAIM_RADIUS = 1         # a new city claims unowned tiles in this Chebyshe
 
 # Map generation ------------------------------------------------------------
 # Start neighbourhood template for a start on the EAST side of the map
-# (column index grows outward). 'C' marks the capital (plains). It is rotated
+# (column index grows outward). It is mirror-symmetric about the middle row,
+# so mirrored start positions get exactly the same neighbourhood. 'C' marks the capital (plains). It is rotated
 # by multiples of 90 degrees so that it always faces outward, and stamped onto
 # every tile that is closer to that start than to any other start (so the
 # inner START_CORE_RADIUS square is always identical for every player, and
 # most of the rest is too).
 START_TEMPLATE = [
     "m.f..h...f.",
-    ".h..f...g..",
+    ".h..f......",
     "f.h.f..f..h",
     "...f..h..f.",
-    "g...f.h.g..",
-    "..f..C..ff~",
-    "f..h..f....",
-    "..g..f.h.h.",
-    "h...h..f..f",
-    ".f..~..h...",
-    "..h..f..m..",
+    "g...f...g..",
+    "..f.hC.hff~",
+    "g...f...g..",
+    "...f..h..f.",
+    "f.h.f..f..h",
+    ".h..f......",
+    "m.f..h...f.",
 ]
 START_CORE_RADIUS = 3             # starts are spaced >= 2*this+1 apart when possible
 # Fraction of the random (non-template) land per terrain type.
@@ -70,7 +71,16 @@ MAPGEN_FOREST_FRACTION = 0.26     # of the remaining non-hills land
 MAPGEN_GOLD_FRACTION = 0.035      # of passable random land
 MAPGEN_SMOOTHING_PASSES = 2
 MAPGEN_ATTEMPTS = 16               # best (fairest) of this many valid maps
-MAPGEN_RELIC_RING = 0.14           # relic ring Manhattan radius as fraction of W
+# Relics sit on a ring whose radius (x the mean start radius) is drawn per map
+# from [MIN, MAX]; one relic between every pair of neighbouring starts.
+MAPGEN_RELIC_RING_MIN = 0.45
+MAPGEN_RELIC_RING_MAX = 1.0
+RELIC_MIN_SPACING = 3              # min Chebyshev distance between two relics
+MAPGEN_LAND_TOLERANCE = 1.0        # max excess land share (tiles) after equalising
+MAPGEN_CONTESTED_LAND_VALUE = 0.0  # weight of land tied between two capitals in that share
+MAPGEN_RELIC_FLANK_WEIGHT = 6.0    # penalty weight: relic not equidistant from its two capitals
+MAPGEN_RELIC_TOLERANCE = 2.0
+MAPGEN_RELIC_RESTARTS = 6          # local-search restarts per ring radius       # candidate layouts this close to the fairest are drawn by seed
 
 # --------------------------------------------------------------------------
 # Starting state
@@ -96,7 +106,7 @@ STORAGE_BASE = 300
 WAREHOUSE_STORAGE = 200
 CAPPED_RESOURCES = ("food", "wood", "stone")
 
-RELIC_INFLUENCE = 3
+RELIC_INFLUENCE = 2
 MARKET_HALL_GOLD = 3
 
 # Tile improvements (one per owned non-city tile).
@@ -105,7 +115,7 @@ IMPROVEMENTS = {
     "lumber_mill": {"terrain": ["f"], "cost": {"wood": 15, "gold": 10}, "bonus": {"wood": 2}},
     "quarry": {"terrain": ["h"], "cost": {"wood": 25, "gold": 10}, "bonus": {"stone": 2}},
     "mine": {"terrain": ["g"], "cost": {"wood": 25, "stone": 20}, "bonus": {"gold": 2}},
-    "temple": {"terrain": [".", "f", "h"], "cost": {"stone": 30, "gold": 30}, "bonus": {"influence": 2}},
+    "temple": {"terrain": [".", "f", "h"], "cost": {"stone": 20, "gold": 20}, "bonus": {"influence": 1}},
 }
 
 # City buildings. Level k costs ``cost_per_level * k``.
@@ -113,7 +123,7 @@ CITY_BUILDINGS = {
     "walls": {"max": 3, "cost_per_level": {"stone": 40, "wood": 20}},
     "warehouse": {"max": 1, "cost_per_level": {"wood": 50, "stone": 30}},
     "market_hall": {"max": 1, "cost_per_level": {"wood": 40, "stone": 40}},
-    "wonder": {"max": 5, "cost_per_level": {"stone": 60, "wood": 40, "gold": 40}},
+    "wonder": {"max": 5, "cost_per_level": {"stone": 165, "wood": 120, "gold": 130}},
 }
 
 # Expansion
@@ -131,10 +141,10 @@ MARKET_RESOURCES = ("food", "wood", "stone")
 MARKET_POOLS_PER_PLAYER = {"food": (400, 400), "wood": (400, 600), "stone": (400, 800)}
 MARKET_FEE = 0.05
 MARKET_HALL_FEE = 0.02
-MARKET_REVERSION = 0.05
+MARKET_REVERSION = 0.25
 MARKET_MAX_ORDER_FRACTION = 0.25  # of the pool's resource reserve
 MARKET_MAX_NET_FRACTION = 0.9     # net buy volume may not drain more than this
-MARKET_MAX_ITERATIONS = 5
+MARKET_READMIT_PASSES = 3        # passes re-admitting dropped orders (see market.clear_resource)
 MARKET_HISTORY_TURNS = 50
 
 # --------------------------------------------------------------------------
@@ -155,8 +165,8 @@ DEFENSIVE_TERRAIN = ("f", "h")
 WALL_BONUS_PER_LEVEL = 0.5
 SIEGE_PER_WALL_LEVEL = 3
 SIEGE_CITY_ATTACK = 4
-GARRISON_CITY = 10
-GARRISON_CAPITAL = 20
+GARRISON_CITY = 15
+GARRISON_CAPITAL = 40
 PLUNDER_FRACTION = 0.5
 MAX_RECRUIT_PER_ORDER = 50
 # Units removed first when starving (highest upkeep first).
@@ -178,15 +188,16 @@ MESSAGES_IN_VIEW = 50
 # Victory & score
 # --------------------------------------------------------------------------
 DEFAULT_MAX_TURNS = 150
-RELIC_BASE = 2                    # R = n // 2 + RELIC_BASE
+RELICS_PER_PLAYER = 1             # R = RELICS_PER_PLAYER * n relic tiles
+RELIC_HALF_MIN = 4                # R >= this: hold ceil(R/2) relics; else a majority
 WONDER_VICTORY_STAGE = 5
-INFLUENCE_VICTORY = 600
-RELIC_VICTORY_TURNS = 10
-ECONOMIC_VICTORY_GOLD = 2000
+INFLUENCE_VICTORY = 3350
+RELIC_VICTORY_TURNS = 16
+ECONOMIC_VICTORY_GOLD = 13500
 CONQUEST_SMALL_GAME = 3           # n <= this: must own all original capitals
 
-SCORE_WEIGHTS = {"tiles": 2, "cities": 15, "capitals_held": 25, "wonder_stage": 20, "relics_held": 10}
-SCORE_DIVISORS = {"influence": 5, "gold": 20, "military_power": 20}
+SCORE_WEIGHTS = {"tiles": 2, "cities": 15, "capitals_held": 50, "wonder_stage": 60, "relics_held": 15}
+SCORE_DIVISORS = {"influence": 6, "gold": 25, "military_power": 20}
 
 # Order in which conditions are reported when a player meets several at once.
 VICTORY_CONDITIONS = ("conquest", "wonder", "relics", "influence", "economic")

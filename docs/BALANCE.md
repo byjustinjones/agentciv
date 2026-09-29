@@ -1,0 +1,277 @@
+# AgentCiv — Balance notes
+
+This document records **why** the rules have their current numbers and
+**how well** they work, measured with the built-in bots. The binding rules are
+docs/DESIGN.md (contract) and docs/RULES.md (generated from
+`agentciv/engine/constants.py`). Every table below can be reproduced with the
+commands listed in §4 (Python 3.11, `--jobs 4`, results are deterministic for
+a given seed).
+
+## 1. Problems we started from (6 players)
+
+Measured with the mixed field `strategist,economist,rusher,turtle,random,random`:
+
+* Games ended after ~20–28 turns (average 27.7 in a 24-game run).
+* Relics decided 54–82% of games. At 6 players 3 of the 5 relics clustered
+  around the centre ((11,11), (13,11), (10,13)) and 2 sat in corners, the
+  same layout in every game; a single city claimed two relics with influence.
+* The economic victory (2000 gold) was reached by turn ~29 just by selling
+  production; food fell to ~0.35 gold because every pool drifted back only
+  5% per turn.
+* The influence victory was almost unreachable (1–2% of games); the wonder
+  (turtle, turn ~40–45) took over as soon as relics/economic were harder.
+* The 3 starting infantry (30 strength) beat an undefended capital's
+  garrison (20), so turn-5 capital snipes decided games.
+
+## 2. Rule changes and why
+
+### Relics (placement, control, victory)
+
+| | before | now |
+|---|---|---|
+| count | `n//2 + 2` | `n` — one relic in every gap between two neighbouring capitals |
+| placement | fixed cluster near the centre + corners | ring around the centre; each relic (nearly) equidistant from the two capitals flanking it; symmetric under the start layout's symmetries; ≥ 3 tiles apart; ring radius and map orientation vary by seed |
+| acquiring | `claim` with influence (and city founding) | **occupation only**: units alone on the tile at the end of movement take it (also when unowned); cities never claim or hand over relics |
+| victory | own `floor(R/2)+1` for 10 turn-ends | own **and guard** (units on the tile) `ceil(R/2)` (a majority if R < 4) for **16** consecutive turn-ends |
+| income | 3 influence per relic | 2 influence per owned relic |
+
+Why: interleaving relics between neighbours makes every relic a contested
+border objective instead of a free prize for whoever is nearest to a cluster.
+Occupation makes relic control military and visible (armies on the map), so a
+streak can be answered by taking one guarded relic (which resets it). With
+R = n the "majority" rule (4 of 6) was almost never achieved, so the victory
+needs half the relics; 16 turns is the shortest hold that keeps relics from
+dominating while still ending ~9% of games (15 turns: 17–27% of field-A
+games; 18 turns: ≤ 3%).
+
+**Equidistance needs matching parities.** Two tiles can be at the same
+4-directional path distance from some tile only if their `x+y` parities
+agree. At 6 players two of the diamond starts had the other parity, so the
+relic between them and a neighbour was always one step closer to one side —
+that class of starts won 30–35% of 6-strategist games. `start_layout` now
+moves minority-parity starts by one tile (keeping the half-turn symmetry;
+layouts with a quarter-turn symmetry keep mixed parities because all their
+starts are equivalent anyway). At 6 players every capital now has relics at
+path distances (6, 6, 10) for the three relics a victory needs.
+
+### Map fairness (all player counts)
+
+* The start template is now **mirror-symmetric** about its facing axis, so
+  mirrored starts get identical neighbourhoods.
+* **Equal land**: land that makes a start's uncontested region (tiles closer
+  to it than to any other start) larger than the smallest one is sunk
+  (farthest first, random tie-breaks), then every region gets the same
+  number of hills, forest and gold tiles. On a square map some starts used to
+  own a whole corner (+10% land); tied (contested) land now does not count
+  toward the equalised amount.
+* The finished map is **turned/mirrored by seed**, so no start position is
+  tied to a fixed map direction (bots — and agents — that break ties by tile
+  index otherwise favour one direction).
+* Result: 6 identical strategists win 9–23% from every start slot over 240
+  games (target 1/6 ± 0.08), and 15–21% from every seat.
+
+### Early game: garrisons
+
+Capital garrison 20 → **40**, city garrison 10 → **15**. The starting army
+(30) can no longer take an undefended capital; a real rush (5+ infantry, or
+fewer with cavalry against archers) still can, and rushers still win 12% of
+field-A games by conquest. Threatened bots now raise walls (cheap, and a wall
+level multiplies the whole defence) before recruiting.
+
+### Conquest
+
+`ceil(n/2)` → **a majority** (`floor(n/2)+1`, 4 of 6) of the original
+capitals. With two weak players in a game, capturing their two capitals used
+to end the game at turn ~22.
+
+### Market
+
+Pools revert **25%** (was 5%) of the way to their initial reserves each turn
+— an outside demand/supply that makes prices recover within a few turns.
+Food now trades around 0.4–0.85 (base 1.0; wood ~0.9–1.3, stone ~1.5–2.0) instead of sitting at 0.35,
+while heavy simultaneous selling still pushes prices down (six economists
+selling everything never reach the economic goal in 150 turns). We did not
+add a separate NPC buyer: stronger reversion is that buyer, with one number.
+
+### Victory thresholds and costs (targets: ~70–110 turns per peaceful race)
+
+| | before | now |
+|---|---|---|
+| economic | 2000 gold | **13500** gold |
+| influence | 600 | **3350** |
+| wonder stage k | 60·k stone, 40·k wood, 40·k gold | **165·k stone, 120·k wood, 130·k gold** (total 2475 / 1800 / 1950) |
+| temple | 30 stone + 30 gold, +2 influence | **20 stone + 20 gold, +1 influence** |
+| relic influence | 3 | **2** |
+| score | 25/capital, 20/wonder stage, influence/5, gold/20, 10/relic | 50/capital, **60/wonder stage**, influence/6, gold/25, 15/relic |
+
+Selling production alone is no longer a fast win: an economist needs a grown
+economy and ~75 turns even with nobody competing on the market. The later
+wonder stages cost more than the storage cap, so the missing stone/wood is
+bought on the market in the build turn (the market resolves before actions
+and caps apply at the end of the turn) — a visible, contestable race. The
+temple was halved (with a lower cost) because +2 influence per tile made the
+influence race four times faster than any other once a player had 40 tiles.
+Score weights were rebalanced so that progress on every path counts at the
+turn limit (a 5-stage wonder was worth less than 2000 hoarded gold).
+
+Race lengths of a single well-played racer with **nobody competing**
+(5 idle opponents, 40 games each, median turn of victory):
+
+| racer | median | p25–p75 |
+|---|---|---|
+| economist (economic) | 75 | 74–76 |
+| turtle (wonder) | 79 | 77–80 |
+| turtle forced to influence | 76 | 75–78 |
+| strategist forced to economic | 72 | 71–74 |
+| strategist forced to wonder | 60.5 | 60–62 |
+| strategist relics (nobody contests) | 31 | 30–36 |
+
+In contested fields the median victory turns are: field A — wonder 76,
+economic 84, conquest 71, influence 104.5, relics 32.5; field B — wonder 89,
+economic 95.5, influence 96, conquest 92, relics 31.5.
+
+## 3. Bot changes (so they play the new rules well)
+
+All planner bots:
+* never claim relics; contested claims/settles get a random 1–4 turn back-off
+  (two bots retrying the same tile failed forever); ties between equally good
+  tiles are broken by a per-game random salt instead of tile index;
+* each hostile army only threatens the own city it is closest to (armies in
+  their own cities count partly for the strategist); threatened cities raise
+  walls first and may buy food/wood for defenders;
+* `build_with_market` buys the stone/wood a wonder stage needs in the build
+  turn; `counter_relics` attacks the weakest guarded relic of a hostile player
+  on a relic streak; no treaties with relic runners.
+
+Specialists: the **economist** is the vulnerable hoarder (no walls, at most 15%
+of its gold per turn on emergency defence, 25-turn treaties); the **turtle**
+chooses wonder or influence (temples everywhere, buying their stone) by ETA,
+preferring the wonder; the **rusher** is unchanged in spirit.
+
+**Strategist**: picks the fastest of economic / wonder / influence (relics only
+when ×1.5 faster), commits earlier to influence, occupies and guards relics in
+a relic campaign, raids (plunder/wonder denial) only when the value is ≥ 2×
+the cost of a strike force that beats one turn of emergency recruiting,
+gathers out of sight and strikes at once, and signs 50-turn treaties with
+strong armies. Raids are rare by design: in tests, more aggressive raiding
+lowered its win rate (every raid is expensive and invites retaliation).
+`strategist_lite` (fixed economic race, no raids/relics, short treaties) is
+the handicapped version used for the ladder.
+
+## 4. Results (current constants)
+
+Commands (all 6 players unless noted; `--jobs 4`):
+
+```
+python -m agentciv.tournament --bots strategist,economist,rusher,turtle,random,random --games 240 --seed 1 --jobs 4
+python -m agentciv.tournament --bots strategist,economist,rusher,turtle,economist,turtle --games 240 --seed 1 --jobs 4
+python -m agentciv.tournament --bots strategist,economist,economist,economist,economist,economist --games 60 --seed 3 --jobs 4   # also rusher/turtle/random
+python -m agentciv.tournament --bots strategist,strategist,strategist,strategist,strategist,strategist --games 240 --seed 1 --jobs 4
+python -m agentciv.tournament --bots strategist,strategist,strategist,strategist,strategist --games 100 --seed 1 --jobs 4
+python -m agentciv.tournament --bots strategist,strategist,strategist,strategist,strategist,strategist,strategist,strategist --games 96 --seed 1 --jobs 4
+python -m agentciv.tournament --bots strategist,economist,rusher,turtle,random --games 100 --seed 2 --jobs 4
+python -m agentciv.tournament --bots strategist,economist,rusher,turtle,economist,turtle,random,random --games 96 --seed 2 --jobs 4
+python -m agentciv.tournament --bots strategist,strategist_lite,economist,turtle,rusher,random --games 120 --seed 5 --jobs 4
+```
+
+### Field A — `strategist,economist,rusher,turtle,random,random` (240 games)
+
+| bot | win% | avg place | rating | wins by condition |
+|---|---|---|---|---|
+| strategist | **52.9%** | **1.87** | 41.6 | wonder 78, relics 36, conquest 10, influence 3 |
+| economist | 21.7% | 2.64 | 27.7 | economic 52 |
+| turtle | 13.8% | 2.50 | 31.9 | wonder 28, influence 5 |
+| rusher | 11.7% | 3.25 | 21.9 | conquest 27, economic 1 |
+| random ×2 | 0% | 5.36–5.37 | −6.4 / −6.9 | – |
+
+Endings: wonder 44%, economic 22%, conquest 15%, relics 15%, influence 3%,
+turn limit 0%. Game length: median 78.5 (min 29, max 119).
+
+### Field B — `strategist,economist,rusher,turtle,economist,turtle` (240 games)
+
+| bot | win% | avg place | rating | wins by condition |
+|---|---|---|---|---|
+| strategist | **54.2%** | **2.38** | 27.8 | wonder 61, influence 60, relics 6, conquest 2, economic 1 |
+| turtle #1 / #2 | 9.2% / 15.0% | 3.03 / 3.10 | 20.6 / 19.6 | wonder 42, influence 16 |
+| economist #1 / #2 | 8.7% / 11.3% | 4.08 / 3.94 | 12.8 / 15.6 | economic 48 |
+| rusher | 1.7% | 4.48 | 11.3 | conquest 3, economic 1 |
+
+Endings: wonder 43%, influence 32%, economic 21%, relics 2%, conquest 2%,
+turn limit 0%. Game length: median 93 (min 30, max 115).
+
+Across A+B (480 games): wonder 43.5%, economic 21.5%, influence 17.5%,
+conquest 8.8%, relics 8.8% — every condition ≥ 4%.
+
+### Strategist against 5 copies of one bot (60 games each, seed 3)
+
+| field | strategist win% | avg place | endings |
+|---|---|---|---|
+| 5 × economist | 100% | 1.00 | wonder 63%, influence 37% |
+| 5 × turtle | 86.7% | 1.15 | economic 70%, influence 25% |
+| 5 × rusher | 80.0% | 1.20 | relics 72%, conquest 20% |
+| 5 × random | 100% | 1.00 | relics 87%, wonder 13% |
+
+### Positional fairness: identical strategists
+
+| players | games | win% by start slot | win% by seat | endings |
+|---|---|---|---|---|
+| 6 | 240 | 17, 11, 22, 19, 9, 23 | 16, 18, 21, 15, 15, 16 | relics 49%, influence 35%, wonder 12% |
+| 5 | 100 | 17, 12, 18, 35, 18 | 29, 14, 14, 17, 26 | relics 50%, influence 36%, conquest 13% |
+| 8 | 96 | 17, 5, 12, 7, 15, 22, 12, 12 | 10, 12, 15, 16, 14, 5, 17, 12 | wonder 44%, influence 35%, turn limit 15% |
+
+At 6 players every start slot is within 1/6 ± 0.08 (the two parity-moved
+starts, slots 2 and 5, are still slightly favoured: 22–23%). The 5- and
+8-player checks are short runs (standard error ≈ 4 and 3.4 points); slot 3 at
+5 players (35%) is outside the band and worth a longer look (see §5).
+
+### Other player counts (mixed fields)
+
+| field | games | strategist | endings | median length |
+|---|---|---|---|---|
+| 5p `strategist,economist,rusher,turtle,random` | 100 | 57.0% / place 1.77 | conquest 46%, wonder 19%, relics 19%, economic 12%, influence 4% | 69.5 |
+| 8p `strategist,economist,rusher,turtle,economist,turtle,random,random` | 96 | 79.2% / place 1.56 | wonder 96% | 68 |
+
+### Skill ladder (120 games, seed 5)
+
+`strategist,strategist_lite,economist,turtle,rusher,random`: ratings
+strategist 35.4 (53.3%, place 2.01) > economist 23.3 > **strategist_lite 19.9**
+(5.8%, place 3.01) > turtle 18.4 > rusher 5.6 > random −15.0. Removing the
+strategist's path choice, relics, raids and long treaties costs it most of
+its strength; ratings increase with skill random < strategist_lite <
+strategist.
+
+### Re-check after the exploit fixes (60 games, field A)
+
+Phantom-proof market clearing (one drop per round + re-admission, no
+"did not converge"), contention only among orders that would succeed,
+coalition captures (largest force among allies), cavalry crossing clashes,
+no 2-step moves through hostile cities, symmetric simultaneous treaty breaks
+and the protected-tile floor in the terrain-mix balancing (maps for n = 4,
+5, 6, 8 unchanged). `--games 60 --players 6 --jobs 4`:
+strategist 53.3% (place 1.80), economist 20.0%, turtle 15.0%, rusher 11.7%,
+random 0%; endings wonder 45%, economic 20%, relics 18%, conquest 13%,
+influence 3%; median length 78 — within noise of the 240-game table above.
+
+## 5. Open issues
+
+* **Thresholds do not scale with the player count.** At 8 players the
+  strategist wins 79% of mixed games, almost all by wonder (turn ~68); at 5
+  players conquest ends 46% of games (a majority is only 3 capitals). The
+  targets were tuned for 6 players.
+* **5-player positional fairness** (one short run): slot 3 won 35% of
+  5-strategist games. 5 starts on a diamond have only a mirror symmetry;
+  relic distances per slot are (5,5,8) / (5,5,9) / (5,6,9).
+* **Early relic wins.** Relic victories come early (median turn ~32): when
+  nobody contests the relics near a strategist it can hold three by turn ~16.
+  The peaceful bots only react once a streak runs (and never through a
+  treaty partner's land). Stronger counter-play in the specialists, or relics
+  that only start counting after some turns, would push them later.
+* **Odd player counts ≥ 7** have no start symmetry: at 9 players relic
+  distances differ by up to 4 steps between capitals (DESIGN §3 table).
+* **Influence and wonder are knife-edge.** Small changes of the influence
+  goal or wonder cost move 10–15% of field-B games between the two; the
+  current values keep every condition ≤ 45% in field B with a few points of
+  margin (wonder 43%).
+* README.md (not part of the balance work) still quotes the old thresholds
+  (600 influence, 2000 gold, a relic majority for 10 turns, ceil(n/2)
+  capitals).

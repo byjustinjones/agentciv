@@ -16,7 +16,7 @@ from agentciv.engine import constants as C
 from agentciv.engine.rules import claim_cost, settle_cost
 
 from .common import (CAPPED, SafeBot, World, add_units, base_price,
-                     best_counter, best_improvement, food_projection,
+                     best_counter, best_improvement, buy_price, food_projection,
                      raw_income, raw_strength, season_mods, simulate_attack,
                      threat_to, tile_yield, total_units,
                      treaty_proposals_to_me, value_of)
@@ -37,6 +37,8 @@ class PlannerBot(SafeBot):
     RELIC_INTEREST = 0.0          # bonus value per relic for sites/claims
     DEFENSE_REACH = 2             # turns of warning considered for threats
     DEFENSE_MARGIN = 1.0          # defence must beat threat * margin
+    ASSIGN_THREATS = True         # each army only threatens our nearest city
+    GARRISON_THREAT_SHARE = 1.0   # share of units inside their own city counted as a threat
     MIN_GARRISON = 1              # units kept in the capital at all times
     CITY_GARRISON = 0             # units kept in other cities
     SELL_FLOOR = 0.65             # never sell below this fraction of base price
@@ -45,6 +47,7 @@ class PlannerBot(SafeBot):
     FOOD_BUFFER_TURNS = 14        # food projection horizon
     MARKET_HALL = True
     WAREHOUSE = True
+    BUY_FOR_IMPROVEMENTS = False  # buy missing stone/wood for improvements
 
     def decide(self, view: dict) -> list:
         w = World(view)
@@ -56,11 +59,38 @@ class PlannerBot(SafeBot):
                 step()
             except Exception as e:  # keep going with the other behaviours
                 self.last_error = f"{getattr(step, '__name__', step)}: {type(e).__name__}: {e}"
+        self.memory["last_orders"] = (w.turn, list(p.orders))
         return p.orders
 
+    def note_contested(self) -> None:
+        """Claims/settles that failed because a rival tried the same spot get
+        a random back-off (1-4 turns): two players retrying the same tile
+        every turn would both fail forever."""
+        w = self.w
+        back = self.memory.setdefault("backoff", {})
+        last = self.memory.get("last_orders")
+        if not last or last[0] != w.turn - 1:
+            return
+        orders = last[1]
+        for e in w.events:
+            if e.get("type") != "order_failed" or e.get("player") != w.me:
+                continue
+            if not str(e.get("reason", "")).startswith("contested"):
+                continue
+            k = e.get("index")
+            if isinstance(k, int) and 0 <= k < len(orders):
+                at = orders[k].get("at")
+                if isinstance(at, list) and len(at) == 2:
+                    back[w.idx(at[0], at[1])] = w.turn + self.rng.randint(1, 4)
+        for i in [i for i, t in back.items() if t < w.turn]:
+            del back[i]
+
+    def backed_off(self, i: int) -> bool:
+        return self.memory.get("backoff", {}).get(i, -1) >= self.w.turn
+
     def pipeline(self) -> list:
-        return [self.diplomacy, self.food_safety, self.plan_site, self.defend, self.sell,
-                self.expand, self.develop, self.garrison_moves]
+        return [self.diplomacy, self.food_safety, self.plan_site, self.defend, self.counter_relics,
+                self.sell, self.expand, self.develop, self.garrison_moves]
 
     # ------------------------------------------------------------------
     # preparation
@@ -76,6 +106,13 @@ class PlannerBot(SafeBot):
         self.site_path: list = []
         rem = max(1, w.max_turns - w.turn)
         self.remaining = rem
+        self.note_contested()
+        # per-game random tie-breaker per tile: breaking ties by tile index
+        # would favour one map direction (and so some start positions)
+        salt = self.memory.get("salt")
+        if salt is None or len(salt) != w.n_tiles:
+            salt = self.memory["salt"] = [self.rng.random() for _ in range(w.n_tiles)]
+        self.salt = salt
 
     def weights(self) -> dict:
         w = self.w
@@ -106,10 +143,109 @@ class PlannerBot(SafeBot):
     def accept_all_and_propose(self, turns: int = 50, only_neighbors: bool = False) -> None:
         w, p = self.w, self.p
         for pr in treaty_proposals_to_me(w):
-            p.accept_treaty(pr["from"])
+            if not self.relic_runner(pr["from"]):
+                p.accept_treaty(pr["from"])
         for q in w.rivals:
-            if q not in w.treaties and (w.turn + hash_pid(q)) % 3 == 0:
+            if q not in w.treaties and (w.turn + hash_pid(q)) % 3 == 0 and not self.relic_runner(q):
                 p.propose(q, turns)
+
+    def relic_runner(self, q: str) -> bool:
+        """Is ``q`` holding (nearly) enough guarded relics for the relic
+        victory? Such a player gets no treaty: we may have to hit a relic."""
+        w = self.w
+        need = w.thresholds.get("relics_needed", 99)
+        pl = w.players.get(q, {})
+        return pl.get("relics_guarded", 0) >= need - 1 or pl.get("relic_streak", 0) > 0
+
+    # ------------------------------------------------------------------
+    # stopping a relic victory
+    # ------------------------------------------------------------------
+    COUNTER_RELICS = True          # attack a rival's relic guard when its streak runs
+    COUNTER_RELIC_STREAK = 3       # ...once the streak is this long
+
+    def counter_relics(self) -> None:
+        """If a hostile rival is on a relic streak, raise a strike force
+        against its weakest guarded relic and take it (a relic changes hands
+        when our units are alone on it, which resets the rival's streak)."""
+        w, p = self.w, self.p
+        self.relic_target = None
+        if not self.COUNTER_RELICS or not w.my_cities:
+            return
+        need = w.thresholds.get("relics_needed", 99)
+        hold = w.thresholds.get("relic_turns", C.RELIC_VICTORY_TURNS)
+        worst = None
+        for q in w.rivals:
+            pl = w.players.get(q, {})
+            if pl.get("relics_guarded", 0) < need or pl.get("relic_streak", 0) < self.COUNTER_RELIC_STREAK:
+                continue
+            if w.at_peace(w.me, q):
+                continue
+            left = hold - pl.get("relic_streak", 0)
+            if worst is None or left < worst[0]:
+                worst = (left, q)
+        if worst is None:
+            return
+        q = worst[1]
+        enter = w.can_enter_fn(w.me)
+        srcs = list(w.my_armies) + list(w.my_cities)
+        dist = w.bfs(srcs, enter)
+        best = None
+        for r in w.relics:
+            if w.owner[r] != q or q not in w.armies.get(r, {}) or r not in dist:
+                continue
+            force = self.min_force(r)
+            size = sum(force.values()) + dist[r] / 3.0
+            if best is None or size < best[0]:
+                best = (size, r, force)
+        if best is None:
+            return
+        _, tgt, force = best
+        if best[0] > 3 * worst[0] + 12:
+            return      # too late / too strong to stop
+        self.relic_target = tgt
+        # recruit what is missing in the city closest to the target
+        tdist = w.bfs([tgt], enter)
+        city = min(w.my_cities, key=lambda c: (tdist.get(c, 999), c))
+        have: dict = {}
+        for i in w.my_armies:
+            if tdist.get(i, 999) <= 12:
+                have = add_units(have, self.free_units(i))
+        have = add_units(have, p.recruited.get(city, {}))
+        room = int(self.raw.get("food", 0) * 0.9 + p.budget.get("food", 0) / 12 - w.upkeep)
+        for t, k in sorted(force.items()):
+            miss = k - have.get(t, 0)
+            if miss > 0 and room > 0:
+                got = p.recruit(city, t, min(miss, room), {"food": 20})
+                room -= got * C.UNITS[t]["upkeep"]
+        self.offense(tgt, min_ratio=1.15)
+
+    def min_force(self, tgt: int, ratio: float = 1.3) -> dict:
+        """Smallest force of the best counter type that wins the simulated
+        assault on ``tgt`` (with the defenders' neighbours) with ``ratio``."""
+        w = self.w
+        owner = w.cities[tgt]["owner"] if tgt in w.cities else w.owner[tgt]
+        defenders = {q: dict(u) for q, u in w.armies.get(tgt, {}).items() if q != w.me}
+        if owner:
+            for j in w.nb[tgt]:
+                u = w.armies.get(j, {}).get(owner)
+                if u:
+                    defenders[owner] = add_units(defenders.get(owner, {}), u)
+        enemy: dict = {}
+        for u in defenders.values():
+            enemy = add_units(enemy, u)
+        force: dict = {}
+        siege = self.siege_needed(tgt)
+        if siege:
+            force["siege"] = siege
+        t = best_counter(enemy or {"infantry": 1}, allowed=("infantry", "cavalry", "archer"))
+        k = 1
+        while k <= 60:
+            force[t] = k
+            win, _, r = simulate_attack(w, w.me, force, tgt, defenders_override=defenders, assume_war=True)
+            if win and r >= ratio:
+                break
+            k += 1 if k < 10 else 3
+        return force
 
     # ------------------------------------------------------------------
     # food
@@ -245,7 +381,8 @@ class PlannerBot(SafeBot):
                     score -= (6 - de) * 4.0 * self.site_danger_weight()
             if cap is not None:
                 score -= max(0, w.manhattan(s, cap) - 8) * 1.0
-            if score > best_s:
+            if score > best_s + 1e-9 or (best is not None and abs(score - best_s) <= 1e-9
+                                         and self.salt[s] > self.salt[best]):
                 best, best_s = s, score
         if best is None:
             return None, []
@@ -287,6 +424,8 @@ class PlannerBot(SafeBot):
         if site is None:
             return
         cost = settle_cost(p.cities)
+        if self.backed_off(site):
+            return
         if p.can_settle_at(site):
             if p.can(cost):
                 p.settle(site)
@@ -299,6 +438,8 @@ class PlannerBot(SafeBot):
             if j == site:
                 continue
             if w.owner[j] is None and j not in p.claimed:
+                if self.backed_off(j):
+                    break
                 if p.budget.get("influence", 0) - self.INFLUENCE_RESERVE >= claim_cost(p.tiles):
                     p.claim(j)
                 break
@@ -312,13 +453,13 @@ class PlannerBot(SafeBot):
                 if j in seen or w.owner[j] is not None or j in p.claimed or w.terrain[j] not in C.PASSABLE:
                     continue
                 seen.add(j)
-                if w.hostile_units_on(w.me, j):
+                if w.hostile_units_on(w.me, j) or self.backed_off(j):
                     continue
                 v = self.tile_value(j)
                 # opening more land is worth a little
                 v += 0.15 * sum(1 for k in w.nb[j] if w.owner[k] is None and w.terrain[k] in C.PASSABLE)
                 out.append((v, j))
-        out.sort(key=lambda t: (-t[0], t[1]))
+        out.sort(key=lambda t: (-round(t[0], 9), self.salt[t[1]]))
         return out
 
     def claim_step(self, max_claims: int = 4) -> None:
@@ -378,19 +519,79 @@ class PlannerBot(SafeBot):
             if roi * min(self.remaining, 60) < 1.0 or roi < self.MIN_ROI:
                 continue
             cands.append((roi, i, b))
-        cands.sort(key=lambda t: (-t[0], t[1]))
+        cands.sort(key=lambda t: (-round(t[0], 9), self.salt[t[1]]))
         n = 0
         for roi, i, b in cands:
             if n >= limit:
                 break
-            if p.can(C.IMPROVEMENTS[b]["cost"], self.reserved) and p.improve(i, b):
+            cost = C.IMPROVEMENTS[b]["cost"]
+            if not p.can(cost, self.reserved) and self.BUY_FOR_IMPROVEMENTS:
+                self.buy_missing(cost)
+            if p.can(cost, self.reserved) and p.improve(i, b):
                 n += 1
+
+    def buy_missing(self, cost: dict, max_mult: float = 1.3) -> bool:
+        """Buy the stone/wood/food missing for ``cost`` (beyond reserves) if
+        the gold budget covers the purchase and the gold part of the cost."""
+        w, p = self.w, self.p
+        short = {r: cost[r] - (p.budget.get(r, 0) - self.reserve(r)) for r in cost
+                 if r in C.MARKET_RESOURCES and cost[r] > p.budget.get(r, 0) - self.reserve(r)}
+        if not short:
+            return True
+        gold = cost.get("gold", 0) + self.reserve("gold")
+        for r, q in short.items():
+            price = buy_price(w, r, q + p.bought.get(r, 0))
+            if price > max_mult * base_price(r):
+                return False
+            gold += q * price * (1 + w.fee) * 1.1 + 2
+        if p.budget.get("gold", 0) < gold:
+            return False
+        return all(p.buy(r, q, max_price=max_mult * base_price(r)) >= q for r, q in short.items())
 
     # ------------------------------------------------------------------
     # defence
     # ------------------------------------------------------------------
     def city_threat(self, c: int, reach: int | None = None) -> dict:
-        return threat_to(self.w, c, reach=reach or self.DEFENSE_REACH)
+        """Hostile units that could reach city ``c`` within ``reach`` turns
+        and have no other of our cities closer (an army attacks one city at
+        a time, so each city only prepares for the armies nearest to it)."""
+        reach = reach or self.DEFENSE_REACH
+        key = (c, reach)
+        cache = self.__dict__.setdefault("_threat_cache", {})
+        if cache.get("turn") != self.w.turn or cache.get("me") is not self.w:
+            cache.clear()
+            cache["turn"], cache["me"] = self.w.turn, self.w
+        if key not in cache:
+            cache[key] = self._assigned_threat(c, reach)
+        return cache[key]
+
+    def _assigned_threat(self, c: int, reach: int) -> dict:
+        w = self.w
+        full = threat_to(w, c, reach=reach)
+        if not full or len(w.my_cities) <= 1 or not self.ASSIGN_THREATS:
+            return full
+        near = w.bfs([c], max_dist=2 * reach)
+        others = [o for o in w.my_cities if o != c]
+        odist = w.bfs(others, max_dist=2 * reach) if others else {}
+        out: dict = {}
+        for i, per in w.armies.items():
+            d = near.get(i)
+            if d is None:
+                continue
+            if odist.get(i, 999) < d:
+                continue            # another of our cities is closer to this army
+            home = w.cities.get(i)
+            for q, u in per.items():
+                if q == w.me or not w.hostile(w.me, q):
+                    continue
+                got = {t: k for t, k in u.items()
+                       if d <= reach * (C.UNITS[t]["move"] if t in C.UNITS else 1)}
+                if got and home is not None and home["owner"] == q and self.GARRISON_THREAT_SHARE < 1:
+                    # units sitting in their own city are mostly its garrison
+                    got = {t: int(math.ceil(k * self.GARRISON_THREAT_SHARE)) for t, k in got.items()}
+                if got:
+                    out[q] = add_units(out.get(q, {}), got)
+        return out
 
     def defenders_at(self, c: int) -> dict:
         """My units that will be at city c this turn (staying + queued recruits)."""
@@ -420,32 +621,61 @@ class PlannerBot(SafeBot):
                 self.reinforce(c, threat, self.DEFENSE_MARGIN)
             self.lock_garrison(c)
 
+    DEFENSIVE_WALLS = True        # raise walls in a threatened city
+    DEFENSE_BUY = True            # buy food/wood on the market to recruit defenders
+    DEFENSE_BUY_FRACTION = 1.0    # ...spending at most this share of our gold per turn
+
     def reinforce(self, c: int, threat: dict, margin: float, max_rounds: int = 12) -> None:
         w, p = self.w, self.p
-        allowed = ("infantry", "archer", "cavalry")
+        if self.defended(c, threat, margin):
+            return
+        combined: dict = {}
+        for u in threat.values():
+            combined = add_units(combined, u)
+        # walls multiply the whole defence (units and garrison) and are cheap
+        if self.DEFENSIVE_WALLS and raw_strength(combined) >= 60:
+            level = w.cities[c]["buildings"].get("walls", 0) + p.city_builds.get((c, "walls"), 0)
+            if level < C.CITY_BUILDINGS["walls"]["max"]:
+                if not p.build_city(c, "walls") and self.DEFENSE_BUY:
+                    self.build_with_market(c, "walls", max_mult=2.0)
+        t = best_counter(combined, allowed=("infantry", "archer"))
+        other = "archer" if t == "infantry" else "infantry"
+        bought = False
         for _ in range(max_rounds):
             if self.defended(c, threat, margin):
                 return
-            combined: dict = {}
-            for u in threat.values():
-                combined = add_units(combined, u)
-            t = best_counter(combined, allowed=("infantry", "archer"))
             k = max(1, total_units(combined) // 4)
-            if p.recruit(c, t, k) == 0:
-                # try the other cheap type
-                other = "archer" if t == "infantry" else "infantry"
-                if p.recruit(c, other, k) == 0:
+            if p.recruit(c, t, k) == 0 and p.recruit(c, other, k) == 0:
+                if bought or not self.DEFENSE_BUY:
                     return
+                # out of food/wood: buy a batch with gold, then retry
+                bought = True
+                cost = {r: v * 2 * k for r, v in C.UNITS[t]["cost"].items() if r in C.MARKET_RESOURCES}
+                spend = w.res.get("gold", 0) * self.DEFENSE_BUY_FRACTION
+                for r, v in cost.items():
+                    short = v - p.budget.get(r, 0)
+                    if short > 0 and p.budget.get("gold", 0) > 40 and spend > 0:
+                        price = max(0.1, buy_price(w, r, short))
+                        short = min(short, int(spend / (price * (1 + w.fee) * 1.1)))
+                        if short > 0:
+                            got = p.buy(r, short, max_price=2.0 * base_price(r))
+                            spend -= got * price * (1 + w.fee) * 1.1
 
-    def lock_garrison(self, c: int) -> None:
+    def lock_garrison(self, c: int, threat: dict | None = None, margin: float | None = None,
+                      minimum: bool = True) -> None:
         """Keep units at city c: the minimum garrison, plus (when a hostile
-        army is near) just enough units to hold with the defence margin."""
+        army is near) just enough units to hold with the defence margin.
+        ``threat``/``margin`` default to :meth:`city_threat` / DEFENSE_MARGIN;
+        units already locked there count."""
         w, p = self.w, self.p
-        avail = p.available(c)
+        margin = self.DEFENSE_MARGIN if margin is None else margin
+        prev = self.locked.get(c, {})
+        avail = {u: k - prev.get(u, 0) for u, k in p.available(c).items()}
+        avail = {u: k for u, k in avail.items() if k > 0}
         if not avail:
             return
         is_cap = w.cities[c].get("capital")
-        need = self.MIN_GARRISON if is_cap else self.CITY_GARRISON
+        need = (self.MIN_GARRISON if is_cap else self.CITY_GARRISON) if minimum else 0
         keep: dict = {}
         left = need
         for t in ("archer", "infantry", "cavalry", "siege"):
@@ -453,9 +683,10 @@ class PlannerBot(SafeBot):
             if k > 0:
                 keep[t] = k
                 left -= k
-        threat = self.city_threat(c)
+        if threat is None:
+            threat = self.city_threat(c)
         if threat:
-            queued = p.recruited.get(c, {})
+            queued = add_units(p.recruited.get(c, {}), prev)
             combined: dict = {}
             for u in threat.values():
                 combined = add_units(combined, u)
@@ -466,7 +697,7 @@ class PlannerBot(SafeBot):
             order = sorted(("archer", "infantry", "cavalry", "siege"), key=lambda t: -dval(t))
             step = 1
             guard = 0
-            while not self.defended(c, threat, self.DEFENSE_MARGIN, add_units(keep, queued)) and guard < 60:
+            while not self.defended(c, threat, margin, add_units(keep, queued)) and guard < 60:
                 guard += 1
                 added = False
                 for t in order:
@@ -604,6 +835,33 @@ class PlannerBot(SafeBot):
                 if rest:
                     self.locked[i] = add_units(self.locked.get(i, {}), rest)
         return attacked
+
+    def build_with_market(self, city: int, building: str, reserve: dict | None = None,
+                          max_mult: float = 1.6) -> bool:
+        """Build the next level of ``building`` in ``city``, buying the
+        missing stone/wood/food on the market this turn (the market resolves
+        before actions, and storage caps only apply at the end of the turn,
+        so a stage can cost more than the cap). Only buys when the whole
+        purchase + build is affordable; returns True if the build was ordered."""
+        w, p = self.w, self.p
+        cost = p.city_build_cost(city, building)
+        if cost is None:
+            return False
+        keep = reserve or {}
+        short = {r: cost[r] - (p.budget.get(r, 0) - keep.get(r, 0)) for r in cost
+                 if r in C.MARKET_RESOURCES and cost[r] > p.budget.get(r, 0) - keep.get(r, 0)}
+        gold = cost.get("gold", 0) + keep.get("gold", 0)
+        for r, q in short.items():
+            price = buy_price(w, r, q + p.bought.get(r, 0))
+            if price > max_mult * base_price(r):
+                return False
+            gold += q * price * (1 + w.fee) * 1.1 + 2
+        if p.budget.get("gold", 0) < gold:
+            return False
+        for r, q in short.items():
+            if p.buy(r, q, max_price=max_mult * base_price(r)) < q:
+                return False
+        return p.build_city(city, building, keep)
 
     def siege_needed(self, target: int) -> int:
         c = self.w.cities.get(target)

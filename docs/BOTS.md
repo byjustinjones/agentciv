@@ -15,49 +15,50 @@ orders = bot.act(game.player_view("p1"))
 |------|-------|---------------------|----------|
 | `idle` | submits nothing | – | baseline |
 | `random` | random, mostly legal orders | – | weakest |
-| `economist` | peaceful builder, sells surplus, hoards gold | economic | medium |
-| `rusher` | early infantry/cavalry rush on the nearest weak capital | conquest | medium (feast or famine) |
-| `turtle` | walls, archers, temples, wonder, treaties with everyone | wonder | medium |
-| `strategist` | adaptive: economy, relic control, threat response, blocking | whatever is fastest | strongest |
+| `economist` | peaceful builder, sells surplus, hoards gold, weak defence | economic | medium |
+| `rusher` | infantry/cavalry rush on the nearest weak capital | conquest | medium (feast or famine) |
+| `turtle` | walls, archers, treaties; wonder or temples | wonder / influence | medium |
+| `strategist` | adaptive: picks the fastest race, raids, relic control, threat response | whatever is fastest | strongest |
+| `strategist_lite` | handicapped strategist (for the skill ladder) | economic | between |
 
 Every bot is deterministic for a given `seed` and sequence of views. None of
 them does I/O, none raises (see `SafeBot` below), and each takes a few
-milliseconds per turn (the strategist averages about 5 ms and peaks near
-15 ms).
+milliseconds per turn (the strategist averages about 7 ms per turn at 6
+players).
 
 ## Measured strength
 
 The results below use the current constants and
 `python -m agentciv.tournament --jobs 4`. Seats are shuffled and rotated, and
-every game uses its own map seed.
+every game uses its own map seed. Full tables, the rule changes behind them
+and more fields: docs/BALANCE.md.
 
-**Mixed 6-player field** (`strategist,economist,rusher,turtle,random,random`):
+| field (6 players, 240 games, seed 1) | strategist win% / avg place | next best |
+|------|------|------|
+| A: `strategist,economist,rusher,turtle,random,random` | 52.9% / 1.87 | economist 21.7% / 2.64 (turtle place 2.50) |
+| B: `strategist,economist,rusher,turtle,economist,turtle` | 54.2% / 2.38 | turtle 15.0% / 3.10 |
 
-| bot | 40 games (seed 1): win% / avg place | 200 games (seed 7): win% / avg place |
-|-----|------|------|
-| strategist | 57.5% / 1.77 | 76.5% / 1.38 |
-| economist | 17.5% / 2.50 | 13.0% / 2.44 |
-| turtle | 5.0% / 2.50 | 6.0% / 2.64 |
-| rusher | 20.0% / 3.30 | 4.5% / 3.65 |
-| random ×2 | 0% / 5.45–5.47 | 0% / 5.42–5.47 |
+The random bots place last (5.36–5.37 in field A).
 
-The strategist also leads at 3 players (71% of 24 games) and at 8 players
-(75% of 24 games).
-
-**Strategist against 5 copies of one bot** (48 games each, seed 3):
+**Strategist against 5 copies of one bot** (60 games each, seed 3):
 
 | field | strategist wins | avg place |
 |-------|-----------------|-----------|
 | 5 × economist | 100% | 1.00 |
-| 5 × turtle | 83% | 1.27 |
-| 5 × rusher | 79% | 1.23 |
+| 5 × turtle | 86.7% | 1.15 |
+| 5 × rusher | 80.0% | 1.20 |
 | 5 × random | 100% | 1.00 |
+
+**Skill ladder** (`strategist,strategist_lite,economist,turtle,rusher,random`,
+120 games, seed 5): ratings strategist 35.4 > economist 23.3 >
+strategist_lite 19.9 > turtle 18.4 > rusher 5.6 > random −15.0.
 
 Reproduce with:
 
 ```
-python -m agentciv.tournament --games 40 --players 6 --seed 1 --jobs 4
-python -m agentciv.tournament --bots strategist,rusher,rusher,rusher,rusher,rusher --games 48 --seed 3 --jobs 4
+python -m agentciv.tournament --games 240 --players 6 --seed 1 --jobs 4
+python -m agentciv.tournament --bots strategist,economist,rusher,turtle,economist,turtle --games 240 --seed 1 --jobs 4
+python -m agentciv.tournament --bots strategist,rusher,rusher,rusher,rusher,rusher --games 60 --seed 3 --jobs 4
 ```
 
 ## The bots
@@ -70,8 +71,8 @@ moves random parts of its stacks one step in random directions. It never
 plans, so it wastes resources and scatters its army.
 
 ### economist (`economist.py`)
-* **Diplomacy:** accepts every treaty and proposes 50-turn treaties to
-  everyone.
+* **Diplomacy:** accepts every treaty and proposes 25-turn treaties to
+  everyone — except to a player on (or one relic short of) a relic streak.
 * **Expansion:** picks city sites by the value of the tiles they would claim.
   It claims a path of tiles toward a site, settles it, and reserves the
   settlers' resources ahead of time so the market step doesn't sell them.
@@ -83,9 +84,13 @@ plans, so it wastes resources and scatters its army.
   almost any price what would otherwise overflow the storage cap.
 * **Economic push:** from turn 55, or once it holds 700 gold, it keeps its
   gold and only makes investments that pay back quickly.
-* **Defence:** minimal. It keeps 2 units in the capital. When an army comes
-  within 2 turns, it recruits just enough of the best counter for the city to
-  hold.
+* **Defence:** its weak spot. It keeps 2 units in the capital, never raises
+  walls, and when an army comes within 2 turns it recruits the best counter
+  from its stock, spending at most 15% of its gold per turn on emergency
+  food/wood purchases. A rich economist is a juicy target: capturing its
+  capital plunders half its gold.
+* **Relic streaks:** like every planner bot it attacks the weakest guarded
+  relic of a hostile player whose relic streak runs (see `counter_relics`).
 
 ### rusher (`rusher.py`)
 * **Recruiting:** from turn 0 it turns food, wood and gold into attackers,
@@ -100,91 +105,83 @@ plans, so it wastes resources and scatters its army.
   go in when the engine's own battle procedure, run on copies of the armies,
   says they win with a 10% power margin.
 * **After a capture:** it leaves 1 unit and chains on to the next capital
-  until it holds enough capitals for conquest.
+  until it holds enough capitals for conquest (a majority of them).
 * **Economy:** thin. It builds farms and lumber mills, claims tiles, sells
   spare stone, and disbands units rather than let them starve.
 * **Treaties:** accepts them only from players it is not targeting, and never
   proposes one.
 
 ### turtle (`turtle.py`)
-* **Diplomacy:** proposes the longest possible treaty to everyone and accepts
-  everything. Treaty partners cannot even enter its land.
+* **Diplomacy:** proposes 30-turn treaties to everyone and accepts every
+  proposal (not from relic runners). Treaty partners cannot enter its land.
 * **Defence:** raises capital walls over the game (level 1, then 2 from turn
-  30, then 3 from turn 70).
-  * It keeps a standing archer garrison. Archers are ×1.5 in their own city
-    and ×1.5 against infantry.
-  * It adds more archers when an army comes within 3 turns.
-* **Temples:** builds them on many tiles (influence).
-* **Wonder:** from turn 18 it reserves the cost of the next wonder stage in
-  the capital. It buys missing stone and wood on the market.
-* **Win conditions:** mainly the wonder, and influence as a by-product.
+  30, then 3 from turn 70), keeps a standing archer garrison (archers are
+  ×1.5 in their own city and ×1.5 against infantry), and adds archers and
+  walls when an army comes within 3 turns.
+* **Path:** from turn 15 it commits to one peaceful victory, re-checked every
+  5 turns: the **wonder** (it reserves the next stage in the capital and
+  builds it as soon as the stage plus the stone/wood it must buy on the
+  market that turn is affordable — later stages cost more than the storage
+  cap) or **influence** (temples on every tile that can hold one, buying the
+  stone for them). It picks influence only when its estimate is clearly
+  faster than the wonder (×0.65), and never abandons a wonder at stage 2+.
 
 ### strategist (`strategist.py`)
 It uses the economist's economy, then adds these behaviours on top:
 
 1. **Victory ETA model.** Every turn it estimates, for itself and every
    rival, how many turns each condition is away.
-   * **Economic and influence:** based on how fast gold and influence have
-     grown over the last 6 turns. For itself it uses potential income: all
-     surplus sold at the current pool prices.
-   * **Wonder:** the remaining stage costs valued at market prices, divided by
-     production value, and the pace of recent stages.
-   * **Relics:** based on the streak. For itself it adds the walking and
-     claiming distance to the missing relics.
-   * **Conquest:** based on the number of capitals held.
+   * **Economic and influence:** from how fast gold and influence grew over
+     the last 6 turns. For itself it uses potential income: all surplus sold
+     at the current pool prices.
+   * **Wonder:** the remaining stage costs valued at market prices divided
+     by production value, and (for rivals) the value of the stages built
+     per turn since their first stage.
+   * **Relics:** the streak of guarded relics; for itself the walking
+     distance to the missing relics plus a stall penalty when a campaign
+     makes no progress.
+   * **Conquest:** capitals held.
 
-   Its own path is the lowest ETA, with hysteresis so it doesn't flip-flop.
-   Once that ETA is within 30 turns it commits:
-   * **Wonder:** builds stages in the wonder city every turn, buys materials,
-     and accepts a lower selling price to raise gold.
+   Its own race is the lowest ETA among economic, wonder and influence, plus
+   relics when that ETA ×1.5 is still the lowest (relic streaks are
+   contested), with hysteresis. Once the ETA is within 30 turns (45 for
+   influence, whose temples pay late) it commits:
+   * **Wonder:** reserves the next stage (stone/wood up to the storage cap),
+     buys the rest on the market in the build turn.
    * **Economic:** keeps its gold and raises the bar for investments.
-   * **Influence:** favours temples and saves influence.
-
-   When it is close to winning, it shortens its investment horizon and stops
-   founding new cities.
-2. **Blocking.** If a rival would win before it, it picks a military
-   objective against that rival's path:
-   * **Relics:** takes one of the rival's relic tiles. Capturing it resets the
-     streak.
-   * **Wonder:** assaults the wonder city. A capture destroys the wonder.
-   * **Economic:** takes the rival's capital, which plunders half of the
-     rival's gold.
-   * **Conquest:** retakes whichever of the rival's capitals is cheapest to
-     take.
-
-   It computes the smallest strike force that wins the simulated assault with
-   a 1.35 power ratio: siege against walls plus the best counter to the
-   defenders. It reserves those resources, recruits the force and marches.
-   It only blocks if the force can be built and delivered before the rival's
-   ETA; otherwise racing is the better use of its resources. If the target
-   is a treaty partner, it:
-   * stages at the border,
-   * keeps 50 influence in reserve,
-   * breaks the treaty once the gathered force can win.
-3. **Relic control.** It prices relic tiles highly (+3 influence and +10
-   score each, and the fastest victory under the current constants).
-   * It settles next to relics and claims them.
-   * It guards its own relics when hostile units come within 2 turns.
-   * It parks idle units on its relic tiles.
-4. **Threat assessment.** For each city it collects every hostile unit that
-   could arrive within 3 turns (cavalry move 2 per turn) and simulates the
-   assault. It recruits the best counter until the city holds with a 1.25
-   margin. It keeps in the city only as many units as that requires; the rest
-   stay free for operations.
-5. **Opportunism and predation.** It attacks rival cities and relics next to
-   its army that it can take with a 1.4 power ratio. Every few turns it looks
-   for a rival capital whose strike force costs less than the capture is
-   worth (plunder, 25 score, conquest progress).
-6. **Diplomacy.**
-   * It proposes 20-turn treaties to distant players and to players with a
-     much stronger army.
-   * It accepts proposals only from players that are neither close to winning,
-     its current target, nor running a wonder or relic streak. In addition,
-     the proposer must be far away or much stronger militarily, or it must
-     still be very early in the game.
-7. **Market.** It sells surplus before it overflows the caps. Voluntary sales
+   * **Influence:** temples everywhere (buying their stone), influence kept.
+   * **Relics:** a campaign (see 3).
+2. **Raids.** Every other turn it looks for a rival original capital or
+   wonder city whose capture is worth at least twice the cost of the strike
+   force (value: plunder = half the owner's resources, conquest progress,
+   wonder denial, and a large bonus when the owner would otherwise win
+   first). The force (siege against walls plus the cheapest of cavalry,
+   infantry, archers or a mix) must beat the defenders, their neighbours and
+   one turn of emergency recruiting (the owner's stock plus 20% of its gold).
+   It gathers out of sight (3 tiles, 5 for an all-cavalry force), breaks a
+   treaty first if needed, then strikes; a raid that stalls is abandoned and
+   that rival left alone for 15 turns. Raids are expensive, so they stay rare.
+3. **Relics.** Relics are taken by occupation. In a campaign it keeps a guard
+   on every held relic (at least 4 units, enough to hold against armies 5
+   turns away), marches detachments onto the cheapest missing relics, fights
+   for guarded ones and recruits what the guards need. Outside a campaign it
+   parks one unit on free relics next to its army.
+4. **Threat assessment.** Each hostile army is assigned to the city it is
+   closest to (an army attacks one city at a time); units sitting in their
+   own city count 40%. The threatened city raises walls first, then recruits
+   the best counter (buying food/wood if needed) until the simulated assault
+   fails with a 1.1 margin.
+5. **Diplomacy.** It proposes and accepts 50-turn treaties with militarily
+   stronger players (and far-away ones that are not hoarding gold), never
+   with a player close to winning, running a wonder or a relic streak, or
+   with its raid target.
+6. **Market.** It sells surplus before it overflows the caps. Voluntary sales
    are split so that the batch price stays within about 8% of the spot price;
    the rest waits a turn.
+
+`strategist_lite` is a handicapped strategist (fixed economic race, no raids,
+no relic campaigns, short treaties) used for the skill ladder in
+docs/BALANCE.md.
 
 ## Building blocks (`common.py`, `planner.py`)
 
@@ -225,14 +222,22 @@ Both modules are useful if you write your own in-process bot.
   `self.memory` across turns.
 * `PlannerBot` (in `planner.py`) is a `SafeBot` whose turn is a pipeline of
   behaviours:
-  * `diplomacy`, `food_safety`, `plan_site`, `defend`, `sell`, `expand`,
-    `develop`, `garrison_moves`;
-  * `offense(target)`: gather and assault;
-  * `recruit_army`.
+  * `diplomacy`, `food_safety`, `plan_site`, `defend`, `counter_relics`,
+    `sell`, `expand`, `develop`, `garrison_moves`;
+  * `offense(target)`: gather and assault; `recruit_army`; `min_force`;
+  * `build_with_market(city, building)`: build a level, buying the missing
+    stone/wood in the same turn (only if the whole purchase is affordable);
+  * `city_threat(c)`: hostile units that could reach city `c` and have no
+    other of our cities closer; `reinforce` raises walls and recruits
+    counters (buying food/wood if `DEFENSE_BUY`);
+  * contested claims/settles get a random back-off of 1–4 turns, and ties
+    between equally good tiles are broken by a per-game random salt (index
+    order would favour one map direction).
 
   Class-level knobs tune it, for example `INFLUENCE_WEIGHT`,
-  `DEFENSE_MARGIN`, `MIN_GARRISON` and `SELL_FLOOR`. The economist, rusher,
-  turtle and strategist are all `PlannerBot` subclasses.
+  `DEFENSE_MARGIN`, `MIN_GARRISON`, `SELL_FLOOR`, `DEFENSIVE_WALLS`,
+  `DEFENSE_BUY_FRACTION`, `BUY_FOR_IMPROVEMENTS`, `COUNTER_RELICS`. The
+  economist, rusher, turtle and strategist are all `PlannerBot` subclasses.
 
 ## Writing your own bot
 
@@ -273,6 +278,10 @@ yourself and play over HTTP (docs/DESIGN.md §12) or with the Python client
 SDK (`agentciv/client.py`). A few tips from building these bots:
 
 * **Always submit**, even an empty list.
+* **Relics are occupied, not claimed**: stand on them, and keep units there
+  (only guarded relics count for the relic victory).
+* **Contested claims fail for everyone**: if a rival keeps claiming the same
+  tile, try another one for a turn or two.
 * **Check `events`** for `order_failed` entries. Resources are only checked
   at execution time, in the order you submitted.
 * **Reserve resources for big purchases before you sell.** The market
@@ -312,8 +321,12 @@ The report lists per bot:
 * pre-validation errors per game and think time per turn.
 
 It also shows overall stats: the distribution of ending conditions, game
-length and time per game. `--json` writes the full summary, including
-per-game results (seats, placements, scores, errors, timings).
+length (median and average) and time per game, and the win rate by **start
+slot** (the index of the start position in `mapgen.start_layout(n)`, i.e. the
+map position independent of the seed's orientation) and by seat (`p1`…).
+Six identical bots measure positional fairness by start slot. `--json` writes
+the full summary, including per-game results (seats with their start slot,
+placements, scores, errors, timings).
 
 For programmatic use: `run_game(bot_specs, seed, max_turns)` returns one
 game's result dict. `run_tournament(...)` returns the summary, and

@@ -55,20 +55,26 @@ def rate(ratings: list[dict], ranks: list[int]) -> list[dict]:
     return out
 
 
-def update(table: dict, placements: list[str]) -> dict:
+def update(table: dict, placements: list[str], ranks: list[int] | None = None) -> dict:
     """Update ``table`` ({name: {"mu","sigma",...}}) in place from an ordered
-    placement list (winner first) and return it. Extra bookkeeping keys
-    (games, wins, total_place) are maintained."""
+    placement list (winner first) and return it. ``ranks`` (optional, same
+    length, non-decreasing, 1 = best) marks ties: equal ranks are rated as a
+    draw (e.g. players tied on score). Extra bookkeeping keys (games, wins,
+    total_place) are maintained; everyone ranked 1 counts a win."""
+    if ranks is None:
+        ranks = list(range(1, len(placements) + 1))
+    if len(ranks) != len(placements):
+        raise ValueError("ranks must match placements")
     for name in placements:
         table.setdefault(name, {**new_rating(), "games": 0, "wins": 0, "total_place": 0})
     olds = [table[name] for name in placements]
-    news = rate(olds, list(range(1, len(placements) + 1)))
-    for place, (name, new) in enumerate(zip(placements, news), start=1):
+    news = rate(olds, list(ranks))
+    for name, rank, new in zip(placements, ranks, news):
         entry = table[name]
         entry["mu"], entry["sigma"] = new["mu"], new["sigma"]
         entry["games"] = entry.get("games", 0) + 1
-        entry["wins"] = entry.get("wins", 0) + (1 if place == 1 else 0)
-        entry["total_place"] = entry.get("total_place", 0) + place
+        entry["wins"] = entry.get("wins", 0) + (1 if rank == 1 else 0)
+        entry["total_place"] = entry.get("total_place", 0) + rank
     return table
 
 

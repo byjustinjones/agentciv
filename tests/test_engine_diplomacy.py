@@ -23,7 +23,8 @@ def test_treaty_proposal_visibility_and_accept_next_turn_only():
     run_turn(g, {"p1": [{"type": "propose_treaty", "to": "p2", "turns": 20}]})
     assert g.player_view("p2")["treaty_proposals"] == [{"from": "p1", "to": "p2", "turns": 20, "turn": 0}]
     assert g.player_view("p3")["treaty_proposals"] == []
-    assert len(g.spectator_view()["treaty_proposals"]) == 1
+    assert g.spectator_view()["treaty_proposals"] == []          # private while running
+    assert len(g.spectator_view(full=True)["treaty_proposals"]) == 1
     run_turn(g)             # p2 lets it lapse
     errs = g.submit_orders("p2", [{"type": "accept_treaty", "from": "p1"}])
     assert errs and "no treaty proposal" in errs[0]["error"]
@@ -142,8 +143,10 @@ def test_trade_needs_both_to_pay_and_expires():
 def test_accept_trade_not_addressed_to_you():
     g = world()
     run_turn(g, {"p1": [{"type": "offer_trade", "to": "p2", "give": {"wood": 1}}]})
-    errs = g.submit_orders("p3", [{"type": "accept_trade", "offer_id": "t1"}])
-    assert "not addressed to you" in errs[0]["error"]
+    errs = g.submit_orders("p3", [{"type": "accept_trade", "offer_id": "t1"}, {"type": "accept_trade", "offer_id": "t2"}])
+    # identical errors: probing must not reveal which private offers exist
+    assert errs[0]["error"].replace("t1", "tX") == errs[1]["error"].replace("t2", "tX")
+    assert "no open trade offer" in errs[0]["error"]
 
 
 # ---------------------------------------------------------------- messages
@@ -155,8 +158,9 @@ def test_message_visibility():
     assert texts(g.player_view("p1")) == ["secret", "hello all"]
     assert texts(g.player_view("p2")) == ["secret", "hello all"]
     assert texts(g.player_view("p3")) == ["hello all"]
-    assert texts(g.spectator_view()) == ["secret", "hello all"]
-    assert g.spectator_view()["messages"][0] == {"turn": 0, "from": "p1", "to": "p2", "text": "secret"}
+    assert texts(g.spectator_view()) == ["hello all"]      # the public view: no private messages
+    assert texts(g.spectator_view(full=True)) == ["secret", "hello all"]
+    assert g.spectator_view(full=True)["messages"][0] == {"turn": 0, "from": "p1", "to": "p2", "text": "secret"}
 
 
 def test_messages_in_view_are_bounded():
@@ -165,3 +169,42 @@ def test_messages_in_view_are_bounded():
         run_turn(g, {"p1": [{"type": "message", "to": "all", "text": f"m{t}-{k}"} for k in range(5)]})
     msgs = g.player_view("p2")["messages"]
     assert len(msgs) == C.MESSAGES_IN_VIEW and msgs[-1]["text"] == "m14-4"
+
+
+def test_spectator_view_hides_private_diplomacy_until_the_game_ends():
+    """Regression: the token-less spectator view must not leak private
+    messages, trade offers, treaty proposals or private events of a running
+    game (DESIGN §1/§10)."""
+    g = world()
+    g.max_turns = 2
+    run_turn(g, {"p1": [{"type": "message", "to": "p2", "text": "SECRET plan"},
+                        {"type": "offer_trade", "to": "p2", "give": {"wood": 1}},
+                        {"type": "propose_treaty", "to": "p2", "turns": 20}]})
+    v = g.spectator_view()
+    assert v["messages"] == [] and v["trade_offers"] == [] and v["treaty_proposals"] == []
+    assert not {e["type"] for e in v["events"]} & {"trade_offered", "treaty_proposed", "order_failed"}
+    assert "SECRET" not in str(v)
+    full = g.spectator_view(full=True)
+    assert full["messages"] and full["trade_offers"] and full["treaty_proposals"]
+    assert {"trade_offered", "treaty_proposed"} <= {e["type"] for e in full["events"]}
+    run_turn(g)
+    assert g.finished
+    assert [m["text"] for m in g.spectator_view()["messages"]] == ["SECRET plan"]  # revealed afterwards
+
+
+def test_simultaneous_break_charges_both_partners():
+    """Regression: the lower seat used to pay while the partner's break failed
+    for free ('no treaty')."""
+    g = world()
+    sign(g)
+    for p in g.players:
+        p.resources["influence"] = 100
+    ev = run_turn(g, {"p1": [{"type": "break_treaty", "with": "p2"}],
+                      "p2": [{"type": "break_treaty", "with": "p1"}]})
+    assert not g.treaty("p1", "p2")
+    p1, p2 = g.player("p1"), g.player("p2")
+    assert p1.betrayals == p2.betrayals == 1
+    inc = g.stats()
+    assert p1.resources["influence"] - inc["p1"]["income"]["influence"] == 100 - C.TREATY_BREAK_COST
+    assert p2.resources["influence"] - inc["p2"]["income"]["influence"] == 100 - C.TREATY_BREAK_COST
+    assert len(events_of(ev, "treaty_broken")) == 2 and not events_of(ev, "order_failed")

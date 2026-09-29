@@ -130,10 +130,14 @@ def test_join_validation_and_lobby(server):
     assert s == 409
     s, view = call(server, "GET", f"/api/games/{gid}/state", token=a["token"])
     assert s == 200 and view["status"] == "lobby" and view["you"]["id"] == "p1"
+    # once a remote player is seated, starting needs a seated player's (or the creator's) token
     s, err = call(server, "POST", f"/api/games/{gid}/start")
+    assert s == 403 and "token" in err["error"]
+    assert call(server, "POST", f"/api/games/{gid}/start", token="bogus")[0] == 401
+    s, err = call(server, "POST", f"/api/games/{gid}/start", token=a["token"])
     assert s == 409 and "at least" in err["error"]
     call(server, "POST", f"/api/games/{gid}/join", {"name": "Bob"})
-    s, res = call(server, "POST", f"/api/games/{gid}/start")
+    s, res = call(server, "POST", f"/api/games/{gid}/start", token=g["creator_token"])
     assert s == 200 and res["ok"] and res["started"]
     s, res = call(server, "POST", f"/api/games/{gid}/start")  # idempotent
     assert s == 200 and res["ok"] and not res["started"]
@@ -227,6 +231,7 @@ def test_bot_import_failure_falls_back_to_idle(server, monkeypatch):
 def test_full_game_two_sdk_players_four_house_bots(server, tmp_path):
     bots = ["idle", extra_bot(), "idle", "economist" if bot_available("economist") else "idle"]
     c = AgentCivClient(server.url)
+    server.manager.open_ratings = True  # a short custom game only counts on an open-ratings server
     gid = c.create_game(name="Integration", max_players=6, max_turns=12, bots=bots, **FAST)
     results = {}
 
@@ -380,8 +385,15 @@ def test_sse_stream_pushes_each_turn(server):
     view = json.loads(data)
     assert ev == "state" and view["status"] == "running" and view["turn"] == 0
     a.submit_orders([])
+    # a remote player's submission is pushed to spectators (live "submitted" indicator)
+    ev, data = _read_sse_event(resp)
+    view = json.loads(data)
+    assert ev == "state" and view["turn"] == 0
+    assert {p["id"]: p["submitted"] for p in view["players"]} == {"p1": True, "p2": False}
     b.submit_orders([])
     ev, data = _read_sse_event(resp)
+    if ev == "state" and json.loads(data)["turn"] == 0:  # B's submission may be pushed before the turn resolves
+        ev, data = _read_sse_event(resp)
     assert ev == "state" and json.loads(data)["turn"] == 1
     conn.close()
 

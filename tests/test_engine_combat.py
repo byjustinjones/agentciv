@@ -118,20 +118,21 @@ def test_capture_undefended_tile():
     assert not events_of(ev, "battle")
 
 
-def test_garrison_holds_on_tie_and_falls_to_superior_force():
+def test_garrison_holds_and_falls_to_superior_force():
     g = world()
-    city = g.add_city(8, 8, "p2")          # non-capital: garrison 10
+    city = g.add_city(8, 8, "p2")          # non-capital: garrison GARRISON_CITY (15)
+    assert C.GARRISON_CITY == 15
     g.place_units(7, 8, "p1", {"infantry": 1})
     ev = run_turn(g, {"p1": [{"type": "move", "from": [7, 8], "to": [8, 8]}]})
     assert city.owner == "p2" and g.idx(8, 8) not in g.armies
     assert events_of(ev, "battle")[0]["winner"] == "p2"
-    g.place_units(7, 8, "p1", {"infantry": 2})
+    g.place_units(7, 8, "p1", {"infantry": 3})
     ev = run_turn(g, {"p1": [{"type": "move", "from": [7, 8], "to": [8, 8]}]})
     assert city.owner == "p1"
     cap = events_of(ev, "city_captured")[0]
     assert cap["from"] == "p2" and cap["to"] == "p1" and cap["plunder"] == {}
     assert all(g.owner[j] == "p1" for j in g.radius(g.idx(8, 8), 1))
-    assert g.armies[g.idx(8, 8)]["p1"] == {"infantry": 2}
+    assert g.armies[g.idx(8, 8)]["p1"] == {"infantry": 3}   # 30 vs 15: no losses
 
 
 def test_capital_capture_plunders_and_drops_walls():
@@ -140,8 +141,9 @@ def test_capital_capture_plunders_and_drops_walls():
     cap.walls = 1
     victim = g.player("p2")
     victim.resources.update(food=100, wood=81, stone=40, gold=60)
-    # garrison 20 * walls(1.5) = 30 -> 4 infantry (40) win
-    g.place_units(11, 12, "p1", {"infantry": 4})
+    # garrison 40 * walls(1.5) = 60 -> 7 infantry (70) win
+    assert C.GARRISON_CAPITAL == 40
+    g.place_units(11, 12, "p1", {"infantry": 7})
     ev = run_turn(g, {"p1": [{"type": "move", "from": [11, 12], "to": [12, 12]}]})
     assert cap.owner == "p1" and cap.walls == 0 and cap.capital
     ce = events_of(ev, "city_captured")[0]
@@ -155,15 +157,15 @@ def test_walls_vs_siege():
     g = world()
     city = g.add_city(8, 8, "p2")
     city.walls = 3
-    # garrison 10 * 2.5 = 25 beats 2 infantry (20)
+    # garrison 15 * 2.5 = 37.5 beats 2 infantry (20)
     g.place_units(7, 8, "p1", {"infantry": 2})
     run_turn(g, {"p1": [{"type": "move", "from": [7, 8], "to": [8, 8]}]})
     assert city.owner == "p2"
-    # 3 siege: 48 attack; walls reduced to 1 + 0.5*(3-1) = 2 -> 20 defence
+    # 3 siege: 48 attack; walls reduced to 1 + 0.5*(3-1) = 2 -> 30 defence
     g.place_units(7, 8, "p1", {"siege": 3})
     ev = run_turn(g, {"p1": [{"type": "move", "from": [7, 8], "to": [8, 8]}]})
     b = events_of(ev, "battle")[0]
-    assert b["powers"] == {"p1": 48.0, "p2": 20.0}
+    assert b["powers"] == {"p1": 48.0, "p2": 30.0}
     assert city.owner == "p1" and city.walls == 2
 
 
@@ -182,11 +184,11 @@ def test_city_defenders_fight_with_garrison():
     g = world()
     city = g.add_city(8, 8, "p2")
     g.place_units(8, 8, "p2", {"archer": 1})
-    g.place_units(7, 8, "p1", {"infantry": 3})
+    g.place_units(7, 8, "p1", {"infantry": 4})
     ev = run_turn(g, {"p1": [{"type": "move", "from": [7, 8], "to": [8, 8]}]})
     b = events_of(ev, "battle")[0]
-    # archer: 8 * 1.5 (city) * 1.5 (counter vs infantry) + garrison 10 = 28 vs 30
-    assert b["powers"]["p2"] == pytest.approx(28.0)
+    # archer: 8 * 1.5 (city) * 1.5 (counter vs infantry) + garrison 15 = 33 vs 40
+    assert b["powers"]["p2"] == pytest.approx(33.0)
     assert b["winner"] == "p1" and city.owner == "p1"
 
 
@@ -258,3 +260,73 @@ def test_units_on_hostile_tile_capture_next_turn():
     g.place_units(8, 8, "p1", {"infantry": 1})
     run_turn(g)
     assert g.owner[g.idx(8, 8)] == "p1"
+
+
+# ------------------------------------------------ coalitions & crossings
+def test_allies_attacking_together_capture_the_city():
+    """Regression: two treaty partners entering a city together defeated the
+    garrison but could never capture it, and the owner's recruit spawned
+    among the hostile armies."""
+    g = world()
+    city = g.add_city(8, 8, "p2")
+    g.treaties[("p1", "p3")] = 99
+    g.place_units(7, 8, "p1", {"infantry": 5})
+    g.place_units(9, 8, "p3", {"infantry": 6})
+    g.player("p2").resources.update(food=100, wood=100, gold=100)
+    ev = run_turn(g, {"p1": [{"type": "move", "from": [7, 8], "to": [8, 8]}],
+                      "p3": [{"type": "move", "from": [9, 8], "to": [8, 8]}],
+                      "p2": [{"type": "recruit", "city": [8, 8], "unit": "infantry"}]})
+    # p1 (5 inf) meets the 15-strength garrison first and wins; p3 has the larger force
+    cap = events_of(ev, "city_captured")
+    assert city.owner == "p3" and cap and cap[0]["to"] == "p3"
+    assert "p2" not in g.armies[g.idx(8, 8)]
+    assert any("recruits lost" in e["reason"] for e in events_of(ev, "order_failed") if e["player"] == "p2")
+
+
+def test_coalition_capture_ties_go_to_lower_seat():
+    g = world()
+    g.set_owner(8, 8, "p2")
+    g.treaties[("p1", "p3")] = 99
+    g.place_units(8, 8, "p1", {"infantry": 1})
+    g.place_units(8, 8, "p3", {"infantry": 1})
+    run_turn(g)
+    assert g.owner[g.idx(8, 8)] == "p1"
+
+
+def test_cavalry_cannot_swap_places_with_hostile_cavalry():
+    """Regression: 2-step moves in opposite directions along the same line
+    used to pass through each other without a fight."""
+    g = world()
+    g.place_units(5, 8, "p1", {"cavalry": 3})
+    g.place_units(7, 8, "p2", {"cavalry": 2})
+    ev = run_turn(g, {"p1": [{"type": "move", "from": [5, 8], "path": [[6, 8], [7, 8]]}],
+                      "p2": [{"type": "move", "from": [7, 8], "path": [[6, 8], [5, 8]]}]})
+    b = events_of(ev, "battle")
+    assert len(b) == 1 and b[0]["clash"] and b[0]["winner"] == "p1"
+    assert not any("p2" in per for per in g.armies.values())
+
+
+def test_cavalry_second_step_clashes_with_infantry_coming_back():
+    g = world()
+    g.place_units(5, 8, "p1", {"cavalry": 1})
+    g.place_units(7, 8, "p2", {"infantry": 3})
+    ev = run_turn(g, {"p1": [{"type": "move", "from": [5, 8], "path": [[6, 8], [7, 8]]}],
+                      "p2": [{"type": "move", "from": [7, 8], "to": [6, 8]}]})
+    b = events_of(ev, "battle")
+    assert b and b[0]["clash"] and b[0]["winner"] == "p2"
+    assert not any("p1" in per for per in g.armies.values())
+
+
+def test_cavalry_cannot_pass_through_a_hostile_city():
+    g = world()
+    g.add_city(8, 8, "p2")
+    g.place_units(7, 8, "p1", {"cavalry": 2})
+    errs = g.submit_orders("p1", [{"type": "move", "from": [7, 8], "path": [[8, 8], [9, 8]]}])
+    assert errs and "hostile city" in errs[0]["error"]
+    # the resolution check also holds when the city appeared after submission
+    g2 = world()
+    g2.place_units(7, 8, "p1", {"cavalry": 2})
+    assert g2.submit_orders("p1", [{"type": "move", "from": [7, 8], "path": [[8, 8], [9, 8]]}]) == []
+    g2.add_city(8, 8, "p2")
+    ev = g2.step()
+    assert "hostile city" in events_of(ev, "order_failed")[0]["reason"]

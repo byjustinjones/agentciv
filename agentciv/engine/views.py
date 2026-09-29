@@ -3,6 +3,12 @@
 ``build_view(game, pid)`` returns the player view for ``pid`` or the
 spectator view when ``pid`` is None. Everything returned is freshly built
 plain JSON data (safe for callers to mutate).
+
+The spectator view is served without authentication, so while the game is
+not finished it is *public*: only public messages and events, no trade
+offers or treaty proposals (anyone could otherwise drop their token and read
+the other players' private diplomacy). ``full=True`` (or a finished game)
+gives the omniscient view.
 """
 from __future__ import annotations
 
@@ -15,9 +21,9 @@ if TYPE_CHECKING:  # pragma: no cover
     from .game import Game
 
 
-def _visible(ev: dict, viewer: str | None) -> bool:
+def _visible(ev: dict, viewer: str | None, omniscient: bool) -> bool:
     vis = ev.get("_vis")
-    return vis is None or viewer is None or viewer in vis
+    return vis is None or omniscient or viewer in vis
 
 
 def _season_view(turn: int) -> dict:
@@ -43,13 +49,17 @@ def _map_view(g: "Game") -> dict:
         d = C.DEPOSITS.get(t)
         if d is not None:
             deposits.append({"x": i % w, "y": i // w, "resource": d[0], "remaining": g.deposits[i]})
-    relics = [{"x": i % w, "y": i // w, "owner": g.owner[i]} for i in g.relics]
+    relics = [{"x": i % w, "y": i // w, "owner": g.owner[i], "guarded": g.relic_guarded(i)}
+              for i in g.relics]
     return {"width": w, "height": h, "terrain": terrain, "owner": owner,
             "improvements": improvements, "deposits": deposits, "relics": relics}
 
 
-def build_view(g: "Game", viewer: str | None) -> dict:
+def build_view(g: "Game", viewer: str | None, full: bool = False) -> dict:
     n = len(g.players)
+    # the spectator sees private diplomacy only once the game is over (or when
+    # explicitly asked for the full view, e.g. offline tournaments)
+    omniscient = viewer is None and (full or g.status == "finished")
     st = g.stats()
     players = []
     for p in g.players:
@@ -70,6 +80,7 @@ def build_view(g: "Game", viewer: str | None) -> dict:
             "upkeep": s["upkeep"],
             "wonder_stage": s["wonder_stage"],
             "relics_held": s["relics_held"],
+            "relics_guarded": s["relics_guarded"],
             "relic_streak": p.relic_streak,
             "betrayals": p.betrayals,
             "score": s["score"],
@@ -97,7 +108,7 @@ def build_view(g: "Game", viewer: str | None) -> dict:
         }
 
     def involves(*pids) -> bool:
-        return viewer is None or viewer in pids
+        return omniscient or (viewer is not None and viewer in pids)
 
     if g.status == "lobby":
         map_view = {"width": 0, "height": 0, "terrain": [], "owner": [], "improvements": [],
@@ -121,7 +132,7 @@ def build_view(g: "Game", viewer: str | None) -> dict:
     messages.reverse()
 
     events = [{k: v for k, v in e.items() if k != "_vis"}
-              for e in g.last_events if _visible(e, viewer)]
+              for e in g.last_events if _visible(e, viewer, omniscient)]
 
     pools = {r: {"resource": round(pl[0], 2), "gold": round(pl[1], 2)} for r, pl in g.pools.items()}
     prices = {r: round(pl[1] / pl[0], 4) for r, pl in g.pools.items() if pl[0] > 0}

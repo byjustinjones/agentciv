@@ -225,6 +225,9 @@ class Validator:
             if len(path) == 2 and k == 0:
                 if any(other != self.pid and g.hostile(self.pid, other) for other in g.armies.get(step, {})):
                     raise OrderError(f"cannot move through {self.xy(step)}: hostile army there")
+                city = g.cities.get(step)
+                if city is not None and city.owner != self.pid and g.hostile(self.pid, city.owner):
+                    raise OrderError(f"cannot move through {self.xy(step)}: hostile city (its garrison blocks the way)")
             prev = step
         for u, c in req.items():
             self.ctx.moved[(src, u)] = self.ctx.moved.get((src, u), 0) + c
@@ -285,6 +288,8 @@ class Validator:
         at = self.tile(o.get("at"), "at")
         if g.terrain[at] not in C.PASSABLE:
             raise OrderError(f"{self.xy(at)} is impassable")
+        if at in g.relic_set:
+            raise OrderError(f"{self.xy(at)} is a relic: relics cannot be claimed, occupy them with units")
         if g.owner[at] is not None:
             raise OrderError(f"{self.xy(at)} is already owned by {g.owner[at]}")
         if at in self.ctx.virtual:
@@ -369,10 +374,9 @@ class Validator:
             oid = f"t{oid}"
         oid = as_str(oid, "offer_id")
         off = self.g.trade_offer(oid)
-        if off is None:
-            raise OrderError(f"no open trade offer {oid!r}")
-        if off["to"] != self.pid:
-            raise OrderError(f"trade offer {oid} is not addressed to you")
+        if off is None or off["to"] != self.pid:
+            # same message either way: must not reveal other players' offers
+            raise OrderError(f"no open trade offer {oid!r} addressed to you")
         if off["turn"] >= self.g.turn:
             raise OrderError(f"trade offer {oid} cannot be accepted until next turn")
         if oid in self.ctx.accepted_offers:

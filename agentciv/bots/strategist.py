@@ -5,26 +5,35 @@ every turn and adapts:
 
 * **Victory ETA model.** For itself and every rival it estimates how many
   turns each victory condition is away (economic and influence from the
-  observed per-turn growth of gold/influence, wonder from the stage pace,
-  relics from the streak, conquest from capitals held). Its own path is the
-  one with the lowest ETA; the rival with the lowest ETA is the *leader*.
-* **Blocking.** When the leader would win before it, it acts against the
-  leader's path: captures the leader's relic tiles (which resets the relic
-  streak), assaults a wonder city (destroys the wonder) or the leader's
-  capital (plunders half of its gold), breaking a treaty if necessary.
-* **Relic control.** Relics near the map centre are the fastest path, so it
-  prices relic tiles highly, settles next to them, claims them, and keeps a
-  mobile army near them that guards its own relics and takes enemy ones.
-* **Threat assessment.** For each city it collects every hostile unit that
-  could arrive within a few turns and recruits the best counter until the
-  engine-exact battle simulation says the city holds with a safety margin.
+  observed per-turn growth of gold/influence, wonder from the value of the
+  remaining stages and the observed stage pace, relics from walking
+  distances and guarded relics, conquest from capitals held). Its own race is
+  the fastest of economic / wonder / influence (relics only when clearly
+  faster: relic streaks get contested), with hysteresis; once the ETA is
+  close it commits (reserves wonder stages and buys what they need, builds
+  temples everywhere, or hoards gold).
+* **Raids.** It captures a rival capital (plunder: half the victim's
+  resources, conquest progress) or a wonder city (the wonder is destroyed)
+  only when the value clearly exceeds the cost of a strike force that beats
+  the defenders, their neighbours and one turn of emergency recruiting. The
+  force gathers out of the target's sight and strikes in one go (breaking a
+  treaty first if needed).
+* **Relics.** Relics are taken by occupation: in a relic campaign it marches
+  guards onto the cheapest relics and keeps enough units on each to hold
+  against nearby armies; otherwise it parks a unit on free relics next to
+  its army (+influence, +score).
+* **Threat assessment.** Each hostile army is assigned to the city it is
+  closest to; the city recruits the best counter (and raises walls, buying
+  food/wood if needed) until the engine-exact battle simulation says it
+  holds with a margin. Armies sitting in their own cities count only partly.
+* **Diplomacy.** 50-turn treaties with strong armies (so only the weak need
+  watching), no treaties with hoarders (they are raid targets) or with
+  players close to winning.
 * **Economy.** Improvements by ROI with market-price-based values, early
   market hall, warehouse before hitting caps, season-aware food planning,
-  and market sales that are split so the batch price stays near the spot
-  price (selling before overflow, never dumping below a floor).
-* **Diplomacy.** Proposes treaties to distant players (so only neighbours
-  need watching), accepts proposals from players who are neither its target
-  nor close to winning, and never signs with the leader.
+  market sales split so the batch price stays near the spot price, and a
+  random back-off when a claim/settle was contested (two players retrying
+  the same tile would both fail forever).
 """
 from __future__ import annotations
 
@@ -52,14 +61,15 @@ class StrategistBot(PlannerBot):
     SETTLE_RADIUS = 8
     RELIC_INTEREST = 14.0
     DEFENSE_REACH = 3
-    DEFENSE_MARGIN = 1.25
+    DEFENSE_MARGIN = 1.1
+    GARRISON_THREAT_SHARE = 0.4   # armies sitting in their own cities are mostly garrisons
     MIN_GARRISON = 2
     CITY_GARRISON = 1
     SELL_FLOOR = 0.7
     HISTORY = 6
     COMMIT_HORIZON = 30           # only divert resources to a victory path this close
-    USE_PREY = True               # conquer weakly defended rival capitals
-    USE_BLOCK = True              # attack the rival about to win
+    USE_PREY = False              # (legacy) conquer weakly defended rival capitals
+    USE_BLOCK = False             # (legacy) attack the rival about to win; raids replace both
     BLOCK_FEASIBILITY = True      # ...but only if we can get there in time
     EARLY_TREATY_TURNS = 6        # accept any harmless treaty this early
     CONQUEST_SLACK = 1.3          # conquest ETAs are rough: block even if a bit late
@@ -67,11 +77,29 @@ class StrategistBot(PlannerBot):
     #                               for gold (0 = observed growth only; higher values
     #                               raised false alarms in tournaments)
     TRAVEL_FACTOR = 1.0           # approach speed assumed for blocking plans (tiles/turn)
+    USE_RELICS = True             # occupy relics (campaign / cheap grabs)
+    PATHS = ("economic", "wonder", "influence")   # races we run ourselves
+    RELIC_ETA_FACTOR = 1.5        # >1: relic campaigns only when clearly faster
+    INFLUENCE_GOAL_WEIGHT = 9.0   # value of influence while racing for it (temples)
+    INFLUENCE_EARLY_COMMIT = 15   # commit this much earlier to influence (temples pay late)
+    PREY_GOLD = 1200              # a rival with this much gold is worth plundering
+    TREATY_TURNS = 50             # length of the treaties we propose (long peace with strong armies)
+    BLOCK_PATIENCE = 25           # give up a block after this many turns...
+    BLOCK_COOLDOWN = 15           # ...for this many turns
 
     def pipeline(self):
         return [self.observe, self.diplomacy, self.food_safety, self.plan_site, self.defend,
-                self.plan_goal_spending, self.relic_ops, self.block, self.sell, self.goal_spending,
+                self.plan_goal_spending, self.relic_ops, self.plan_military, self.sell, self.goal_spending,
                 self.field_army, self.expand, self.develop, self.garrison_moves]
+
+    def plan_military(self) -> None:
+        self.raid = None
+        self.objective = None
+        self.objective_ratio = 1.15
+        if self.USE_RAIDS:
+            self.plan_raid()
+        elif self.USE_BLOCK:
+            self.block()
 
     # ------------------------------------------------------------------
     # observation & ETA model
@@ -86,12 +114,28 @@ class StrategistBot(PlannerBot):
                 h.append((w.turn, r.get("gold", 0), r.get("influence", 0), pl.get("wonder_stage", 0)))
                 if len(h) > self.HISTORY + 1:
                     del h[0]
+            # turn at which each wonder stage was first seen (for the pace)
+            ws = self.memory.setdefault("wstage", {}).setdefault(q, {})
+            st = pl.get("wonder_stage", 0)
+            if st == 0:
+                ws.clear()
+            elif st not in ws:
+                ws[st] = w.turn
+        # relic campaign progress (a stalled campaign gets a worse ETA)
+        mine_g = w.players.get(w.me, {}).get("relics_guarded", 0)
+        rp = self.memory.get("relic_progress")
+        if rp is None or mine_g > rp[1] or self.memory.get("path") != "relics":
+            self.memory["relic_progress"] = (w.turn, mine_g)
         self.etas = {q: self.eta(q) for q in w.alive}
-        mine = dict(self.etas.get(w.me, {}))
+        paths = self.PATHS + (("relics",) if self.USE_RELICS else ())
+        mine = {k: v for k, v in self.etas.get(w.me, {}).items() if k in paths}
+        if "relics" in mine:
+            # relic streaks get contested: only prefer them when clearly faster
+            mine["relics"] *= self.RELIC_ETA_FACTOR
         # hysteresis: stick to the current path unless another is clearly faster
         cur = self.memory.get("path")
         best = min(mine, key=lambda k: (mine[k], k)) if mine else "score"
-        if cur in mine and mine[cur] < INF and mine[best] > 0.75 * mine[cur] - 2:
+        if cur in mine and mine[cur] < INF and mine[best] > 0.8 * mine[cur] - 2:
             best = cur
         self.memory["path"] = best
         self.my_path = best
@@ -166,37 +210,58 @@ class StrategistBot(PlannerBot):
         if me:
             out["wonder"] = value_eta + (3 if stage == 0 else 0)
         elif stage > 0:
-            h = self.memory.get("hist", {}).get(q, [])
-            pace_eta = INF
-            if len(h) >= 2 and h[-1][3] > h[0][3]:
-                pace = max(1.0, (h[-1][0] - h[0][0]) / (h[-1][3] - h[0][3]))
-                pace_eta = left * pace
-            out["wonder"] = min(pace_eta, value_eta)
+            out["wonder"] = max(value_eta, 0.8 * self.wonder_pace_eta(q, stage))
         else:
             out["wonder"] = INF
-        # relics
+        # relics (only relics with units on them count for the streak)
         streak = pl.get("relic_streak", 0)
         need_r = th.get("relics_needed", 99)
-        held = pl.get("relics_held", 0)
+        hold_turns = th.get("relic_turns", C.RELIC_VICTORY_TURNS)
+        held = pl.get("relics_guarded", pl.get("relics_held", 0))
         if held >= need_r:
-            out["relics"] = C.RELIC_VICTORY_TURNS - streak
+            out["relics"] = max(0, hold_turns - streak)
         elif me:
-            out["relics"] = self.relic_acquire_turns(need_r - held) + C.RELIC_VICTORY_TURNS
+            out["relics"] = self.relic_acquire_turns(need_r - held) + hold_turns
+            rp = self.memory.get("relic_progress")
+            if rp is not None and self.memory.get("path") == "relics":
+                # no progress for a while: the relics are contested
+                out["relics"] += max(0, w.turn - rp[0] - 8) * 1.5
         elif held == need_r - 1:
-            out["relics"] = C.RELIC_VICTORY_TURNS + 4
+            out["relics"] = hold_turns + 4
         else:
             out["relics"] = INF
         # conquest
         caps = pl.get("capitals_held", 0)
         need_c = th.get("conquest_capitals", 99)
-        out["conquest"] = 8 * (need_c - caps) + 2 if caps >= max(2, need_c - 1) else INF
+        out["conquest"] = 10 * (need_c - caps) + 3 if caps >= max(2, need_c - 2) else INF
         if caps >= need_c:
             out["conquest"] = 0
         return out
 
+    def wonder_pace_eta(self, q: str, stage: int) -> float:
+        """Turns ``q`` needs for the remaining stages at the pace (value of
+        the stages built per turn) observed since its first stage."""
+        ws = self.memory.get("wstage", {}).get(q, {})
+        if not ws:
+            return INF
+        first = min(ws.values())
+        elapsed = max(6.0, self.w.turn - first + 8.0)      # +saving for stage 1
+        done = self.wonder_value_between(0, stage)
+        rate = done / elapsed
+        left = self.wonder_value_between(stage, C.WONDER_VICTORY_STAGE)
+        return left / rate if rate > 0 else INF
+
+    def wonder_value_between(self, a: int, b: int) -> float:
+        tot = 0.0
+        for k in range(a + 1, b + 1):
+            for r, v in building_cost("wonder", k).items():
+                tot += v * (1.0 if r == "gold" else base_price(r))
+        return tot
+
     def relic_acquire_turns(self, missing: int) -> float:
-        """Rough turns needed to get ``missing`` more relics: walking/claiming
-        distance from our land, plus a fight for relics others hold."""
+        """Rough turns needed to occupy ``missing`` more relics: walking
+        distance from our land plus raising the guards, plus a fight for
+        relics that others guard."""
         w = self.w
         if missing <= 0:
             return 0.0
@@ -206,16 +271,20 @@ class StrategistBot(PlannerBot):
         costs = []
         for r in w.relics:
             o = w.owner[r]
-            if o == w.me or r not in dist:
+            if (o == w.me and w.me in w.armies.get(r, {})) or r not in dist:
                 continue
             c = dist[r] * 1.2
-            if o is not None:
-                c += 8 + (6 if w.at_peace(w.me, o) else 0)
+            enemy = w.enemy_units_at(r)
+            if enemy:
+                c += 6 + sum(enemy.values()) * 0.8
+            if o is not None and o != w.me and w.at_peace(w.me, o):
+                c += 10
             costs.append(c)
         if len(costs) < missing:
             return INF
         costs.sort()
-        return costs[missing - 1]
+        # guards must be raised and fed: a few turns per relic
+        return costs[missing - 1] + 2.5 * missing
 
     def potential_gold_rate(self) -> float:
         """Gold per turn if all surplus production were sold at spot prices."""
@@ -250,14 +319,20 @@ class StrategistBot(PlannerBot):
                 return True
             if min(self.etas.get(q, {}).values(), default=INF) < 30:
                 return True
-            return pl.get("wonder_stage", 0) > 0 or pl.get("relics_held", 0) >= need_r - 1
+            return pl.get("wonder_stage", 0) > 0 or pl.get("relics_guarded", 0) >= need_r - 1
 
         mine = max(1, w.players[w.me].get("military_power", 0))
 
+        def rich(q):
+            # hoarders are prey: capturing their capital plunders half their gold
+            return w.players[q].get("resources", {}).get("gold", 0) >= self.PREY_GOLD
+
         def useful(q):
-            # a treaty protects us from strong armies and costs little with
-            # far-away players; others we keep free to attack if needed
-            return far(q) or w.players[q].get("military_power", 0) > 1.3 * mine or w.turn < self.EARLY_TREATY_TURNS
+            # a treaty protects us from strong armies; far-away players cost
+            # little to leave alone unless they hoard; others (peaceful
+            # builders) never attack us anyway, so we keep free to strike them
+            strong = w.players[q].get("military_power", 0) > 1.2 * mine
+            return strong or (far(q) and not rich(q))
 
         for pr in treaty_proposals_to_me(w):
             q = pr["from"]
@@ -267,8 +342,8 @@ class StrategistBot(PlannerBot):
             for q in w.rivals:
                 if q in w.treaties or risky(q):
                     continue
-                if far(q) or w.players[q].get("military_power", 0) > 1.5 * mine:
-                    p.propose(q, 20)
+                if (far(q) and not rich(q)) or w.players[q].get("military_power", 0) > 1.5 * mine:
+                    p.propose(q, self.TREATY_TURNS)
 
     def home(self):
         w = self.w
@@ -277,11 +352,50 @@ class StrategistBot(PlannerBot):
         return w.my_cities[0] if w.my_cities else None
 
     # ------------------------------------------------------------------
+    # defence: keep armies home while a hostile army is within reach
+    # ------------------------------------------------------------------
+    HOME_REACH = 0                # >0: also keep units home vs armies this many turns away
+
+    def defend(self) -> None:
+        super().defend()
+        w = self.w
+        self.home_threat = {}
+        if not self.HOME_REACH:
+            return
+        for c in sorted(w.my_cities, key=lambda c: (0 if w.cities[c].get("capital") else 1, c)):
+            threat = self.city_threat(c, reach=self.HOME_REACH)
+            if not threat:
+                continue
+            self.home_threat[c] = threat
+            self.lock_garrison(c, threat, 1.0, minimum=False)
+            if not self.defended(c, threat, 1.0, add_units(self.p.recruited.get(c, {}),
+                                                            self.locked.get(c, {}))):
+                self.rally(c)
+
+    def rally(self, c: int) -> None:
+        """Bring free units within a few steps back to threatened city c."""
+        w = self.w
+        enter = w.can_enter_fn(w.me)
+        dist = w.bfs([c], enter, max_dist=6)
+        for i in sorted(w.my_armies):
+            if i == c or i not in dist:
+                continue
+            if i in w.cities and w.cities[i]["owner"] == w.me:
+                continue
+            free = self.free_units(i)
+            if not free:
+                continue
+            nxt = c if dist[i] == 1 else w.step_towards(i, dist, enter)
+            if nxt is not None and self.safe_move(i, nxt, free):
+                pass
+
+    # ------------------------------------------------------------------
     # goal-specific spending
     # ------------------------------------------------------------------
     def committed(self) -> bool:
         w = self.w
-        return self.my_eta <= self.COMMIT_HORIZON or self.my_eta >= w.max_turns - w.turn - 5 and w.turn > 40
+        horizon = self.COMMIT_HORIZON + (self.INFLUENCE_EARLY_COMMIT if self.my_path == "influence" else 0)
+        return self.my_eta <= horizon or self.my_eta >= w.max_turns - w.turn - 5 and w.turn > 40
 
     def plan_goal_spending(self) -> None:
         w = self.w
@@ -296,7 +410,8 @@ class StrategistBot(PlannerBot):
             if home is not None:
                 st = w.cities[home].get("wonder_stage", 0)
                 if st < C.WONDER_VICTORY_STAGE:
-                    self.add_reserve(building_cost("wonder", st + 1))
+                    self.add_reserve({r: min(v, w.caps.get(r, v)) if r in CAPPED else v
+                                      for r, v in building_cost("wonder", st + 1).items()})
         # per-turn knob adjustments start from the class defaults
         self.SELL_FLOOR = type(self).SELL_FLOOR
         self.MIN_ROI = type(self).MIN_ROI
@@ -307,11 +422,17 @@ class StrategistBot(PlannerBot):
             self.reserved["gold"] = max(self.reserved.get("gold", 0), int(w.res.get("gold", 0) * 0.85))
             self.MIN_ROI = 1 / 12.0
         if self.goal == "influence":
-            self.TEMPLE_BIAS = 2.0
+            # temples everywhere (buying their stone), influence kept
+            self.TEMPLE_BIAS = 3.0
+            self.INFLUENCE_WEIGHT = self.INFLUENCE_GOAL_WEIGHT
+            self.BUY_FOR_IMPROVEMENTS = True
+            self.wts = self.weights()
             if self.my_eta < 30:
                 self.INFLUENCE_RESERVE = int(w.res.get("influence", 0) * 0.8)
         else:
             self.TEMPLE_BIAS = type(self).TEMPLE_BIAS
+            self.INFLUENCE_WEIGHT = type(self).INFLUENCE_WEIGHT
+            self.BUY_FOR_IMPROVEMENTS = type(self).BUY_FOR_IMPROVEMENTS
             self.INFLUENCE_RESERVE = 0
 
     def goal_spending(self) -> None:
@@ -325,15 +446,10 @@ class StrategistBot(PlannerBot):
             if st >= C.WONDER_VICTORY_STAGE:
                 return
             cost = building_cost("wonder", st + 1)
-            for r in ("stone", "wood"):
-                short = cost.get(r, 0) - p.budget.get(r, 0)
-                if short > 0 and p.budget.get("gold", 0) > cost.get("gold", 0) + 30:
-                    p.buy(r, short, max_price=1.5 * base_price(r))
-            if p.can(cost):
-                # the winning path outranks every other reservation
-                if p.build_city(home, "wonder"):
-                    for r, v in cost.items():
-                        self.reserved[r] = max(0, self.reserved.get(r, 0) - v)
+            # the winning path outranks every other reservation
+            if self.build_with_market(home, "wonder", max_mult=1.5):
+                for r, v in cost.items():
+                    self.reserved[r] = max(0, self.reserved.get(r, 0) - v)
 
     # ------------------------------------------------------------------
     # market
@@ -389,12 +505,12 @@ class StrategistBot(PlannerBot):
     # relics
     # ------------------------------------------------------------------
     def relic_ops(self) -> None:
-        """Claim reachable relics; keep a guard on held relics when a hostile
-        army is near."""
-        w, p = self.w, self.p
-        for r in w.relics:
-            if w.owner[r] is None and w.adjacent_to(w.me, r, p.claimed) and not w.hostile_units_on(w.me, r):
-                p.claim(r)
+        """Note held relics that a hostile army threatens (guarded in
+        :meth:`field_army`) and whether we campaign for the relic victory."""
+        w = self.w
+        self.relic_campaign_on = (self.USE_RELICS and self.my_path == "relics"
+                                  and self.my_eta < w.max_turns - w.turn
+                                  and self.my_eta <= self.COMMIT_HORIZON + 10)
         self.relic_guard_targets = []
         for r in w.relics:
             if w.owner[r] != w.me:
@@ -426,6 +542,20 @@ class StrategistBot(PlannerBot):
             rival = None
         elif rival is None and self.danger and self.leader is not None:
             rival, path = self.leader, self.leader_path
+        # a block that makes no progress for too long is dropped for a while
+        cool = self.memory.setdefault("block_cooldown", {})
+        if rival is not None and cool.get(f"{rival}:{path}", -1) >= w.turn:
+            rival = None
+        start = self.memory.get("block_start")
+        if rival is not None:
+            if not start or start[0] != rival or start[1] != path:
+                self.memory["block_start"] = (rival, path, w.turn)
+            elif w.turn - start[2] > self.BLOCK_PATIENCE:
+                cool[f"{rival}:{path}"] = w.turn + self.BLOCK_COOLDOWN
+                self.memory["block_start"] = None
+                rival = None
+        else:
+            self.memory["block_start"] = None
         if rival is None:
             self.memory["block"] = None
             self.memory["block_owner"] = None
@@ -466,7 +596,8 @@ class StrategistBot(PlannerBot):
         """The tile to hit to stop ``q`` winning by ``path``."""
         w = self.w
         if path == "relics":
-            return self.closest_to_army([r for r in w.relics if w.owner[r] == q])
+            guarded = [r for r in w.relics if w.owner[r] == q and q in w.armies.get(r, {})]
+            return self.cheapest_target(guarded, q) if guarded else None
         if path == "wonder":
             return self.closest_to_army([c for c in w.cities_of(q) if w.cities[c].get("wonder_stage", 0) > 0])
         cands = [w.capital_of(q)]
@@ -524,6 +655,15 @@ class StrategistBot(PlannerBot):
             return
         for r, th in getattr(self, "relic_guard_targets", []):
             self.guard_tile(r, th)
+        campaign = getattr(self, "relic_campaign_on", False)
+        if campaign:
+            # the relic guards come first: a raid only uses what is left
+            self.relic_campaign()
+        if self.raid is not None:
+            self.execute_raid()
+            if self.USE_RELICS and not campaign:
+                self.grab_relics()
+            return
         tgt = self.objective
         if tgt is not None:
             owner = w.cities[tgt]["owner"] if tgt in w.cities else w.owner[tgt]
@@ -538,12 +678,413 @@ class StrategistBot(PlannerBot):
         if tgt is not None:
             self.offense(tgt, min_ratio=1.3, max_dist=6)
             return
-        prey = self.prey() if self.USE_PREY else None
+        prey = self.prey() if self.USE_PREY and not getattr(self, "relic_campaign_on", False) else None
         if prey is not None:
             self.ensure_army_for(prey)
             self.offense(prey, min_ratio=1.25)
             return
+        if self.USE_RELICS:
+            self.grab_relics()
         self.position_army()
+
+    # ------------------------------------------------------------------
+    # raids: capture a rival capital (plunder) or wonder city (denial)
+    # ------------------------------------------------------------------
+    USE_RAIDS = True
+    RAID_PATIENCE = 30            # abandon a raid after this many turns
+    RAID_COOLDOWN = 15            # ...and leave that rival alone this long
+    RAID_RATIO = 1.15             # simulated power margin required to strike
+    RAID_GATHER = 3               # gather this far from the target (out of sight)
+    RAID_MIN_VALUE_RATIO = 2.0    # value / force cost needed for a raid (raids are costly)
+    CONQUEST_VALUE = 500.0        # value of a capital toward conquest (x progress)
+
+    def res_value(self, res: dict, frac: float = 1.0) -> float:
+        return sum(res.get(r, 0) * frac * (1.0 if r == "gold" else self.price(r)) for r in C.TRADABLE)
+
+    RAID_BUY_SHARE = 0.2          # share of its gold a target may spend on defenders
+
+    def reinforcement(self, q: str, vs: dict) -> dict:
+        """Units ``q`` could recruit in one turn (the best counter to ``vs``)
+        with its stock plus what it could buy with part of its gold — what a
+        target can add once it sees us coming."""
+        res = self.w.players.get(q, {}).get("resources", {})
+        t = best_counter(vs or {"infantry": 1}, allowed=("infantry", "archer"))
+        cost = C.UNITS[t]["cost"]
+        n = min(int(res.get(r, 0) // v) for r, v in cost.items() if v)
+        per_unit = sum(v * (1.0 if r == "gold" else self.price(r) * 1.3) for r, v in cost.items())
+        n += int(res.get("gold", 0) * self.RAID_BUY_SHARE / max(1.0, per_unit))
+        return {t: max(0, min(n, 2 * C.MAX_RECRUIT_PER_ORDER))}
+
+    def raid_defenders(self, tgt: int, owner: str, vs: dict) -> dict:
+        w = self.w
+        defenders = {q: dict(u) for q, u in w.armies.get(tgt, {}).items() if q != w.me}
+        for j in w.nb[tgt]:
+            u = w.armies.get(j, {}).get(owner)
+            if u:
+                defenders[owner] = add_units(defenders.get(owner, {}), u)
+        defenders[owner] = add_units(defenders.get(owner, {}), self.reinforcement(owner, vs))
+        return defenders
+
+    def raid_wins(self, tgt: int, owner: str, force: dict) -> bool:
+        if not force:
+            return False
+        d = self.raid_defenders(tgt, owner, force)
+        win, _, ratio = simulate_attack(self.w, self.w.me, force, tgt, defenders_override=d, assume_war=True)
+        return win and ratio >= self.RAID_RATIO
+
+    def raid_force(self, tgt: int, owner: str) -> dict:
+        """Cheapest force (siege vs walls + one of a few compositions) that
+        beats the defenders, their neighbours and one turn of reinforcements."""
+        best, best_cost = None, INF
+        siege = self.siege_needed(tgt)
+        for mix in (("cavalry",), ("infantry",), ("archer",), ("infantry", "cavalry")):
+            k = 1
+            while k <= 60:
+                force = {"siege": siege} if siege else {}
+                for t in mix:
+                    force[t] = force.get(t, 0) + k
+                if self.raid_wins(tgt, owner, force):
+                    c = self.force_cost(force)
+                    if c < best_cost:
+                        best, best_cost = force, c
+                    break
+                k += 1 if k < 8 else 3
+        return best or {}
+
+    def plan_raid(self) -> None:
+        """Choose (or keep) a raid target and reserve what its force needs."""
+        w = self.w
+        if not w.my_cities:
+            return
+        mem = self.memory.get("raid")
+        cool = self.memory.setdefault("raid_cooldown", {})
+        if mem is not None:
+            tgt, owner, start = mem["tgt"], mem["owner"], mem["start"]
+            c = w.cities.get(tgt)
+            gone = c is None or c["owner"] != owner or owner not in w.rivals
+            if gone or w.turn - start > self.RAID_PATIENCE or not self.raid_still_worth(tgt, owner):
+                if not gone:
+                    cool[owner] = w.turn + self.RAID_COOLDOWN
+                self.memory["raid"] = None
+                mem = None
+        if mem is None and w.turn % 2 == 0 and w.turn >= 10:
+            mem = self.choose_raid(cool)
+            if mem is not None:
+                self.memory["raid"] = mem
+        if mem is None:
+            return
+        self.raid = mem
+        tgt, owner = mem["tgt"], mem["owner"]
+        self.memory["block_owner"] = owner
+        force = self.raid_force(tgt, owner)
+        mem["force"] = force
+        self.reserve_missing(tgt, force)
+        if w.at_peace(w.me, owner):
+            self.INFLUENCE_RESERVE = max(self.INFLUENCE_RESERVE, C.TREATY_BREAK_COST + 2)
+
+    def raid_value(self, tgt: int, owner: str) -> float:
+        w = self.w
+        c = w.cities[tgt]
+        pl = w.players.get(owner, {})
+        v = 25 * 6.0 + 60 * c.get("wonder_stage", 0) ** 2
+        if c.get("capital") and c.get("original_owner") == owner:
+            v += self.res_value(pl.get("resources", {}), C.PLUNDER_FRACTION)
+        if c.get("capital"):
+            # conquest progress: worth more the closer it brings us
+            need = w.thresholds.get("conquest_capitals", 99)
+            have = w.players.get(w.me, {}).get("capitals_held", 0)
+            if have + 1 >= need:
+                v += 4000.0
+            else:
+                v += self.CONQUEST_VALUE * (have + 1) / need
+        # denial: the rival would win before us
+        eta = min(self.etas.get(owner, {}).values(), default=INF)
+        if eta < INF and eta <= self.my_eta + 5:
+            v += 2500.0 * max(0.0, 1.0 - eta / 60.0) + 500
+        return v
+
+    def raid_still_worth(self, tgt: int, owner: str) -> bool:
+        return self.raid_value(tgt, owner) > 0.6 * self.force_cost(self.raid_force(tgt, owner))
+
+    def choose_raid(self, cool: dict):
+        w = self.w
+        srcs = list(w.my_cities)
+        dist = w.bfs(srcs, max_dist=24)
+        prod = max(1.0, self.potential_gold_rate())
+        best, best_key = None, None
+        for c, cc in w.cities.items():
+            owner = cc["owner"]
+            if owner == w.me or owner not in w.rivals or cool.get(owner, -1) >= w.turn:
+                continue
+            if not (cc.get("capital") or cc.get("wonder_stage", 0) > 0):
+                continue
+            if c not in dist:
+                continue
+            if w.at_peace(w.me, owner) and w.res.get("influence", 0) < C.TREATY_BREAK_COST:
+                continue
+            value = self.raid_value(c, owner)
+            force = self.raid_force(c, owner)
+            if not force:
+                continue
+            cost = self.force_cost(force) * (1 + dist[c] / 20.0)
+            eta = min(self.etas.get(owner, {}).values(), default=INF)
+            t_ready = cost / prod + dist[c] + 2
+            if eta < INF and eta <= self.my_eta + 5 and t_ready > eta + 3:
+                continue          # cannot get there in time
+            if value < self.RAID_MIN_VALUE_RATIO * cost:
+                continue
+            key = (-(value - cost), c)
+            if best_key is None or key < best_key:
+                best, best_key = {"tgt": c, "owner": owner, "start": w.turn, "phase": "gather"}, key
+        return best
+
+    def reserve_missing(self, tgt: int, force: dict) -> None:
+        have = self.army_near(tgt, plain=True, radius=12)
+        cost: dict = {}
+        for t, k in force.items():
+            miss = max(0, k - have.get(t, 0))
+            for r, v in C.UNITS[t]["cost"].items():
+                cost[r] = cost.get(r, 0) + v * min(miss, 12)
+        self.add_reserve({r: min(v, self.w.res.get(r, 0)) for r, v in cost.items()})
+
+    def execute_raid(self) -> None:
+        """Gather the force out of sight (RAID_GATHER tiles away), recruit
+        what is missing, then strike in one go (breaking a treaty first if
+        needed)."""
+        w, p = self.w, self.p
+        mem = self.raid
+        tgt, owner, force = mem["tgt"], mem["owner"], mem.get("force") or {}
+        plain = w.bfs([tgt])
+        enter = w.can_enter_fn(w.me)
+        # units available for the raid: free units within 12 steps
+        near: dict = {}
+        for i in w.my_armies:
+            if plain.get(i, 99) <= 12:
+                near = add_units(near, self.free_units(i))
+        gather = self.gather_distance(force)
+        close: dict = {}
+        for i in w.my_armies:
+            if plain.get(i, 99) <= gather + 1:
+                close = add_units(close, self.free_units(i))
+        at_peace = w.at_peace(w.me, owner)
+        if mem["phase"] == "gather":
+            # recruit the missing units in the city closest to the target
+            city = min(w.my_cities, key=lambda c: (plain.get(c, 999), c))
+            room = int(self.raw.get("food", 0) * 0.9 + p.budget.get("food", 0) / 12 - w.upkeep)
+            have = add_units(near, p.recruited.get(city, {}))
+            for t, k in sorted(force.items(), key=lambda kv: kv[0] != "siege"):
+                miss = k - have.get(t, 0)
+                if miss > 0 and room > 0:
+                    got = p.recruit(city, t, min(miss, max(1, room // C.UNITS[t]["upkeep"])), {"food": 15})
+                    room -= got * C.UNITS[t]["upkeep"]
+            ready = self.raid_wins(tgt, owner, close)
+            if ready:
+                if at_peace:
+                    if w.res.get("influence", 0) >= C.TREATY_BREAK_COST and self.memory.get("broke") != w.turn:
+                        p.orders.append({"type": "break_treaty", "with": owner})
+                        self.memory["broke"] = w.turn
+                    # hold position this turn; strike next turn
+                    for i in w.my_armies:
+                        if plain.get(i, 99) <= gather + 1:
+                            fr = self.free_units(i)
+                            if fr:
+                                self.locked[i] = add_units(self.locked.get(i, {}), fr)
+                else:
+                    mem["phase"] = "strike"
+                    mem["strike_start"] = w.turn
+            if mem["phase"] == "gather":
+                self.gather_near(tgt, plain, enter, gather)
+                return
+        # strike: march in and attack when the adjacent force wins; a strike
+        # that stalls (the target out-recruited us) goes back to gathering
+        if w.turn - mem.get("strike_start", w.turn) > 6 and not self.raid_wins(tgt, owner, near):
+            mem["phase"] = "gather"
+        self.offense(tgt, min_ratio=1.0)
+
+    def gather_distance(self, force: dict) -> int:
+        """Gather out of the target's sight: cavalry is seen (and answered)
+        from twice as far away as foot units."""
+        if force and all(t == "cavalry" for t in force):
+            return 2 * self.RAID_GATHER - 1
+        return self.RAID_GATHER
+
+    def gather_near(self, tgt: int, plain: dict, enter, gather: int | None = None) -> None:
+        """Move free units toward ``tgt`` but stop ``gather`` steps away."""
+        w = self.w
+        gather = self.RAID_GATHER if gather is None else gather
+        dist = w.bfs([tgt], enter)
+        for i in sorted(w.my_armies):
+            d = dist.get(i)
+            free = self.free_units(i)
+            if not free or d is None or d > 16:
+                continue
+            if d <= gather:
+                if d < gather:
+                    # too close (seen): step back
+                    back = None
+                    for j in w.nb[i]:
+                        if dist.get(j, -1) == d + 1 and enter(j) and not w.hostile_units_on(w.me, j):
+                            back = j
+                            break
+                    if back is not None and self.safe_move(i, back, free, allow_fight=False):
+                        continue
+                self.locked[i] = add_units(self.locked.get(i, {}), free)
+                continue
+            nxt = w.step_towards(i, dist, enter)
+            if nxt is not None:
+                self.safe_move(i, nxt, free, allow_fight=False)
+
+    # ------------------------------------------------------------------
+    # relic occupation
+    # ------------------------------------------------------------------
+    RELIC_GUARD = 4               # units kept on each relic during a campaign
+    RELIC_GUARD_REACH = 5         # guards must hold vs armies this many turns away
+
+    def guard_need(self, tile: int, have: dict, base: int) -> dict:
+        """Units (taken from ``have``) to leave on ``tile`` so that it holds
+        against hostile units within 3 turns (x1.2), at least ``base``."""
+        w = self.w
+        threat = threat_to(w, tile, reach=self.RELIC_GUARD_REACH)
+        keep: dict = {}
+        order = sorted(have, key=lambda t: (-C.UNITS[t]["strength"], t))
+        left = dict(have)
+
+        def add_one():
+            for t in order:
+                if left.get(t, 0) > 0:
+                    left[t] -= 1
+                    keep[t] = keep.get(t, 0) + 1
+                    return True
+            return False
+        while sum(keep.values()) < base and add_one():
+            pass
+        for _ in range(40):
+            ok = True
+            for q, units in threat.items():
+                scaled = {u: int(math.ceil(k * 1.2)) for u, k in units.items()}
+                win, _, _ = simulate_attack(w, q, scaled, tile, defenders_override={w.me: keep})
+                if win:
+                    ok = False
+                    break
+            if ok or not add_one():
+                break
+        return keep
+
+    def relic_targets(self, count: int) -> list:
+        """The ``count`` relics we do not guard that are cheapest to occupy
+        (distance from our units/cities, plus the enemies standing on them)."""
+        w = self.w
+        enter = w.can_enter_fn(w.me)
+        srcs = list(w.my_armies) + list(w.my_cities)
+        if not srcs or count <= 0:
+            return []
+        dist = w.bfs(srcs, enter, max_dist=24)
+        cands = []
+        for r in w.relics:
+            if w.owner[r] == w.me and w.me in w.armies.get(r, {}):
+                continue
+            if r not in dist:
+                continue
+            enemy = w.enemy_units_at(r)
+            cost = dist[r] + (4 + 0.1 * sum(C.UNITS[u]["strength"] * c for u, c in enemy.items()) if enemy else 0)
+            cands.append((cost, self.salt[r], r))
+        cands.sort()
+        return [r for _, _, r in cands[:count]]
+
+    def relic_campaign(self) -> None:
+        """Occupy and hold the relics needed for the relic victory: keep a
+        guard on each held relic, march detachments to the cheapest missing
+        ones, fight for guarded ones, and recruit what the guards need."""
+        w, p = self.w, self.p
+        need = w.thresholds.get("relics_needed", 99)
+        held = [r for r in w.relics if w.owner[r] == w.me and w.me in w.armies.get(r, {})]
+        for r in held:
+            keep = self.guard_need(r, self.free_units(r), self.RELIC_GUARD)
+            if keep:
+                self.locked[r] = add_units(self.locked.get(r, {}), keep)
+        targets = self.relic_targets(need - len(held))
+        enter = w.can_enter_fn(w.me)
+        fought = False
+        want_total = 0
+        for t in targets:
+            enemy = w.enemy_units_at(t)
+            want_total += self.RELIC_GUARD + (sum(enemy.values()) if enemy else 0)
+            if enemy:
+                if not fought:
+                    fought = True
+                    self.offense(t, min_ratio=1.2, max_dist=10)
+                continue
+            self.send_detachment(t, self.RELIC_GUARD, enter)
+        # raise the troops the campaign needs
+        have = sum(sum(u.values()) for u in w.my_armies.values())
+        short = want_total + len(held) * self.RELIC_GUARD - have
+        if short > 0 and targets:
+            self.recruit_near(targets[0], short)
+
+    def send_detachment(self, tile: int, count: int, enter) -> None:
+        """Move up to ``count`` free units (nearest stacks first) toward
+        ``tile`` (onto it when adjacent)."""
+        w = self.w
+        dist = w.bfs([tile], enter, max_dist=16)
+        sent = 0
+        for d, i in sorted((dist[i], i) for i in w.my_armies if i in dist and i != tile):
+            if sent >= count:
+                break
+            free = self.free_units(i)
+            if not free:
+                continue
+            take: dict = {}
+            for t in sorted(free, key=lambda t: (C.UNITS[t]["move"], -C.UNITS[t]["strength"], t)):
+                k = min(free[t], count - sent - sum(take.values()))
+                if k > 0:
+                    take[t] = k
+            if not take:
+                continue
+            nxt = tile if d == 1 else w.step_towards(i, dist, enter)
+            if nxt is None:
+                continue
+            if self.safe_move(i, nxt, take, allow_fight=(nxt == tile)):
+                sent += sum(take.values())
+
+    def recruit_near(self, tile: int, count: int) -> None:
+        """Recruit up to ``count`` infantry/archers in the city closest to
+        ``tile``, within what our food income can feed."""
+        w, p = self.w, self.p
+        if not w.my_cities:
+            return
+        dist = w.bfs([tile], w.can_enter_fn(w.me))
+        city = min(w.my_cities, key=lambda c: (dist.get(c, 999), c))
+        room = int(self.raw.get("food", 0) * 0.8 + p.budget.get("food", 0) / 15 - w.upkeep)
+        k = min(count, room, 6)
+        if k <= 0:
+            return
+        threat: dict = {}
+        for u in threat_to(w, tile, reach=4).values():
+            threat = add_units(threat, u)
+        t = best_counter(threat, allowed=("infantry", "archer")) if threat else "infantry"
+        p.recruit(city, t, k, {r: v for r, v in self.reserved.items() if r == "food"})
+
+    def grab_relics(self) -> None:
+        """Outside a relic campaign: park a single unit on unguarded relics
+        close to our free units (+influence and score each turn held) when no
+        hostile army is near."""
+        w = self.w
+        enter = w.can_enter_fn(w.me)
+        for r in sorted(w.relics, key=lambda r: self.salt[r]):
+            if w.armies.get(r) or not enter(r):
+                continue
+            if threat_to(w, r, reach=2):
+                continue
+            dist = w.bfs([r], enter, max_dist=4)
+            if not any(i in dist and self.free_units(i) for i in w.my_armies):
+                continue
+            self.send_detachment(r, 1, enter)
+        # keep the units already sitting on our relics
+        for r in w.relics:
+            if w.owner[r] == w.me:
+                here = self.free_units(r)
+                if here:
+                    self.locked[r] = add_units(self.locked.get(r, {}), here)
 
     def force_cost(self, force: dict) -> float:
         tot = 0.0
@@ -785,8 +1326,11 @@ class StrategistBot(PlannerBot):
                                             assume_war=True) if have else (False, {}, 0.0)
             if win and ratio >= 1.35:
                 break
-            t = self.pick_unit(enemy)
+            t = best_counter(enemy, allowed=("infantry", "cavalry", "archer")) if enemy else self.pick_unit(enemy)
             k = p.recruit(city, t, min(3, room), reserve)
+            if k == 0:
+                t = self.pick_unit(enemy)
+                k = p.recruit(city, t, min(3, room), reserve)
             if k == 0:
                 break
             have = add_units(have, {t: k})
@@ -812,3 +1356,15 @@ class StrategistBot(PlannerBot):
             nxt = w.step_towards(i, dist, enter)
             if nxt is not None:
                 self.safe_move(i, nxt, free, allow_fight=False)
+
+
+class StrategistLiteBot(StrategistBot):
+    """A handicapped strategist for skill ladders: it always races for the
+    economic victory (no path choice), never raids or campaigns for relics,
+    and only signs short treaties."""
+
+    name = "strategist_lite"
+    PATHS = ("economic",)
+    USE_RAIDS = False
+    USE_RELICS = False
+    TREATY_TURNS = 20

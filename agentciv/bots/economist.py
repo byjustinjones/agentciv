@@ -27,13 +27,15 @@ class EconomistBot(PlannerBot):
     MIN_GARRISON = 2
     SELL_FLOOR = 0.6
     HOARD_TURN = 55            # after this turn, gold is saved for victory
+    DEFENSIVE_WALLS = False    # a pure builder: never raises walls and spends
+    DEFENSE_BUY_FRACTION = 0.15  # little of its hoard on defenders (its weak spot)
 
     def pipeline(self):
-        return [self.diplomacy, self.food_safety, self.plan_site, self.defend, self.sell,
-                self.expand, self.develop, self.garrison_moves]
+        return [self.diplomacy, self.food_safety, self.plan_site, self.defend, self.counter_relics,
+                self.sell, self.expand, self.develop, self.garrison_moves]
 
     def diplomacy(self) -> None:
-        self.accept_all_and_propose(turns=50)
+        self.accept_all_and_propose(turns=25)
 
     def prepare(self) -> None:
         super().prepare()

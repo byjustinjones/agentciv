@@ -147,6 +147,8 @@ class Game:
         self.relics = list(m.relics)
         self.relic_set = frozenset(self.relics)
         self.map_info = dict(m.fairness, stamp_radius=m.stamp_radius)
+        # start slot (index in mapgen.start_layout) per player, for fairness stats
+        self.start_slots = {p.id: m.slots[k] for k, p in enumerate(self.players)} if m.slots else {}
         self.neighbors = []
         for i in range(w * h):
             x, y = i % w, i // w
@@ -200,8 +202,10 @@ class Game:
             raise KeyError(f"unknown player {pid!r}")
         return views.build_view(self, pid)
 
-    def spectator_view(self) -> dict:
-        return views.build_view(self, None)
+    def spectator_view(self, full: bool = False) -> dict:
+        """Public view (no private messages/offers/proposals/events while the
+        game runs); ``full=True`` or a finished game: everything."""
+        return views.build_view(self, None, full)
 
     @staticmethod
     def rules() -> dict:
@@ -266,6 +270,11 @@ class Game:
         cap = storage_cap(self.warehouses(pid))
         return {r: cap for r in C.CAPPED_RESOURCES}
 
+    def relic_guarded(self, i: int) -> bool:
+        """True if the owner of relic tile ``i`` has units standing on it."""
+        o = self.owner[i]
+        return o is not None and o in self.armies.get(i, {})
+
     def wonder_stage(self, pid: str) -> int:
         p = self._by_id[pid]
         c = self.cities.get(p.wonder_city) if p.wonder_city is not None else None
@@ -299,7 +308,7 @@ class Game:
         self.improvement[i] = None
         self._set_owner(i, p.id)
         for j in self.radius(i, C.CITY_CLAIM_RADIUS):
-            if self.owner[j] is None and self.terrain[j] in C.PASSABLE:
+            if self.owner[j] is None and self.terrain[j] in C.PASSABLE and j not in self.relic_set:
                 self._set_owner(j, p.id)
         return city
 
@@ -396,13 +405,15 @@ class Game:
                     continue
                 other = o["with"]
                 key = self._pair(p.id, other)
-                if key not in self.treaties:
+                # a treaty broken earlier in this phase by the partner still
+                # counts: both players who ordered the break pay (no seat bias)
+                if key not in self.treaties and key not in broken:
                     self._fail(p.id, o, f"no treaty with {other}")
                 elif p.resources["influence"] < C.TREATY_BREAK_COST:
                     self._fail(p.id, o, f"breaking a treaty costs {C.TREATY_BREAK_COST} influence")
                 else:
                     p.resources["influence"] -= C.TREATY_BREAK_COST
-                    del self.treaties[key]
+                    self.treaties.pop(key, None)
                     p.betrayals += 1
                     broken.add(key)
                     self._emit("treaty_broken", by=p.id, **{"with": other})
@@ -520,9 +531,9 @@ class Game:
         if not alive:
             return
         lists = {p.id: [o for o in orders[p.id] if o["type"] in ACTION_TYPES] for p in alive}
-        contested = self._contested(lists)
-        order = self._rotated()
         self._wonder_built: set = set()
+        contested = self._contested(lists, self._viable_expansions(lists))
+        order = self._rotated()
         longest = max(len(v) for v in lists.values())
         for k in range(longest):
             for p in order:
@@ -540,12 +551,64 @@ class Game:
                 if reason:
                     self._fail(p.id, o, reason)
 
-    def _contested(self, lists: dict) -> set:
+    def _viable_expansions(self, lists: dict) -> set:
+        """ids of the claim/settle orders that would succeed if their player
+        acted alone this turn (their whole action list, in order, against the
+        current state). Only these can contest other players' orders: an
+        order that fails anyway (no influence/resources, not adjacent, ...)
+        must not block anybody."""
+        viable: set = set()
+        for pid, lst in lists.items():
+            if not any(o["type"] in ("claim", "settle") for o in lst):
+                continue
+            p = self._by_id[pid]
+            snap = self._snapshot(p)
+            try:
+                for o in lst:
+                    if o["type"] == "disband":  # free, never affects expansions
+                        continue
+                    try:
+                        reason = getattr(self, "_act_" + o["type"])(p, o)
+                    except Exception:  # pragma: no cover - defensive
+                        reason = "error"
+                    if reason is None and o["type"] in ("claim", "settle"):
+                        viable.add(id(o))
+            finally:
+                self._restore(p, snap)
+        return viable
+
+    def _snapshot(self, p: Player) -> tuple:
+        cities = {i: (c.owner, c.walls, c.warehouse, c.market_hall, c.wonder_stage) for i, c in self.cities.items()}
+        return (list(self.owner), list(self.improvement), {q.id: q.tiles for q in self.players},
+                dict(p.resources), p.wonder_city, p.city_counter, cities,
+                len(self._recruit_queue), len(self._events), set(self._wonder_built))
+
+    def _restore(self, p: Player, snap: tuple) -> None:
+        owner, imp, tiles, res, wcity, counter, cities, nq, nev, wb = snap
+        self.owner[:] = owner
+        self.improvement[:] = imp
+        for q in self.players:
+            q.tiles = tiles[q.id]
+        p.resources.clear()
+        p.resources.update(res)
+        p.wonder_city = wcity
+        p.city_counter = counter
+        for i in [i for i in self.cities if i not in cities]:
+            del self.cities[i]
+        for i, (own, walls, wh, mh, ws) in cities.items():
+            c = self.cities[i]
+            c.owner, c.walls, c.warehouse, c.market_hall, c.wonder_stage = own, walls, wh, mh, ws
+        del self._recruit_queue[nq:]
+        del self._events[nev:]
+        self._wonder_built = wb
+        self._invalidate()
+
+    def _contested(self, lists: dict, viable: set | None = None) -> set:
         by_tile: dict = {}
         settles = []
         for pid, lst in lists.items():
             for o in lst:
-                if o["type"] in ("claim", "settle"):
+                if o["type"] in ("claim", "settle") and (viable is None or id(o) in viable):
                     by_tile.setdefault(o["at"], []).append((pid, o))
                     if o["type"] == "settle":
                         settles.append((pid, o))
@@ -616,6 +679,8 @@ class Game:
 
     def _act_claim(self, p: Player, o: dict):
         i = o["at"]
+        if i in self.relic_set:
+            return "relics cannot be claimed: occupy them with units"
         if self.owner[i] is not None:
             return f"tile already owned by {self.owner[i]}"
         if self.terrain[i] not in C.PASSABLE:
@@ -706,8 +771,12 @@ class Game:
             for q in here:
                 if q != pid and self._pair(pid, q) in restricted:
                     return f"cannot move onto an army of treaty partner {q}"
-            if len(path) == 2 and k == 0 and any(q != pid and self.hostile(pid, q) for q in here):
-                return "cannot move through a tile with a hostile army"
+            if len(path) == 2 and k == 0:
+                if any(q != pid and self.hostile(pid, q) for q in here):
+                    return "cannot move through a tile with a hostile army"
+                city = self.cities.get(step)
+                if city is not None and city.owner != pid and self.hostile(pid, city.owner):
+                    return "cannot move through a hostile city"
             prev = step
         return None
 
@@ -796,31 +865,60 @@ class Game:
         self.armies = new
         # captures: cities first, then plain tiles
         for i in sorted(new):
-            if i not in self.cities:
+            if i not in self.cities or i not in defeated_garrisons:
                 continue
-            per = new.get(i, {})
-            if len(per) != 1:
-                continue
-            (q,) = per
-            own = self.owner[i]
-            if own is not None and own != q and self.hostile(q, own) and i in defeated_garrisons:
+            q = self._capturer(i, new.get(i, {}))
+            if q is not None:
                 self._capture_city(i, q)
         for i in sorted(new):
             if i in self.cities:
                 continue
-            per = new.get(i, {})
-            if len(per) != 1:
-                continue
-            (q,) = per
             own = self.owner[i]
-            if own is not None and own != q and self.hostile(q, own):
+            relic = i in self.relic_set
+            if own is None and not relic:
+                continue
+            # relic tiles are also taken when unowned: occupation is the only
+            # way to acquire a relic
+            q = self._capturer(i, new.get(i, {}))
+            if q is not None:
                 self._set_owner(i, q)
-                self._emit("tile_captured", **self._xy_fields(i), **{"from": own, "to": q})
+                self._emit("tile_captured", **self._xy_fields(i), **{"from": own, "to": q}, relic=relic)
+
+    def _capturer(self, i: int, per: dict) -> str | None:
+        """Who captures tile ``i`` given the units on it after the battles
+        (all of them belong to players at peace with each other): among the
+        players hostile to the tile's owner (any player for an unowned tile),
+        the one with the largest raw power, then the lowest seat. None if the
+        owner itself (or nobody hostile to it) is there."""
+        own = self.owner[i]
+        if not per or own in per:
+            return None
+        cands = [q for q in per if own is None or self.hostile(q, own)]
+        if not cands:
+            return None
+        return min(cands, key=lambda q: (-combat.military_power(per[q]), self._by_id[q].index))
 
     def _border_clashes(self, groups: list) -> None:
+        """Hostile groups crossing the same edge in opposite directions fight
+        there: first steps against first steps, then every crossing that
+        involves the second step of a cavalry move (survivors only)."""
         by_edge: dict = {}
         for g in groups:
             by_edge.setdefault((g.src, g.path[0]), []).append(g)
+        self._clash_edges(by_edge)
+        by_edge = {}
+        for g in groups:
+            if not g.units:
+                continue
+            prev = g.src
+            for step in g.path:
+                lst = by_edge.setdefault((prev, step), [])
+                if g not in lst and g not in by_edge.get((step, prev), ()):
+                    lst.append(g)
+                prev = step
+        self._clash_edges(by_edge)
+
+    def _clash_edges(self, by_edge: dict) -> None:
         for (a, b) in sorted(by_edge):
             if a > b or (b, a) not in by_edge:
                 continue
@@ -828,6 +926,8 @@ class Game:
             for d, key in enumerate(((a, b), (b, a))):
                 per: dict = {}
                 for g in by_edge[key]:
+                    if not g.units:
+                        continue
                     per.setdefault(g.pid, []).append(g)
                 for q, gs in per.items():
                     units: dict = {}
@@ -869,7 +969,7 @@ class Game:
             victim.wonder_city = None
         transferred = 0
         for j in self.radius(i, 1):
-            if j == i or self.owner[j] != old or j in self.cities:
+            if j == i or self.owner[j] != old or j in self.cities or j in self.relic_set:
                 continue
             if any(q != pid for q in self.armies.get(j, {})):
                 continue
@@ -892,6 +992,9 @@ class Game:
             city = self.cities.get(i)
             if city is None or city.owner != pid or not self._by_id[pid].alive:
                 self._fail(pid, o, "city lost before the recruits were ready; recruits lost")
+                continue
+            if self._hostile_units_on(pid, i):
+                self._fail(pid, o, "hostile units hold the city; recruits lost")
                 continue
             per = self.armies.setdefault(i, {}).setdefault(pid, {})
             per[unit] = per.get(unit, 0) + count
@@ -1000,7 +1103,7 @@ class Game:
         # relic streaks
         need = relics_needed(len(self.relics))
         for p in self._alive_in_order():
-            held = sum(1 for r in self.relics if self.owner[r] == p.id)
+            held = sum(1 for r in self.relics if self.owner[r] == p.id and self.relic_guarded(r))
             p.relic_streak = p.relic_streak + 1 if held >= need else 0
         # expiries
         for key in sorted(self.treaties):
@@ -1062,10 +1165,13 @@ class Game:
             if c.capital:
                 capitals[c.owner] += 1
         relics = {p.id: 0 for p in self.players}
+        guarded = {p.id: 0 for p in self.players}
         for r in self.relics:
             o = self.owner[r]
             if o is not None:
                 relics[o] += 1
+                if self.relic_guarded(r):
+                    guarded[o] += 1
         thr = thresholds(n, self.max_turns) if n else {}
         alive_count = sum(1 for p in self.players if p.alive)
         out = {}
@@ -1090,7 +1196,7 @@ class Game:
                     "wonder": round(min(1.0, ws / C.WONDER_VICTORY_STAGE), 3),
                     "influence": round(min(1.0, max(0, res["influence"]) / C.INFLUENCE_VICTORY), 3),
                     "relics": round(min(1.0, p.relic_streak / C.RELIC_VICTORY_TURNS)
-                                    if relics[p.id] >= thr["relics_needed"] else 0.0, 3),
+                                    if guarded[p.id] >= thr["relics_needed"] else 0.0, 3),
                     "economic": round(min(1.0, max(0, res["gold"]) / C.ECONOMIC_VICTORY_GOLD), 3),
                     "score": round(min(1.0, self.turn / self.max_turns) if self.max_turns else 1.0, 3),
                 }
@@ -1106,6 +1212,7 @@ class Game:
                 "units": units[p.id],
                 "wonder_stage": ws,
                 "relics_held": relics[p.id],
+                "relics_guarded": guarded[p.id],
                 "score": int(score),
                 "income": self._seasoned(raw[p.id], self.turn) if p.alive else {r: 0 for r in C.RESOURCES},
                 "upkeep": self._upkeep(p.id, units[p.id]),

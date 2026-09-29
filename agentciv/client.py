@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 import urllib.error
@@ -72,10 +73,11 @@ class AgentCivClient:
         self.game_id = game_id
         self.player_id = player_id
         self.timeout = timeout
+        self.creator_tokens: dict[str, str] = {}  # game_id -> creator_token of games this client created
 
     # ------------------------------------------------------------ transport
     def _request(self, method: str, path: str, body: Any = None, query: dict | None = None,
-                 auth: bool = False, raw: bool = False, timeout: float | None = None):
+                 auth: bool = False, raw: bool = False, timeout: float | None = None, token: str | None = None):
         url = self.base_url + path
         if query:
             q = {k: v for k, v in query.items() if v is not None}
@@ -86,8 +88,8 @@ class AgentCivClient:
         if body is not None:
             data = json.dumps(body).encode()
             headers["Content-Type"] = "application/json"
-        if auth and self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
+        if token or (auth and self.token):
+            headers["Authorization"] = f"Bearer {token or self.token}"
         req = urllib.request.Request(url, data=data, method=method, headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=timeout or self.timeout) as resp:
@@ -120,8 +122,12 @@ class AgentCivClient:
     def create_game(self, **options) -> str:
         """Create a game and return its id. Options (all optional):
         ``name, max_players, min_players, turn_timeout, max_turns, seed, bots,
-        fill_with_bots, lobby_timeout, turn_delay, rated``."""
-        return self._request("POST", "/api/games", options)["game_id"]
+        fill_with_bots, lobby_timeout, turn_delay, rated``. The returned
+        ``creator_token`` is remembered: :meth:`start` uses it."""
+        res = self._request("POST", "/api/games", options)
+        if res.get("creator_token"):
+            self.creator_tokens[res["game_id"]] = res["creator_token"]
+        return res["game_id"]
 
     def list_games(self) -> list[dict]:
         return self._request("GET", "/api/games")
@@ -130,34 +136,54 @@ class AgentCivClient:
         """Summary of one game (players, status, settings)."""
         return self._request("GET", f"/api/games/{self._gid(game_id)}")
 
-    def join(self, game_id: str, name: str) -> dict:
-        """Join a lobby. Returns ``{"game_id","player_id","token"}`` and remembers them."""
+    def join(self, game_id: str, name: str, key: str | None = None) -> dict:
+        """Join a lobby. Returns ``{"game_id","player_id","token"}`` and remembers them.
+        ``key`` (8-200 chars, optional) registers ``name`` on first use; a
+        registered name can only be played with its key."""
+        body = {"name": name}
+        if key is not None:
+            body["key"] = key
         return self._remember(self._request("POST", f"/api/games/{urllib.parse.quote(game_id, safe='')}/join",
-                                            {"name": name}))
+                                            body))
 
-    def quickmatch(self, name: str, players: int = 6, turn_timeout: float | None = None, **options) -> dict:
+    def quickmatch(self, name: str, players: int = 6, turn_timeout: float | None = None,
+                   key: str | None = None, **options) -> dict:
         """Join the open quickmatch lobby for ``players`` seats (creating one if
         needed). The lobby fills with house bots after ``lobby_timeout``
-        seconds (default 30)."""
+        seconds (default 30). ``key``: see :meth:`join`."""
         body = {"name": name, "players": players, **options}
         if turn_timeout is not None:
             body["turn_timeout"] = turn_timeout
+        if key is not None:
+            body["key"] = key
         return self._remember(self._request("POST", "/api/quickmatch", body))
 
-    def start(self, game_id: str | None = None) -> dict:
-        return self._request("POST", f"/api/games/{self._gid(game_id)}/start", {})
+    def start(self, game_id: str | None = None, token: str | None = None) -> dict:
+        """Start a lobby now. Once remote players are seated this needs a
+        seated player's token (used automatically after :meth:`join`) or the
+        creator token (remembered by :meth:`create_game`)."""
+        gid = game_id or self.game_id
+        tok = token or self.creator_tokens.get(gid or "") or (self.token if gid == self.game_id else None)
+        return self._request("POST", f"/api/games/{self._gid(game_id)}/start", {}, token=tok)
 
     # ------------------------------------------------------------ playing
     def state(self, game_id: str | None = None, spectator: bool = False) -> dict:
         """Your player view (or the spectator view if not joined / ``spectator=True``)."""
         return self._request("GET", f"/api/games/{self._gid(game_id)}/state", auth=not spectator)
 
-    def submit_orders(self, orders: list, turn: int | None = None, game_id: str | None = None) -> dict:
+    def submit_orders(self, orders: list, turn: int | None = None, game_id: str | None = None,
+                      ready: bool = True) -> dict:
         """Submit (or replace) your orders for ``turn``. Returns
-        ``{"accepted","errors","turn"}``; raises ApiError(409) if ``turn`` is stale."""
+        ``{"accepted","errors","turn","deadline","ready"}`` where each error is
+        ``{"index","error"}`` plus an ``example`` of the order's correct shape;
+        raises ApiError(409) if ``turn`` is stale. ``ready=False`` submits a
+        draft: the turn won't resolve early on your account until you resubmit
+        with ``ready=True`` (the deadline still applies)."""
         body: dict = {"orders": orders}
         if turn is not None:
             body["turn"] = turn
+        if not ready:
+            body["ready"] = False
         return self._request("POST", f"/api/games/{self._gid(game_id)}/orders", body, auth=True)
 
     def wait(self, since_turn: int | None = None, timeout: float = 30.0, game_id: str | None = None) -> dict:
@@ -199,13 +225,14 @@ def _as_act(bot_or_callable, seed: int = 0) -> Callable[[dict], list]:
 def run_bot(bot_or_callable, base_url: str = DEFAULT_URL, game_id: str | None = None,
             name: str | None = None, quickmatch: bool = False, players: int = 6,
             turn_timeout: float | None = None, client: AgentCivClient | None = None,
-            verbose: bool = False, seed: int = 0) -> dict:
+            verbose: bool = False, seed: int = 0, key: str | None = None) -> dict:
     """Play one game remotely and return a result dict.
 
     ``bot_or_callable`` is a :class:`agentciv.bots.base.Bot`, any callable
     ``view -> list[order]``, or a built-in bot name. Either join ``game_id``,
     or use ``quickmatch=True`` (``players`` seats), or pass an already-joined
     ``client``. Loops wait → state → act → submit until the game finishes.
+    ``key`` registers/proves ownership of ``name`` (see :meth:`AgentCivClient.join`).
 
     Returns ``{"game_id","player_id","name","result","place","won","turns"}``.
     """
@@ -216,9 +243,9 @@ def run_bot(bot_or_callable, base_url: str = DEFAULT_URL, game_id: str | None = 
     c = client or AgentCivClient(base_url)
     if c.token is None:
         if game_id:
-            c.join(game_id, name)
+            c.join(game_id, name, key=key)
         elif quickmatch:
-            c.quickmatch(name, players=players, turn_timeout=turn_timeout)
+            c.quickmatch(name, players=players, turn_timeout=turn_timeout, key=key)
         else:
             raise ValueError("pass game_id=..., quickmatch=True, or a joined client")
     say = (lambda *a: print(*a, file=sys.stderr, flush=True)) if verbose else (lambda *a: None)
@@ -497,6 +524,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--players", type=int, default=6, help="quickmatch lobby size (default 6)")
     parser.add_argument("--turn-timeout", type=float, default=None, help="quickmatch turn timeout (seconds)")
     parser.add_argument("--seed", type=int, default=0, help="bot seed")
+    parser.add_argument("--key", default=os.environ.get("AGENTCIV_KEY") or None,
+                        help="secret key for your name: registers it on first use, then only this key can play "
+                             "under it (default $AGENTCIV_KEY)")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args(argv)
     if not args.game and not args.quickmatch:
@@ -504,7 +534,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         res = run_bot(args.bot, args.url, game_id=args.game, name=args.name, quickmatch=args.quickmatch,
                       players=args.players, turn_timeout=args.turn_timeout, verbose=not args.quiet,
-                      seed=args.seed)
+                      seed=args.seed, key=args.key)
     except ApiError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1

@@ -10,6 +10,7 @@ from agentciv.bots import BOT_NAMES, get_bot
 from agentciv.bots.common import (Plan, World, best_counter, simulate_attack,
                                   threat_to)
 from agentciv.engine import Game, GameConfig
+from agentciv.engine import constants as C
 from agentciv.engine.testing import new_game, run_turn, sandbox
 
 BUILTIN = [b for b in BOT_NAMES if b != "idle"]
@@ -170,3 +171,53 @@ def test_plan_budget_and_validation():
     assert not p.claim(far)
     errs = g.submit_orders("p1", p.orders)
     assert errs == []
+
+
+def test_plan_never_claims_relics_and_bots_occupy_them():
+    g = sandbox(2, seed=1)
+    g.add_city(3, 3, "p1", capital=True)
+    g.add_city(14, 14, "p2", capital=True)
+    r = g.relics[0]
+    rx, ry = r % g.width, r // g.width
+    g.set_owner(rx - 1, ry, "p1")
+    w = World(g.player_view("p1"))
+    assert not Plan(w).claim(r)
+
+
+def test_build_with_market_buys_stone_above_the_cap():
+    from agentciv.bots.planner import PlannerBot
+    from agentciv.engine.rules import building_cost
+    g = sandbox(2, seed=1)
+    g.add_city(3, 3, "p1", capital=True)
+    g.add_city(14, 14, "p2", capital=True)
+    city = g.cities[g.idx(3, 3)]
+    city.wonder_stage = 2
+    g.player("p1").wonder_city = city.idx
+    cost = building_cost("wonder", 3)
+    g.player("p1").resources.update(stone=C.STORAGE_BASE, wood=cost["wood"], gold=cost["gold"] + 3000)
+    assert cost["stone"] > C.STORAGE_BASE
+    bot = PlannerBot(seed=1)
+    w = World(g.player_view("p1"))
+    bot.w, bot.p = w, bot.new_plan(w)
+    assert bot.build_with_market(w.idx(3, 3), "wonder")
+    run_turn(g, {"p1": bot.p.orders})
+    assert city.wonder_stage == 3
+
+
+def test_contested_claim_backoff():
+    """Two bots that keep claiming the same tile back off at random."""
+    from agentciv.bots.planner import PlannerBot
+    bot = PlannerBot(seed=3)
+    g = sandbox(2, seed=1)
+    g.add_city(3, 3, "p1", capital=True)
+    g.add_city(14, 14, "p2", capital=True)
+    g.player("p1").resources["influence"] = 50
+    g.player("p2").resources["influence"] = 50
+    g.set_owner(8, 7, "p1")
+    g.set_owner(8, 9, "p2")
+    claim = {"type": "claim", "at": [8, 8]}
+    run_turn(g, {"p1": [claim], "p2": [claim]})
+    view = g.player_view("p1")
+    bot.memory["last_orders"] = (g.turn - 1, [claim])
+    bot.act(view)
+    assert bot.backed_off(g.idx(8, 8))

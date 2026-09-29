@@ -74,8 +74,9 @@ even an empty list, to speed the game up). Max {C.MAX_ORDERS_PER_TURN} orders pe
 4. **Actions** — `build`, `claim`, `settle`, `recruit`, `disband`, in the order you submitted them, paying costs when executed.
    Players' orders are interleaved round-robin (your 1st order, then the next player's 1st, …; the starting player rotates each turn).
    If two players `claim`/`settle` the same tile, or `settle` within {C.SETTLE_CONTENTION_RADIUS} tiles (Chebyshev) of each other in the same turn, **all** of those orders fail at no cost.
+   Only orders that would succeed if their player acted alone (resources, influence, adjacency — checked through that player's whole action list) count for contention: an order that fails anyway blocks nobody.
 5. **Movement & combat** — border clashes, then all moves land, battles, captures (§8).
-6. **Spawn** — recruited units appear in their city (lost if the city was captured this turn). Recruits cannot move on the turn they are ordered.
+6. **Spawn** — recruited units appear in their city (lost if the city was captured this turn or hostile units stand on it). Recruits cannot move on the turn they are ordered.
 7. **Economy** — yields × season, deposits deplete, influence income, upkeep & starvation, storage caps, market pools drift back.
 8. **Bookkeeping** — eliminations, relic streaks, victory checks, `turn += 1`.
 
@@ -87,8 +88,9 @@ Income arrives in step 7, so it is available next turn.
 * Square grid, width = height = {C.MAP_BASE_SIZE} + {C.MAP_SIZE_PER_PLAYER}·n (n players). Coordinates are `[x, y]`, x = column, y = row, origin top-left.
   In the view, `map.terrain[y][x]` is a terrain character and `map.owner[y][x]` a player id or null.
 * Movement is **4-directional** (N/E/S/W). "Chebyshev radius r" = the (2r+1)×(2r+1) square.
-* Every start area is stamped from the same terrain template (rotated to face outward): the land within 2–3 tiles of every capital is identical and most of the land further out is too. All capitals are at the same path distance from the map centre.
-* **Relics**: R = n//2 + {C.RELIC_BASE} relic tiles (plains) near the centre (`map.relics`).
+* Every start area is stamped from the same terrain template (rotated to face outward): the land within 2–3 tiles of every capital is identical and most of the land further out is too. Capitals are (nearly) at the same path distance from the map centre.
+  Every capital has the same amount of land closer to it than to any other capital, with the same number of forest, hills and gold tiles (surplus land at the map edge is sunk). The whole map is turned/mirrored by the seed.
+* **Relics**: R = {"n" if C.RELICS_PER_PLAYER == 1 else f"{C.RELICS_PER_PLAYER}·n"} relic tiles (plains, `map.relics`) on a ring around the centre: one in every gap between two neighbouring capitals, (nearly) equidistant from those two capitals, so every capital sees the same pattern of relic distances. Relics are at least {C.RELIC_MIN_SPACING} tiles apart. See §8 for how relics are taken and held.
 """)
     add(_table(["char", "terrain", "passable", "yield when owned", "deposit", "defence"], [
         [f"`{ch}`", t["name"], "yes" if t["passable"] else "no", _cost(t["yield"]),
@@ -118,7 +120,7 @@ Resources: food, wood, stone, gold (tradable) and influence (not tradable).
 * **Storage caps**: food, wood and stone are capped at {C.STORAGE_BASE} + {C.WAREHOUSE_STORAGE} per warehouse; excess is lost at the end of the turn. Gold and influence are uncapped.
 * **Upkeep** (food per unit per turn): {", ".join(f"{u} {s['upkeep']}" for u, s in C.UNITS.items())}.
   If food would drop below 0 it becomes 0 and you lose ceil(deficit/2) units (**starvation**; highest-upkeep units first, from your largest stack). Watch winter!
-* **Influence income**: city {C.CITY_YIELD['influence']} (+{C.CAPITAL_EXTRA_INFLUENCE} for an original capital), temple {C.IMPROVEMENTS['temple']['bonus']['influence']}, each relic tile you own {C.RELIC_INFLUENCE}.
+* **Influence income**: city {C.CITY_YIELD['influence']} (+{C.CAPITAL_EXTRA_INFLUENCE} for an original capital), temple {C.IMPROVEMENTS['temple']['bonus']['influence']}, each relic tile you own {C.RELIC_INFLUENCE} (guarded or not).
 * **Market hall**: +{C.MARKET_HALL_GOLD} gold per turn and a lower market fee.
 * Your projected gross income for the current turn is `you.income` (season applied); `you.upkeep` is subtracted from food.
 
@@ -150,9 +152,9 @@ The full wonder costs {_cost(tot)} in total. If the wonder city is captured the 
 
 ## 6. Expansion
 
-* `claim` an unowned passable tile 4-adjacent to your territory (tiles claimed earlier in the same order list count) with no hostile units on it.
+* `claim` an unowned passable tile 4-adjacent to your territory (tiles claimed earlier in the same order list count) with no hostile units on it. **Relic tiles cannot be claimed** (occupy them, §8).
   Cost: {C.CLAIM_BASE_COST} + floor(owned_tiles / {C.CLAIM_TILES_PER_EXTRA}) influence (you currently pay `you.claim_cost`).
-* `settle` a new city on a tile you own, or on an unowned passable tile 4-adjacent to your territory, at Chebyshev distance ≥ {C.CITY_MIN_DISTANCE} from every city, not on a relic, with no hostile units. The new city claims the unowned passable tiles within radius {C.CITY_CLAIM_RADIUS}.
+* `settle` a new city on a tile you own, or on an unowned passable tile 4-adjacent to your territory, at Chebyshev distance ≥ {C.CITY_MIN_DISTANCE} from every city, not on a relic, with no hostile units. The new city claims the unowned passable non-relic tiles within radius {C.CITY_CLAIM_RADIUS}.
   Cost: {_cost(C.SETTLE_BASE_COST)} × (1 + {C.SETTLE_COST_GROWTH}·(cities_owned − 1)) (`you.settle_cost`):
 """)
     add(_table(["cities you own", "settle cost"], [[k, _cost(settle_cost(k))] for k in range(1, 6)]))
@@ -174,8 +176,12 @@ Order: `{{"type":"market","side":"buy"|"sell","resource":"food"|"wood"|"stone","
 Each turn, per resource, all orders form one **batch auction**: the net quantity N = Σbuy − Σsell is traded against the pool,
 and the average execution price p = |Δgold| / |N| (the spot price gold/resource if N = 0) applies to **everyone**.
 Buyers pay ceil(q·p·(1+fee)); sellers receive floor(q·p·(1−fee)). Fee {_pct(C.MARKET_FEE)} ({_pct(C.MARKET_HALL_FEE)} with a market_hall).
-Orders whose `limit` is violated (buy with p > limit, sell with p < limit) or that you can't pay/deliver are dropped and the auction is recomputed (up to {C.MARKET_MAX_ITERATIONS} times).
-A single order may not exceed {_pct(C.MARKET_MAX_ORDER_FRACTION)} of the pool's resource reserve. After trading, every pool moves {_pct(C.MARKET_REVERSION)} of the way back to its initial reserves each turn.
+Sell orders you can't deliver fail at once. Then, while some order is invalid at the current price, **one** order is dropped
+and the price recomputed: the one furthest from valid (a buy whose `limit` or gold is lowest relative to the price, a sell whose `limit` is
+highest), or — if net buying would drain more than {_pct(C.MARKET_MAX_NET_FRACTION)} of the pool — the buy with the lowest price it could pay.
+Dropped orders are re-admitted afterwards whenever everything stays valid with them, so orders that can't fill don't block anyone.
+A single order may not exceed {_pct(C.MARKET_MAX_ORDER_FRACTION)} of the pool's resource reserve. After trading, every pool moves {_pct(C.MARKET_REVERSION)} of the way back to its initial reserves each turn
+(outside demand/supply: a price pushed down by heavy selling recovers within a few turns, so the price you get depends on how much *everyone* sells right now).
 Buying alone from a pool with reserves (R, G): p = G / (R − N). Large orders move the price a lot — split big trades over several turns, and use limits.
 Because opposite orders net out, trading *against* the crowd gets a better price.
 
@@ -190,7 +196,7 @@ Counter cycle: infantry → cavalry → archer → infantry. Archers defending t
 **Recruit** in a city you own (`recruit`, max {C.MAX_RECRUIT_PER_ORDER} per order); units appear at the end of the turn.
 
 **Move** units from a tile along a path of 1 step (2 steps if every moved unit is cavalry). You may not enter impassable tiles,
-tiles owned by a treaty partner or tiles holding a partner's army; the first step of a 2-step path may not hold a hostile army.
+tiles owned by a treaty partner or tiles holding a partner's army; the first step of a 2-step path may not hold a hostile army or a hostile city (its garrison blocks the way).
 A stack can be split with several move orders (the total per unit type can't exceed what is there). Moving onto unowned land does **not** claim it.
 
 **Combat power** of side X against side Y:
@@ -201,11 +207,12 @@ A stack can be split with several move orders (the total per unit type can't exc
 * terrain = ×{C.TERRAIN_DEFENSE_BONUS} for a side that started the turn on a forest/hills tile it still occupies (defender).
 * walls (city owner defending its city only) = 1 + {C.WALL_BONUS_PER_LEVEL}·max(0, L − siege_count/{C.SIEGE_PER_WALL_LEVEL}) where L = wall level, siege_count = attacking siege units. Each {C.SIEGE_PER_WALL_LEVEL} siege cancel one wall level.
 * Siege units count ×{C.SIEGE_CITY_ATTACK} strength when attacking a city.
-* **Garrison**: every city has an intrinsic garrison of {C.GARRISON_CITY} strength ({C.GARRISON_CAPITAL} for an original capital) on its owner's side (multiplied by walls and terrain). An undefended city still fights.
+* **Garrison**: every city has an intrinsic garrison of {C.GARRISON_CITY} strength ({C.GARRISON_CAPITAL} for an original capital) on its owner's side (multiplied by walls and terrain). An undefended city still fights — the starting army ({_cost(C.START_UNITS)}) cannot take an undefended capital.
 
 **Battle procedure** (deterministic):
 
 1. *Border clash*: if your units move X→Y while hostile units move Y→X, the two moving groups fight first (no terrain, walls or garrison; ties destroy both). Survivors continue.
+   First steps clash first; then crossings that involve the second step of a cavalry move (cavalry can't slip past a stack coming the other way).
 2. All moves land. On each tile with hostile sides, sides are sorted by raw power (Σ count·strength, + garrison) ascending; the weakest side fights the weakest side hostile to it; the winner (with losses) re-enters the queue; repeat until no hostile pairs remain.
    Ties: the defender (a side that was on the tile at the start of the turn, or the city owner) wins; otherwise both are destroyed.
 3. Duel with powers Pw > Pl: the loser is destroyed; the winner loses round(count · (1 − sqrt(1 − (Pl/Pw)²))) of each unit type (Lanchester square law):
@@ -216,10 +223,15 @@ A stack can be split with several move orders (the total per unit type can't exc
         rows.append([f"{ratio:g}", f"{frac * 100:.0f}%", lanchester_losses({"infantry": 10}, ratio, 1.0).get("infantry", 0)])
     add(_table(["Pl/Pw", "winner loses", "of 10 units"], rows))
     add(f"""
-4. **Capture**: after the battles, if every unit on a tile belongs to one player and the tile is owned by a player hostile to them, the tile changes owner.
+4. **Capture**: after the battles all units left on a tile belong to players at peace with each other. If the tile is owned by a player hostile to (some of) them
+   and the owner has no units there, it goes to the one of them hostile to the owner with the largest military power (ties: lowest seat) — so allies attacking together can capture.
    A city is captured only if its garrison was defeated. On city capture: walls drop one level; the victim's tiles in radius 1 (without other players' units) transfer;
    a wonder there is destroyed; and if it was the victim's **original capital**, the captor plunders {_pct(C.PLUNDER_FRACTION)} of the victim's food, wood, stone and gold.
-   Relic tiles are captured like any tile.
+   Relic tiles are never handed over with a city.
+
+**Relics** are taken only by **occupation**: when, after the battles, the relic's owner has no units on it and some player with units there is hostile to the owner (or the relic is unowned), the capturer chosen as above becomes its owner (`tile_captured` event with `"relic": true`).
+An owned relic yields {C.RELIC_INFLUENCE} influence per turn and {C.SCORE_WEIGHTS['relics_held']} score, even when nobody stands on it; but it only counts for the relic victory while it is **guarded** — its owner has units on it at the end of the turn (`map.relics[].guarded`, `players[].relics_guarded`).
+Units left on a relic keep it; a hostile army that beats them (or walks onto an unguarded relic) takes it and resets the owner's streak.
 
 **Disband** `{{"type":"disband","at":[x,y],"units":{{...}}}}` removes your units (no refund) — useful to cut upkeep.
 
@@ -229,6 +241,7 @@ A stack can be split with several move orders (the total per unit type can't exc
   (pending proposals to you are in `treaty_proposals`). A treaty signed on turn t with `turns` k lasts until the end of turn t+k (`until_turn`).
   While active the two players cannot move onto each other's tiles or armies and never fight.
   `break_treaty {{with}}` ends it immediately, costs {C.TREATY_BREAK_COST} influence and increments your public `betrayals` counter; movement restrictions still apply during that turn and lift on the next.
+  If both partners order `break_treaty` in the same turn, both pay and both get a betrayal.
 * **Trades**: `offer_trade {{to, give, want}}` (tradable: {", ".join(C.TRADABLE)}). The recipient sees it next turn in `trade_offers` and may `accept_trade {{offer_id}}` until `expires_turn`
   (offers last {C.TRADE_OFFER_TTL} turns). It executes only if both sides can pay at that moment. Offers are private to the two parties.
 * **Messages**: `message {{to: "p2" | "all", text}}` (≤ {C.MAX_MESSAGE_LENGTH} chars, ≤ {C.MAX_MESSAGES_PER_TURN} per turn). Private messages are visible only to sender and recipient; they arrive next turn.
@@ -240,10 +253,10 @@ The game ends at the end of the turn in which a player meets any condition, or a
 If several players meet a condition on the same turn, the one with the highest score wins.
 """)
     add(_table(["condition", "requirement"], [
-        ["conquest", f"own ≥ ceil(n/2) original capitals (all of them if n ≤ {C.CONQUEST_SMALL_GAME}; your own counts), or be the last player standing"],
+        ["conquest", f"own ≥ floor(n/2)+1 original capitals (a majority) (all of them if n ≤ {C.CONQUEST_SMALL_GAME}; your own counts), or be the last player standing"],
         ["wonder", f"complete wonder stage {C.WONDER_VICTORY_STAGE}"],
         ["influence", f"influence ≥ {C.INFLUENCE_VICTORY}"],
-        ["relics", f"own ≥ floor(R/2)+1 relic tiles at {C.RELIC_VICTORY_TURNS} consecutive turn ends"],
+        ["relics", f"own and **guard** (have units on) ≥ ceil(R/2) relic tiles (a majority if R < {C.RELIC_HALF_MIN}) at {C.RELIC_VICTORY_TURNS} consecutive turn ends"],
         ["economic", f"gold ≥ {C.ECONOMIC_VICTORY_GOLD}"],
         ["score", "highest score when max_turns is reached"],
     ]))
@@ -289,11 +302,12 @@ and again when executed (e.g. resources are only checked then) — execution fai
 
 * `turn`, `max_turns`, `status`, `deadline`, `season` {{name, turns_left, modifiers, next}}.
 * `you`: resources, caps, income, upkeep, claim_cost, settle_cost, market_fee, capital.
-* `players[]`: public stats of everyone (resources, income, cities, tiles, units, military_power, wonder_stage, relics_held, relic_streak, betrayals, score, victory_progress, submitted).
-* `map`: width, height, terrain rows, owner grid, improvements, deposits, relics.
+* `players[]`: public stats of everyone (resources, income, cities, tiles, units, military_power, wonder_stage, relics_held, relics_guarded, relic_streak, betrayals, score, victory_progress, submitted).
+* `map`: width, height, terrain rows, owner grid, improvements, deposits, relics (`{{x, y, owner, guarded}}`).
 * `cities[]` (walls, warehouse, market_hall, wonder_stage, garrison), `armies[]` ({{x, y, owner, units}}).
 * `market`: fee, prices, pools, history (last {C.MARKET_HISTORY_TURNS} turns).
 * `treaties`, `treaty_proposals` (to/from you), `trade_offers` (to/from you), `messages` (public + yours, last {C.MESSAGES_IN_VIEW}), `events` (last turn).
+  The token-less spectator view of a running game shows only public messages and events (no offers or proposals); private diplomacy is revealed when the game ends.
 * `victory`: thresholds and, when finished, the result. `costs`: all rule constants.
 
 ## 13. Strategy hints
@@ -301,7 +315,8 @@ and again when executed (e.g. resources are only checked then) — execution fai
 * **Economy first.** Early claims and improvements compound: improvements pay for themselves within ~15–20 turns, so build them early. Keep influence flowing for claims (temples, relics).
 * **Plan for winter** (food ×{C.SEASONS[3][1]['food']:g}): stockpile food in summer, don't overbuild armies you can't feed, and remember the storage cap — spend or build a warehouse instead of wasting overflow.
 * **Use the market both ways.** Sell what you overproduce, buy bottlenecks (stone for walls/wonder). Limits protect you from bad prices; the price is shared, so a crowd buying the same thing gets expensive.
-* **Watch victory_progress** of every player. Wonder, influence and economic wins can be raced; conquest, relics and wonders can be stopped by force (capturing a wonder city destroys it).
+* **Watch victory_progress** of every player. Wonder, influence and economic wins can be raced; conquest, relics and wonders can be stopped by force (capturing a wonder city destroys it, taking a guarded relic resets the relic streak, capturing an original capital plunders half of its owner's gold). A relic streak takes {C.RELIC_VICTORY_TURNS} turns: there is time to answer it — but not through a treaty partner's land.
+* **Every victory takes a long game**: roughly 70–110 turns for a well-played peaceful race ({C.ECONOMIC_VICTORY_GOLD} gold, {C.INFLUENCE_VICTORY} influence or a {_cost(tot)} wonder). Invest early, then switch to your path.
 * **Defence is efficient.** Garrison + walls + terrain + archers make cities expensive to take; siege engines cancel walls. Attack with counters (infantry vs cavalry, cavalry vs archers, archers vs infantry) and with overwhelming force — Lanchester losses make lopsided fights cheap for the winner.
 * **Diplomacy** lets you secure a border while you race elsewhere. Treaties are enforced by the engine; breaking one costs influence and your reputation (`betrayals` is public).
 * **Always submit** every turn — missing a deadline means doing nothing.

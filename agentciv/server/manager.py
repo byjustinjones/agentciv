@@ -24,6 +24,7 @@ import re
 import secrets
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 
 from ..bots import REGISTRY as BOT_REGISTRY
@@ -31,6 +32,8 @@ from ..bots import get_bot
 from ..bots.base import Bot, IdleBot
 from ..engine import Game, GameConfig
 from ..engine import constants as C
+from .guide import order_hint
+from .replay import ArchivedReplay, FrameStore, envelope, slice_full_replay
 from .storage import Storage
 
 log = logging.getLogger("agentciv.server")
@@ -42,6 +45,22 @@ DEFAULT_QUICKMATCH_LOBBY = 30.0  # quickmatch lobbies fill with bots after this 
 SPECTATOR_BOT_DELAY = 0.5        # pacing of games without living remote players
 DEFAULT_FILL_BOTS = ["strategist", "economist", "rusher", "turtle", "random"]
 BOT_SLOW_WARN = 5.0
+ERROR_GRACE = 2.0                # after a submission with rejected orders, wait this long for a fix
+ARCHIVE_CACHE_SIZE = 8           # parsed replay files kept in memory (compact frames)
+
+# Ratings: only games played under standard, server-controlled conditions feed the leaderboard.
+MAX_RATED_TURN_TIMEOUT = 300.0   # rated games need a real deadline, so a losing player can't stall forever
+UNRATED_BOTS = frozenset({"idle", "random"})  # creator-picked baseline bots make a game unrated
+
+# Resource limits (attributes of GameManager, so embedders and tests can change them).
+MAX_LIVE_GAMES = 200             # lobbies + running games in memory; creation beyond this -> 503
+MAX_OPEN_LOBBIES = 50            # unstarted lobbies; creation beyond this -> 503
+LOBBY_MAX_AGE = 3600.0           # an unstarted lobby is closed after this many seconds
+FINISHED_KEEP = 16               # finished sessions kept in memory (then served from the replay file)
+FINISHED_TTL = 300.0             # ... for at most this many seconds after finishing
+BOT_ONLY_SLOTS = 2               # bot-only games whose house bots may think at the same time
+RETIRED_TOKENS = 100_000         # tokens of evicted games still recognised (so late calls get 409, not 401)
+MAX_GAMES_LISTED = 100           # default number of games in GET /api/games (all live ones + recent archived)
 
 
 class ApiError(Exception):
@@ -109,6 +128,8 @@ def _number(body: dict, key: str, default, lo: float, hi: float, integer: bool =
                 raise ApiError(400, f"{key} must be a number") from None
         else:
             raise ApiError(400, f"{key} must be a number")
+    if isinstance(v, int) and abs(v) > 2 ** 63:  # math.isfinite() overflows on huge ints
+        raise ApiError(400, f"{key} is out of range")
     if not math.isfinite(v):
         raise ApiError(400, f"{key} must be finite")
     if integer:
@@ -173,6 +194,7 @@ def parse_game_options(body: dict) -> dict:
             raise ApiError(400, "name must be a string")
         name = " ".join(name.split())[:80] or None
     seed = body.get("seed")
+    seed_given = seed is not None
     if seed is None:
         seed = random.randrange(1, 2 ** 31)
     else:
@@ -192,7 +214,36 @@ def parse_game_options(body: dict) -> dict:
         "turn_delay": None if turn_delay is None else float(turn_delay),
         "rated": _bool(body, "rated", True),
         "quickmatch": False,
+        "seed_given": seed_given,
     }
+
+
+def unrated_reason(opts: dict) -> str | None:
+    """Why a game can't be rated (None = it can). Rated games must be played
+    under standard conditions nobody can tailor: a server-chosen seed, the
+    full turn limit, a real deadline, and no creator-picked baseline bots."""
+    if not opts.get("rated", True):
+        return "created with rated: false"
+    if opts.get("seed_given"):
+        return "custom seed"
+    if opts["max_turns"] < C.DEFAULT_MAX_TURNS:
+        return f"max_turns below {C.DEFAULT_MAX_TURNS}"
+    if not 0 < opts["turn_timeout"] <= MAX_RATED_TURN_TIMEOUT:
+        return f"turn_timeout must be between 0 (exclusive) and {MAX_RATED_TURN_TIMEOUT:g} s"
+    weak = sorted(set(opts.get("bots") or []) & UNRATED_BOTS)
+    if weak:
+        return "house bots " + ", ".join(weak)
+    return None
+
+
+def _player_key(body: dict):
+    """Optional name key (registers the name / proves ownership of it)."""
+    key = body.get("key")
+    if key is None:
+        return None
+    if not isinstance(key, str) or not 8 <= len(key) <= 200:
+        raise ApiError(400, "key must be a string of 8-200 characters")
+    return key
 
 
 # ---------------------------------------------------------------- sessions
@@ -205,6 +256,9 @@ class Seat:
     token: str | None = None
     bot: Bot | None = field(default=None, repr=False)
     bot_errors: int = 0
+    draft: bool = False              # submitted with "ready": false — don't resolve the turn for them yet
+    error_at: float | None = None    # monotonic time of this turn's last submission with rejected orders
+    verified: bool = False           # joined with the key of a registered name
 
 
 class GameSession:
@@ -222,11 +276,14 @@ class GameSession:
         self.game = Game(GameConfig(seed=opts["seed"], max_turns=opts["max_turns"], game_id=game_id,
                                     name=self.name, max_players=opts["max_players"]))
         self.seats: dict[str, Seat] = {}
-        self.frames: list[bytes] | None = []
+        self.frames: FrameStore | None = FrameStore()  # zlib-compressed, freed once saved to disk
         self.saved = False
         self.error: str | None = None
         self.version = 0
-        self._spec_cache: tuple[int, bytes] = (-1, b"")
+        self.creator_token: str | None = None   # returned by POST /api/games; may start the lobby
+        self.closed = False                     # an unstarted lobby closed by the manager (too old)
+        self.finished_mono: float | None = None
+        self._spec_cache: tuple[int, bytes, bytes] = (-1, b"", b"")
         self._player_cache: dict[str, tuple[int, bytes]] = {}
         self._turn_started = 0.0
         self._deadline_mono: float | None = None
@@ -267,18 +324,29 @@ class GameSession:
         return f"{bot_name}#{k}"
 
     def _add_bot(self, bot_name: str) -> Seat:
-        index = len(self.seats)
-        seed = (int(self.opts["seed"]) * 7919 + index * 104729 + 17) % (2 ** 31)
-        bot, actual = make_bot(bot_name, seed)
-        pid = self.game.add_player(self._unique_bot_name(actual))
+        # A secret per-bot seed: deriving it from the published game seed let players re-run a house
+        # bot on its (reconstructible) view and predict its exact orders before submitting their own.
+        bot, actual = make_bot(bot_name, secrets.randbits(31))
+        pid = self._add_player(self._unique_bot_name(actual))
         seat = Seat(pid, self.game.player(pid).name, True, actual, None, bot)
         self.seats[pid] = seat
         self._touch()
         return seat
 
-    def join(self, name: str) -> Seat:
+    def _add_player(self, name: str) -> str:
+        pid = self.game.add_player(name)
+        # Defensive: the engine caches derived stats; make sure a lobby view built after a join
+        # includes the new player (a stale cache made spectator views raise KeyError).
+        if getattr(self.game, "_stats", None) is not None:
+            self.game._stats = None
+        return pid
+
+    def join(self, name: str, key: str | None = None) -> Seat:
         name = validate_player_name(name)
+        verified = self.manager.check_name(name, key)
         with self.cond:
+            if self.closed:
+                raise ApiError(409, f"lobby {self.game_id} was closed")
             if self.status != "lobby":
                 raise ApiError(409, f"game {self.game_id} has already started" if self.status == "running"
                                else f"game {self.game_id} is finished")
@@ -286,8 +354,8 @@ class GameSession:
                 raise ApiError(409, f"game {self.game_id} is full")
             if any(s.name.lower() == name.lower() for s in self.seats.values()):
                 raise ApiError(409, f"name {name!r} is already taken in this game")
-            pid = self.game.add_player(name)
-            seat = Seat(pid, name, False, None, secrets.token_urlsafe(24))
+            pid = self._add_player(name)
+            seat = Seat(pid, name, False, None, secrets.token_urlsafe(24), verified=verified)
             self.seats[pid] = seat
             self.manager._register_token(seat.token, self.game_id, pid)
             self._touch()
@@ -296,14 +364,22 @@ class GameSession:
             return seat
 
     # ------------------------------------------------------------ lifecycle
-    def start(self) -> bool:
+    def start(self, authorized: bool = True) -> bool:
         """Start the game now (``POST /start``). Returns False if it had
-        already started (idempotent), raises ApiError if it can't start."""
+        already started (idempotent), raises ApiError if it can't start.
+        Once a remote player is seated, only a seated player or the creator
+        (``authorized``) may start it: otherwise anyone could start somebody
+        else's lobby early and shut other players out."""
         with self.cond:
             if self.status != "lobby":
                 if self.status == "finished":
                     raise ApiError(409, "game is finished")
                 return False
+            if self.closed:
+                raise ApiError(409, f"lobby {self.game_id} was closed")
+            if not authorized and any(not s.is_bot for s in self.seats.values()):
+                raise ApiError(403, "only a seated player (their token) or the game's creator (the creator_token "
+                                    "from POST /api/games) can start a lobby that remote players have joined")
             self._start(explicit=True)
             return True
 
@@ -337,11 +413,14 @@ class GameSession:
             self.game.deadline = None
         alive = set(self.game.alive_players())
         self._bots_done = not any(s.is_bot and s.pid in alive for s in self.seats.values())
+        for s in self.seats.values():
+            s.draft, s.error_at = False, None
         self._touch()
 
     def _record_frame(self) -> None:
         if self.frames is not None:
-            self.frames.append(self._spectator_bytes())
+            full, public = self._spectator_pair()
+            self.frames.append(full, public)
 
     def _living_remote(self) -> list[Seat]:
         alive = set(self.game.alive_players())
@@ -360,7 +439,11 @@ class GameSession:
         now = time.monotonic()
         earliest = self._turn_started + self._turn_delay()
         remote = self._living_remote()
-        if all(self.game.has_submitted(s.pid) for s in remote):
+        if all(self.game.has_submitted(s.pid) and not s.draft for s in remote):
+            # a player whose orders were just rejected gets a moment to resubmit a fixed list
+            grace = [s.error_at + ERROR_GRACE for s in remote if s.error_at is not None]
+            if grace:
+                earliest = max(earliest, min(max(grace), self._deadline_mono or math.inf))
             return earliest - now
         if self._deadline_mono is not None:
             return max(self._deadline_mono, earliest) - now
@@ -390,15 +473,18 @@ class GameSession:
             self._begin_turn()
         else:
             self.game.deadline = None
+            self.finished_mono = time.monotonic()
             self._touch()
             log.info("game %s finished: %s", self.game_id, self.game.result)
         self._record_frame()
 
     # ------------------------------------------------------------ worker
     def _run(self) -> None:
-        while not self.manager.stopping:
+        while not self.manager.stopping and not self.closed:
             jobs = None
             with self.cond:
+                if self.closed:
+                    break
                 if self.status == "lobby":
                     wait = self._lobby_wait()
                     if self.status == "lobby":
@@ -411,6 +497,7 @@ class GameSession:
                     alive = set(self.game.alive_players())
                     jobs = [(s, self.game.player_view(s.pid)) for s in self.seats.values()
                             if s.is_bot and s.pid in alive]
+                    bot_only = not self._living_remote()
                 else:
                     wait = self._seconds_until_ready()
                     if wait <= 0:
@@ -418,8 +505,13 @@ class GameSession:
                         continue
                     self.cond.wait(min(wait, 1.0))
                     continue
-            # house bots think outside the lock so state requests stay fast
-            results = [(seat, self._bot_orders(seat, view)) for seat, view in jobs]
+            # house bots think outside the lock so state requests stay fast; bot-only games share a
+            # few compute slots so a pile of them can't starve the API and games with remote players
+            if bot_only:
+                with self.manager.bot_slots:
+                    results = [(seat, self._bot_orders(seat, view)) for seat, view in jobs]
+            else:
+                results = [(seat, self._bot_orders(seat, view)) for seat, view in jobs]
             with self.cond:
                 if self.game.turn == turn and self.status == "running":
                     for seat, orders in results:
@@ -431,6 +523,7 @@ class GameSession:
                 self._touch()
         if self.status == "finished" and not self.manager.stopping:
             self._finalize()
+            self.manager._retire(self)
 
     def _bot_orders(self, seat: Seat, view: dict) -> list:
         t0 = time.monotonic()
@@ -451,10 +544,12 @@ class GameSession:
 
     def _finalize(self) -> None:
         with self.cond:
-            frames = list(self.frames or [])
+            frames = self.frames.all_full() if self.frames is not None else []
             summary = self.summary()
             result = self.game.result
-            names = {pid: s for pid, s in self.seats.items()}
+            ranked = self._rated_entries()
+            for seat in self.seats.values():
+                seat.bot = None  # free the house bots (and their caches) now
         try:
             self.manager.storage.save_replay(self.game_id, summary, result, frames)
             with self.cond:
@@ -462,22 +557,55 @@ class GameSession:
                 self.frames = None  # served from disk from now on
         except OSError:
             log.exception("game %s: could not save replay", self.game_id)
-        if self.opts["rated"] and result and self.error is None and len(names) >= 2:
-            ordered = []
-            for pid in result.get("placements", []):
-                seat = names.get(pid)
-                if seat is not None:
-                    ordered.append(seat.bot_name if seat.is_bot else seat.name)
+        if ranked:
             try:
-                self.manager.storage.record_result(ordered)
+                self.manager.storage.record_result([n for n, _ in ranked], [r for _, r in ranked])
             except OSError:
                 log.exception("game %s: could not update leaderboard", self.game_id)
 
+    def _rated_entries(self) -> list[tuple[str, int]] | None:
+        """(rating name, rank) per seat in placement order, or None when the
+        game doesn't count. Players tied on score (same alive state and
+        elimination turn) share a rank, so the engine's seat-order tie-break
+        never decides ratings; a winner by a victory condition ranks alone."""
+        result = self.game.result
+        if not self.opts["rated"] or not result or self.error is not None or len(self.seats) < 2:
+            return None
+        if not self.manager.open_ratings and all(s.is_bot for s in self.seats.values()):
+            return None  # bot-only games don't move the leaderboard
+        scores = result.get("scores") or {}
+        out: list[tuple[str, int]] = []
+        prev, rank = None, 0
+        for i, pid in enumerate(result.get("placements", [])):
+            seat, p = self.seats.get(pid), self.game.player(pid)
+            key = (bool(p and p.alive), getattr(p, "eliminated_turn", None), scores.get(pid))
+            if i == 0 or key != prev or (i == 1 and result.get("condition") != "score"):
+                rank = i + 1
+            prev = key
+            if seat is not None:
+                out.append((seat.bot_name if seat.is_bot else seat.name, rank))
+        return out
+
     # ------------------------------------------------------------ views
-    def _spectator_bytes(self) -> bytes:
+    def _spectator_pair(self) -> tuple[bytes, bytes]:
+        """(full, public) spectator view bytes for the current version. The
+        public view is what live spectators get: no private messages, trade
+        offers, treaty proposals or private events until the game is over
+        (anyone can drop their token and spectate). Equal once finished."""
         if self._spec_cache[0] != self.version:
-            self._spec_cache = (self.version, _dumps(self.game.spectator_view()))
-        return self._spec_cache[1]
+            g = self.game
+            full = _dumps(g.spectator_view(full=True))
+            public = full
+            if g.status != "finished":
+                public = _dumps(g.spectator_view())  # the engine's public spectator view
+                if public == full:
+                    public = full
+            self._spec_cache = (self.version, full, public)
+        return self._spec_cache[1], self._spec_cache[2]
+
+    def _spectator_bytes(self) -> bytes:
+        """What a spectator may see right now (the public view while running)."""
+        return self._spectator_pair()[1]
 
     def state_bytes(self, pid: str | None = None) -> bytes:
         with self.cond:
@@ -489,15 +617,22 @@ class GameSession:
                 self._player_cache[pid] = cached
             return cached[1]
 
-    def replay_bytes(self) -> bytes:
+    def replay_bytes(self, compact: bool = False, lo: int | None = None, hi: int | None = None) -> bytes:
+        """The replay (docs/DESIGN.md §12); ``lo``/``hi`` select an inclusive
+        frame range, ``compact`` the lighter format of :mod:`.replay`."""
         with self.cond:
-            if self.frames is not None:
-                head = _dumps({"game_id": self.game_id, "summary": self.summary(), "result": self.game.result})
-                return head[:-1] + b',"frames":[' + b",".join(self.frames) + b"]}"
-        data = self.manager.storage.read_replay(self.game_id)
-        if data is None:
-            raise ApiError(404, "replay file is missing")
-        return data
+            fs = self.frames
+            if fs is not None:
+                summary, result = self.summary(), self.game.result
+                public = self.status != "finished"  # private diplomacy is revealed once the game is over
+                if compact:
+                    return envelope(self.game_id, summary, result, fs.compact(lo, hi, public=public),
+                                    compact=True, static=fs.static, total=len(fs), lo=max(0, lo or 0))
+                if lo is None and hi is None:
+                    return envelope(self.game_id, summary, result, fs.full(public=public))
+                return envelope(self.game_id, summary, result, fs.full(lo, hi, public=public), total=len(fs),
+                                lo=max(0, lo or 0))
+        return self.manager.archived_replay_bytes(self.game_id, compact, lo, hi)
 
     def summary(self) -> dict:
         with self.cond:
@@ -505,7 +640,8 @@ class GameSession:
             players = []
             for pid, s in self.seats.items():
                 p = g.player(pid)
-                entry = {"id": pid, "name": s.name, "is_bot": s.is_bot, "alive": bool(p and p.alive)}
+                entry = {"id": pid, "name": s.name, "is_bot": s.is_bot, "alive": bool(p and p.alive),
+                         "submitted": bool(g.status == "running" and g.has_submitted(pid))}
                 if s.is_bot:
                     entry["bot"] = s.bot_name
                 players.append(entry)
@@ -525,8 +661,10 @@ class GameSession:
                 "lobby_timeout": self.opts["lobby_timeout"],
                 "quickmatch": self.opts["quickmatch"],
                 "rated": self.opts["rated"],
+                "unrated_reason": self.opts.get("unrated_reason"),
                 "deadline": g.deadline,
                 "result": dict(g.result) if g.result else None,
+                "frames": len(self.frames) if self.frames is not None else g.turn + 1,
             }
             if self.error:
                 out["error"] = self.error
@@ -534,10 +672,12 @@ class GameSession:
 
     # ------------------------------------------------------------ player actions
     def submit(self, pid: str, body) -> dict:
+        ready = True
         if isinstance(body, list):
             orders, turn = body, None
         elif isinstance(body, dict):
             orders, turn = body.get("orders"), body.get("turn")
+            ready = _bool(body, "ready", True)
         else:
             raise ApiError(400, "body must be {\"turn\": T, \"orders\": [...]}")
         if orders is None:
@@ -559,10 +699,26 @@ class GameSession:
             if p is None or not p.alive:
                 raise ApiError(409, "you have been eliminated", turn=g.turn, status=g.status)
             errors = g.submit_orders(pid, orders)
+            seat = self.seats.get(pid)
+            if seat is not None:
+                seat.draft = not ready
+                seat.error_at = time.monotonic() if errors else None
             self._touch()
+            for e in errors:  # make every rejection actionable: echo a correctly shaped example
+                i = e.get("index", -1)
+                if isinstance(i, int) and 0 <= i < len(orders):
+                    for k, v in order_hint(orders[i]).items():
+                        e.setdefault(k, v)
             bad = sum(1 for e in errors if e.get("index", -1) >= 0)
             accepted = 0 if any(e.get("index", -1) < 0 for e in errors) else len(orders) - bad
-            return {"accepted": max(0, accepted), "errors": errors, "turn": g.turn, "deadline": g.deadline}
+            out = {"accepted": max(0, accepted), "errors": errors, "turn": g.turn, "deadline": g.deadline,
+                   "ready": ready}
+            if errors:
+                out["note"] = (f"Rejected orders were dropped; the rest stand. Resubmit the whole corrected list "
+                               f"(it replaces this one) — the turn waits up to {ERROR_GRACE:g}s for a fix. "
+                               "To hold the turn open longer, submit with \"ready\": false and then "
+                               "resubmit with \"ready\": true (the deadline still applies).")
+            return out
 
     def wait(self, since_turn: int | None, timeout: float) -> dict:
         end = time.monotonic() + timeout
@@ -583,7 +739,10 @@ class GameSession:
                     "timed_out": timed_out}
 
     def _stream_key(self) -> tuple:
-        return (self.game.status, self.game.turn, len(self.seats))
+        # remote players' submissions are part of the key so spectators see "submitted" live
+        subs = tuple(pid for pid, s in self.seats.items()
+                     if not s.is_bot and self.game.status == "running" and self.game.has_submitted(pid))
+        return (self.game.status, self.game.turn, len(self.seats), subs)
 
     def next_frame(self, last_key, timeout: float):
         """Block until the spectator-visible state changes (turn, status or
@@ -604,33 +763,26 @@ class GameSession:
 
 
 class ArchivedGame:
-    """A finished game known only from its replay file (after a restart)."""
+    """A finished game known only from its replay file (after a restart, or
+    once its live session was evicted from memory)."""
+
+    creator_token = None
 
     def __init__(self, manager: "GameManager", game_id: str, summary: dict):
         self.manager = manager
         self.game_id = game_id
         self._summary = summary
-        self._last_frame: bytes | None = None
 
     status = "finished"
 
     def summary(self) -> dict:
         return dict(self._summary)
 
-    def replay_bytes(self) -> bytes:
-        data = self.manager.storage.read_replay(self.game_id)
-        if data is None:
-            raise ApiError(404, "replay file is missing")
-        return data
+    def replay_bytes(self, compact: bool = False, lo: int | None = None, hi: int | None = None) -> bytes:
+        return self.manager.archived_replay_bytes(self.game_id, compact, lo, hi)
 
     def state_bytes(self, pid: str | None = None) -> bytes:
-        if self._last_frame is None:
-            try:
-                frames = json.loads(self.replay_bytes()).get("frames") or []
-            except ValueError:
-                raise ApiError(500, "replay file is corrupt") from None
-            self._last_frame = _dumps(frames[-1]) if frames else _dumps(self._summary)
-        return self._last_frame
+        return self.manager.archive(self.game_id).last_frame or _dumps(self._summary)
 
     def wait(self, since_turn, timeout) -> dict:
         return {"turn": self._summary.get("turn", 0), "status": "finished", "deadline": None, "timed_out": False}
@@ -638,10 +790,10 @@ class ArchivedGame:
     def next_frame(self, last_key, timeout):
         return ("finished",), self.state_bytes(), True
 
-    def join(self, name):
+    def join(self, name, key=None):
         raise ApiError(409, "game is finished")
 
-    def start(self):
+    def start(self, authorized: bool = True):
         raise ApiError(409, "game is finished")
 
     def submit(self, pid, body):
@@ -649,18 +801,34 @@ class ArchivedGame:
 
 
 class GameManager:
-    """All games, tokens and persistence. Thread-safe."""
+    """All games, tokens and persistence. Thread-safe.
 
-    def __init__(self, data_dir: str = "data"):
+    ``open_ratings=True`` rates every game created with ``rated: true``
+    (handy for private servers and tests); by default only games played
+    under standard conditions count (see :func:`unrated_reason`)."""
+
+    def __init__(self, data_dir: str = "data", open_ratings: bool = False):
         self.storage = Storage(data_dir)
+        self.open_ratings = open_ratings
         self.lock = threading.RLock()
+        self._qm_lock = threading.Lock()  # quickmatch lobby choice; never held with self.lock
         self.sessions: dict[str, GameSession] = {}
         self.tokens: dict[str, tuple[str, str]] = {}
+        self._retired_tokens: OrderedDict[str, tuple[str, str]] = OrderedDict()
         self._token_lock = threading.Lock()
+        self._finished: OrderedDict[str, GameSession] = OrderedDict()  # finished + saved, still in memory
         self.stopping = False
-        numbers = [int(g[1:]) for g in self.storage.archived() if re.fullmatch(r"g\d+", g)]
+        self._archives: OrderedDict[str, ArchivedReplay] = OrderedDict()
+        self._archive_lock = threading.Lock()
+        numbers = [int(g[1:]) for g in self.storage.archived_ids() if re.fullmatch(r"g\d+", g)]
         self._counter = max(numbers, default=0)
         self._quickmatch_counter = 0
+        self.max_live_games = MAX_LIVE_GAMES
+        self.max_open_lobbies = MAX_OPEN_LOBBIES
+        self.lobby_max_age = LOBBY_MAX_AGE
+        self.finished_keep = FINISHED_KEEP
+        self.finished_ttl = FINISHED_TTL
+        self.bot_slots = threading.BoundedSemaphore(BOT_ONLY_SLOTS)
 
     # ------------------------------------------------------------ registry
     def _next_id(self) -> str:
@@ -677,74 +845,216 @@ class GameManager:
         if not token:
             return None
         with self._token_lock:
-            return self.tokens.get(token)
+            return self.tokens.get(token) or self._retired_tokens.get(token)
+
+    def check_name(self, name: str, key: str | None) -> bool:
+        """Enforce registered names (see Storage.check_name); True = key-verified seat."""
+        try:
+            return self.storage.check_name(name, key)
+        except ValueError:
+            raise ApiError(403, f"name {name!r} is registered: join with its key (\"key\": ...), or pick "
+                                "another name") from None
 
     def get(self, game_id: str):
         with self.lock:
             s = self.sessions.get(game_id)
         if s is not None:
             return s
-        summary = self.storage.archived().get(game_id)
+        summary = self.storage.summary(game_id)
         if summary is not None:
             return ArchivedGame(self, game_id, summary)
         raise ApiError(404, f"no game {game_id!r}")
 
-    def list_games(self) -> list[dict]:
+    def list_games(self, limit: int | None = None) -> list[dict]:
+        """Every live game plus the most recent archived ones (``limit`` in total, at least all live)."""
+        limit = MAX_GAMES_LISTED if limit is None else limit
+        self._sweep()
         with self.lock:
             live = list(self.sessions.values())
         out = [s.summary() for s in live]
         ids = {s["game_id"] for s in out}
-        out += [dict(v) for k, v in self.storage.archived().items() if k not in ids]
+        out += self.storage.recent(max(0, limit - len(out)), exclude=ids)
         out.sort(key=lambda s: s.get("created", 0), reverse=True)
         return out
+
+    # ------------------------------------------------------------ housekeeping
+    def _retire(self, session: GameSession) -> None:
+        """A finished session whose replay is saved: keep it in memory for a
+        while (player views), then serve it from the replay file."""
+        if not session.saved:
+            return  # no replay on disk: keep serving it from memory
+        with self.lock:
+            self._finished[session.game_id] = session
+        self._sweep()
+
+    def _sweep(self) -> None:
+        """Evict old finished sessions and close lobbies nobody started."""
+        now = time.monotonic()
+        evict: list[GameSession] = []
+        close: list[GameSession] = []
+        with self.lock:
+            while self._finished:
+                gid, s = next(iter(self._finished.items()))
+                if len(self._finished) > self.finished_keep or now - (s.finished_mono or now) > self.finished_ttl:
+                    self._finished.popitem(last=False)
+                    if self.sessions.get(gid) is s:
+                        del self.sessions[gid]
+                    evict.append(s)
+                else:
+                    break
+            for gid, s in list(self.sessions.items()):
+                if s.status == "lobby" and now - s._created_mono > self.lobby_max_age:
+                    del self.sessions[gid]
+                    close.append(s)
+        for s in close:
+            with s.cond:
+                if s.status == "lobby":
+                    s.closed = True
+                    s._touch()
+                    log.info("closed lobby %s (not started within %.0f s)", s.game_id, self.lobby_max_age)
+                else:  # started meanwhile: keep it
+                    with self.lock:
+                        self.sessions[s.game_id] = s
+                    continue
+            self._drop_tokens(s, retire=False)
+        for s in evict:
+            self._drop_tokens(s, retire=True)
+
+    def _drop_tokens(self, session: GameSession, retire: bool) -> None:
+        tokens = [seat.token for seat in session.seats.values() if seat.token]
+        with self._token_lock:
+            for t in tokens:
+                v = self.tokens.pop(t, None)
+                if retire and v is not None:
+                    self._retired_tokens[t] = v
+            while len(self._retired_tokens) > RETIRED_TOKENS:
+                self._retired_tokens.popitem(last=False)
 
     # ------------------------------------------------------------ creation
     def create_game(self, body: dict) -> GameSession:
         opts = parse_game_options(body)
-        return self._create(opts)
+        session, _ = self._create(opts)
+        return session
 
-    def _create(self, opts: dict) -> GameSession:
+    def _check_capacity(self) -> None:
+        self._sweep()
+        with self.lock:
+            live = [s for s in self.sessions.values() if s.status != "finished"]
+        if len(live) >= self.max_live_games:
+            raise ApiError(503, f"server busy: {len(live)} live games (max {self.max_live_games}); try again later")
+        lobbies = sum(1 for s in live if s.status == "lobby")
+        if lobbies >= self.max_open_lobbies:
+            raise ApiError(503, f"server busy: {lobbies} open lobbies (max {self.max_open_lobbies}); join one "
+                                "(GET /api/games) or try again later")
+
+    def _create(self, opts: dict, first_player: tuple[str, str | None] | None = None
+                ) -> tuple[GameSession, Seat | None]:
+        """Create and launch a session; ``first_player`` (name, key) is seated
+        before the worker starts, so a lobby with a zero timeout can't start
+        without them."""
         if self.stopping:
             raise ApiError(503, "server is shutting down")
+        self._check_capacity()
+        if self.open_ratings:
+            reason = None if opts["rated"] else "created with rated: false"
+        else:
+            reason = unrated_reason(opts)
+        opts["rated"], opts["unrated_reason"] = reason is None, reason
         gid = self._next_id()
         session = GameSession(self, gid, opts)
+        if not opts["quickmatch"]:
+            session.creator_token = secrets.token_urlsafe(24)
+        seat = session.join(*first_player) if first_player else None
         with self.lock:
             self.sessions[gid] = session
         session.launch()
         log.info("created game %s (%s)", gid, session.name)
-        return session
+        return session, seat
 
     def quickmatch(self, body: dict) -> tuple[GameSession, Seat]:
         if not isinstance(body, dict):
             raise ApiError(400, "body must be a JSON object")
         name = validate_player_name(body.get("name"))
+        key = _player_key(body)
         players = _number(body, "players", 6, 1, C.MAX_PLAYERS, integer=True)
         turn_timeout = _turn_timeout(body, 30.0)
         max_turns = _number(body, "max_turns", C.DEFAULT_MAX_TURNS, 1, 1000, integer=True)
-        lobby_timeout = _number(body, "lobby_timeout", DEFAULT_QUICKMATCH_LOBBY, 0, MAX_TIMEOUT)
+        lobby_timeout = float(_number(body, "lobby_timeout", DEFAULT_QUICKMATCH_LOBBY, 0, MAX_TIMEOUT))
         fill = _bool(body, "fill_with_bots", True)
-        with self.lock:
-            for s in self.sessions.values():
-                if (s.opts["quickmatch"] and s.status == "lobby" and s.max_players == players
-                        and s.opts["turn_timeout"] == turn_timeout and s.opts["max_turns"] == max_turns):
-                    try:
-                        return s, s.join(name)
-                    except ApiError:
-                        continue  # full, started meanwhile, or name taken: try the next lobby
-            self._quickmatch_counter += 1
+        self.check_name(name, key)  # a registered name with a wrong/missing key fails before any lobby is made
+        # Lobbies are matched on every setting that changes how the game starts or plays, so a
+        # caller asking for an odd lobby_timeout/fill can't trap the default matchmaking bucket.
+        match = (players, turn_timeout, max_turns, lobby_timeout, fill)
+        with self._qm_lock:  # one lobby choice at a time; the manager lock stays free for other requests
+            with self.lock:
+                candidates = [s for s in self.sessions.values()
+                              if s.opts["quickmatch"] and s.status == "lobby" and not s.closed
+                              and s.opts.get("match") == match]
+            for s in candidates:
+                try:
+                    return s, s.join(name, key)
+                except ApiError as e:
+                    if e.status == 403:
+                        raise
+                    continue  # full, started meanwhile, or name taken: try the next lobby
+            with self.lock:
+                self._quickmatch_counter += 1
+                n = self._quickmatch_counter
             opts = parse_game_options({
-                "name": f"Quickmatch #{self._quickmatch_counter}",
+                "name": f"Quickmatch #{n}",
                 "max_players": players, "min_players": min(2, players),
-                "turn_timeout": turn_timeout, "max_turns": max_turns,
-                "fill_with_bots": fill, "lobby_timeout": lobby_timeout or None,
+                "turn_timeout": turn_timeout, "max_turns": max_turns, "fill_with_bots": fill,
             })
+            # lobby_timeout 0 = start right away (with bots if fill_with_bots), not "never"
+            opts["lobby_timeout"] = lobby_timeout
             opts["quickmatch"] = True
-            session = self._create(opts)
-            return session, session.join(name)
+            opts["match"] = match
+            session, seat = self._create(opts, first_player=(name, key))
+            return session, seat
+
+    # ------------------------------------------------------------ replays on disk
+    def _read_replay(self, game_id: str) -> bytes:
+        data = self.storage.read_replay(game_id)
+        if data is None:
+            raise ApiError(404, "replay file is missing")
+        return data
+
+    def archive(self, game_id: str) -> ArchivedReplay:
+        """The parsed replay file of a finished game (small LRU cache)."""
+        with self._archive_lock:
+            a = self._archives.get(game_id)
+            if a is not None:
+                self._archives.move_to_end(game_id)
+                return a
+        try:
+            a = ArchivedReplay(self._read_replay(game_id))
+        except ValueError:
+            raise ApiError(500, "replay file is corrupt") from None
+        with self._archive_lock:
+            self._archives[game_id] = a
+            while len(self._archives) > ARCHIVE_CACHE_SIZE:
+                self._archives.popitem(last=False)
+        return a
+
+    def archived_replay_bytes(self, game_id: str, compact: bool, lo: int | None, hi: int | None) -> bytes:
+        if compact:
+            a = self.archive(game_id)
+            return envelope(game_id, a.summary, a.result, a.compact(lo, hi), compact=True, static=a.static,
+                            total=len(a), lo=max(0, lo or 0))
+        data = self._read_replay(game_id)
+        if lo is None and hi is None:
+            return data
+        try:
+            return slice_full_replay(data, lo, hi)
+        except ValueError:
+            raise ApiError(500, "replay file is corrupt") from None
 
     # ------------------------------------------------------------ misc
     def leaderboard(self) -> list[dict]:
-        return self.storage.leaderboard()
+        rows = self.storage.leaderboard()
+        for r in rows:  # house bots' names are reserved, so their entries are authentic too
+            r["verified"] = r["verified"] or r["name"] in BOT_REGISTRY
+        return rows
 
     def shutdown(self) -> None:
         self.stopping = True

@@ -6,7 +6,9 @@ server, e.g. for Claude Code::
 
     claude mcp add agentciv -e AGENTCIV_URL=http://localhost:8765 -- python -m agentciv.mcp_server
 
-The server URL comes from ``AGENTCIV_URL`` (default http://localhost:8765).
+The server URL comes from ``AGENTCIV_URL`` (default http://localhost:8765);
+``AGENTCIV_KEY`` (optional) is sent with join/quickmatch to register and
+protect your player name (a registered name can only be played with its key).
 The token obtained by ``join_game``/``quickmatch`` is kept in memory, so the
 agent never has to handle it.
 
@@ -104,7 +106,10 @@ TOOLS = [
                     "Returns accepted count and per-order errors to fix and resubmit. " + ORDER_HELP,
      "inputSchema": _schema({"orders": {"type": "array", "items": {"type": "object"}},
                              "turn": {"type": "integer", "description": "turn these orders are for "
-                                                                         "(default: the current turn)"}},
+                                                                         "(default: the current turn)"},
+                             "ready": {"type": "boolean", "default": True,
+                                       "description": "false = draft: keep the turn open for you until you "
+                                                      "resubmit with ready=true (the deadline still applies)"}},
                             ["orders"])},
     {"name": "wait_for_turn",
      "description": "Block until the next turn starts (after the last turn you saw) or the game ends, then "
@@ -129,6 +134,7 @@ class AgentCivMCP:
 
     def __init__(self, url: str | None = None):
         self.client = AgentCivClient(url or os.environ.get("AGENTCIV_URL", "http://localhost:8765"))
+        self.key = os.environ.get("AGENTCIV_KEY") or None  # name key (registers / proves your player name)
         self.last_turn = -1
 
     # ------------------------------------------------------------ helpers
@@ -163,12 +169,13 @@ class AgentCivMCP:
         return f"Created game {gid}. Call join_game with game_id={gid!r} to take a seat."
 
     def join_game(self, game_id: str, name: str) -> str:
-        return self._joined(self.client.join(game_id, name))
+        return self._joined(self.client.join(game_id, name, key=self.key))
 
     def quickmatch(self, name: str, players: int = 6, turn_timeout: float | None = None,
                    lobby_timeout: float | None = None) -> str:
         opts = {} if lobby_timeout is None else {"lobby_timeout": lobby_timeout}
-        return self._joined(self.client.quickmatch(name, players=players, turn_timeout=turn_timeout, **opts))
+        return self._joined(self.client.quickmatch(name, players=players, turn_timeout=turn_timeout,
+                                                   key=self.key, **opts))
 
     def start_game(self, game_id: str | None = None) -> str:
         res = self.client.start(game_id)
@@ -192,12 +199,12 @@ class AgentCivMCP:
         self._need_game()
         return ascii_map(self.client.state(), self.client.player_id)
 
-    def submit_orders(self, orders: list, turn: int | None = None) -> str:
+    def submit_orders(self, orders: list, turn: int | None = None, ready: bool = True) -> str:
         self._need_game()
         if not isinstance(orders, list):
             raise ToolError("orders must be an array of order objects")
         try:
-            res = self.client.submit_orders(orders, turn=turn)
+            res = self.client.submit_orders(orders, turn=turn, ready=bool(ready))
         except ApiError as e:
             if e.status == 409:
                 raise ToolError(f"{e.message}. Call get_state to see the current turn.") from None
@@ -207,10 +214,18 @@ class AgentCivMCP:
         for err in res["errors"]:
             idx = err.get("index", -1)
             what = json.dumps(orders[idx]) if 0 <= idx < len(orders) else ""
-            lines.append(f"  order #{idx} {what}: {err.get('error')}")
+            line = f"  order #{idx} {what}: {err.get('error')}"
+            if err.get("hint"):
+                line += f" (hint: {err['hint']})"
+            if err.get("example"):
+                line += f" — correct shape: {json.dumps(err['example'], separators=(',', ':'))}"
+            lines.append(line)
         if res["errors"]:
-            lines.append("Fix the rejected orders and resubmit the WHOLE list (resubmitting replaces it), "
+            lines.append("Fix the rejected orders and resubmit the WHOLE list now (resubmitting replaces it; "
+                         "the turn waits only ~2 s for a fix — submit with ready=false first if you need longer), "
                          "or call wait_for_turn.")
+        elif not res.get("ready", True):
+            lines.append("Draft saved (ready=false): resubmit with ready=true when done.")
         else:
             lines.append("Call wait_for_turn to wait for the turn to resolve.")
         return "\n".join(lines)
@@ -248,11 +263,13 @@ class AgentCivMCP:
                          for i, r in enumerate(rows[:50], 1))
 
     # ------------------------------------------------------------ dispatch
+    def has_tool(self, name) -> bool:
+        return isinstance(name, str) and name in {t["name"] for t in TOOLS} and callable(getattr(self, name, None))
+
     def call(self, name: str, args: dict) -> str:
-        fn = getattr(self, name, None) if name in {t["name"] for t in TOOLS} else None
-        if fn is None:
-            raise KeyError(name)
-        return fn(**args)
+        if not self.has_tool(name):
+            raise ToolError(f"unknown tool {name!r}")
+        return getattr(self, name)(**args)
 
 
 class MCPServer:
@@ -279,7 +296,11 @@ class MCPServer:
         method = msg["method"]
         msg_id = msg.get("id")
         is_notification = "id" not in msg
-        params = msg.get("params") or {}
+        params = msg.get("params")
+        if params is None:
+            params = {}
+        if not isinstance(params, dict):
+            return None if is_notification else self._error(msg_id, -32602, "params must be an object")
         try:
             if method == "initialize":
                 requested = params.get("protocolVersion")
@@ -293,6 +314,8 @@ class MCPServer:
             elif method == "tools/list":
                 result = {"tools": TOOLS}
             elif method == "tools/call":
+                if is_notification:
+                    return None  # a notification gets no reply, so never run a tool (and its side effects) for one
                 result = self._call_tool(params)
             elif method.startswith("notifications/"):
                 return None
@@ -308,10 +331,10 @@ class MCPServer:
         args = params.get("arguments") or {}
         if not isinstance(args, dict):
             return self._tool_error("arguments must be an object")
+        if not self.tools.has_tool(name):
+            return self._tool_error(f"unknown tool {name!r}")
         try:
             text = self.tools.call(name, args)
-        except KeyError:
-            return self._tool_error(f"unknown tool {name!r}")
         except TypeError as e:
             return self._tool_error(f"bad arguments for {name}: {e}")
         except ToolError as e:
@@ -321,6 +344,9 @@ class MCPServer:
         except OSError as e:
             return self._tool_error(f"cannot reach the AgentCiv server at {self.tools.client.base_url} ({e}). "
                                     f"Is it running? (python -m agentciv.server)")
+        except Exception as e:  # a failing tool is a tool result with isError, not a JSON-RPC protocol error
+            traceback.print_exc(file=sys.stderr)
+            return self._tool_error(f"{name} failed: {type(e).__name__}: {e}")
         return {"content": [{"type": "text", "text": text}], "isError": False}
 
     @staticmethod

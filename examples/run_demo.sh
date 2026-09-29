@@ -6,7 +6,7 @@ cd "$(dirname "$0")/.."
 PORT="${PORT:-8765}"
 URL="http://localhost:${PORT}"
 
-python -m agentciv.server --port "$PORT" --data-dir data &
+python -m agentciv.server --port "$PORT" --data-dir "${DATA_DIR:-data}" &
 SERVER=$!
 cleanup() { kill $(jobs -p) 2>/dev/null || true; }
 trap cleanup EXIT

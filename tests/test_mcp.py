@@ -159,3 +159,34 @@ def test_tool_schemas_are_valid_json_schema_objects():
         assert schema["type"] == "object"
         for req in schema.get("required", []):
             assert req in schema["properties"]
+
+
+def test_tool_failures_are_tool_errors_not_protocol_errors():
+    """Review finding: exceptions inside tools, non-object params, KeyErrors inside tool bodies and
+    tools/call notifications were misclassified."""
+    tools = AgentCivMCP("http://127.0.0.1:9")
+    tools.client.game_id, tools.client.player_id, tools.client.token = "g1", "p1", "t"
+    calls = []
+
+    def boom(**kw):
+        calls.append(kw)
+        raise KeyError("missing_key_in_server_reply")
+
+    tools.get_rules = boom  # a tool whose body raises KeyError
+    srv = MCPServer(tools)
+    r = srv.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                    "params": {"name": "wait_for_turn", "arguments": {"timeout": "abc"}}})
+    assert r["result"]["isError"] and "wait_for_turn" in r["result"]["content"][0]["text"]
+    r = srv.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                    "params": {"name": "get_rules", "arguments": {}}})
+    text = r["result"]["content"][0]["text"]
+    assert r["result"]["isError"] and "unknown tool" not in text and "KeyError" in text
+    r = srv.handle({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                    "params": {"name": "no_such_tool", "arguments": {}}})
+    assert r["result"]["isError"] and "unknown tool" in r["result"]["content"][0]["text"]
+    r = srv.handle({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": "x"})
+    assert r["error"]["code"] == -32602
+    calls.clear()
+    assert srv.handle({"jsonrpc": "2.0", "method": "tools/call",
+                       "params": {"name": "get_rules", "arguments": {}}}) is None
+    assert calls == []  # a notification never runs a tool

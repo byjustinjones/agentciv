@@ -7,19 +7,23 @@ proper status code. Nothing a client sends can crash the server thread.
 """
 from __future__ import annotations
 
+import gzip
 import json
 import logging
 import mimetypes
+import secrets
 import sys
 import threading
 import time
 from http import HTTPStatus
+from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from ..engine import rules_json
-from .manager import MAX_WAIT, ApiError, GameManager, available_bots
+from .guide import api_index, api_quickref_markdown
+from .manager import MAX_WAIT, ApiError, GameManager, _player_key, available_bots
 
 log = logging.getLogger("agentciv.server")
 
@@ -28,43 +32,59 @@ DEFAULT_WEB_DIR = REPO_ROOT / "web"
 RULES_MD_PATH = REPO_ROOT / "docs" / "RULES.md"
 MAX_BODY = 2 * 1024 * 1024
 SSE_KEEPALIVE = 15.0
+GZIP_MIN = 1400                  # compress JSON/text responses larger than this (if the client accepts gzip)
+GZIP_CACHE_BYTES = 48 * 1024 * 1024
+REQUEST_TIMEOUT = 30.0           # socket timeout: idle keep-alive connections and slow uploads are dropped
+MAX_CONNECTIONS = 512            # concurrent connections (one thread each); more get an immediate 503
 
-API_INDEX = {
-    "name": "AgentCiv",
-    "docs": {"rules_markdown": "/api/rules", "rules_json": "/api/rules.json",
-             "connecting": "docs/CONNECTING.md in the repository"},
-    "endpoints": [
-        "GET  /api/rules                      rules guide (markdown)",
-        "GET  /api/rules.json                 constants and cost tables",
-        "GET  /api/games                      list games",
-        "POST /api/games                      create a game {max_players, turn_timeout, bots, ...}",
-        "POST /api/quickmatch                 {name, players?} join/create a lobby -> {game_id, player_id, token}",
-        "POST /api/games/{id}/join            {name} -> {game_id, player_id, token}",
-        "POST /api/games/{id}/start           start now",
-        "GET  /api/games/{id}                 game summary",
-        "GET  /api/games/{id}/state           your view (Authorization: Bearer TOKEN) or spectator view",
-        "POST /api/games/{id}/orders          {turn, orders:[...]} -> {accepted, errors, turn}",
-        "GET  /api/games/{id}/wait            ?since_turn=T&timeout=30 long-poll until the turn advances",
-        "GET  /api/games/{id}/stream          server-sent events: spectator view each turn",
-        "GET  /api/games/{id}/replay          all frames + result",
-        "GET  /api/leaderboard                ratings",
-        "GET  /api/bots                       built-in bot names",
-    ],
-}
-
-_rules_md_cache: bytes | None = None
+_rules_md_cache: tuple[float, bytes] | None = None
 
 
 def rules_markdown() -> bytes:
-    """docs/RULES.md (regenerated from the constants if the file is missing)."""
+    """docs/RULES.md (re-read when it changes; rendered from the constants if missing)."""
     global _rules_md_cache
-    if _rules_md_cache is None:
+    try:
+        mtime = RULES_MD_PATH.stat().st_mtime
+    except OSError:
+        mtime = -1.0
+    if _rules_md_cache is None or _rules_md_cache[0] != mtime:
         try:
-            _rules_md_cache = RULES_MD_PATH.read_bytes()
+            data = RULES_MD_PATH.read_bytes()
         except OSError:
             from ..engine import rulesdoc
-            _rules_md_cache = rulesdoc.render().encode()
-    return _rules_md_cache
+            data = rulesdoc.render().encode()
+        _rules_md_cache = (mtime, data)
+    return _rules_md_cache[1]
+
+
+class _GzipCache:
+    """Small LRU of gzipped response bodies keyed by the body itself (bytes
+    hash/compare are cheap next to compression; cached view bytes are reused
+    objects, so identical bodies hit)."""
+
+    def __init__(self, limit: int = GZIP_CACHE_BYTES):
+        self.limit = limit
+        self.size = 0
+        self.items: OrderedDict[bytes, bytes] = OrderedDict()
+        self.lock = threading.Lock()
+
+    def get(self, body: bytes) -> bytes:
+        with self.lock:
+            z = self.items.get(body)
+            if z is not None:
+                self.items.move_to_end(body)
+                return z
+        z = gzip.compress(body, compresslevel=5, mtime=0)
+        cost = len(body) + len(z)
+        if cost <= self.limit // 4:
+            with self.lock:
+                if body not in self.items:
+                    self.items[body] = z
+                    self.size += cost
+                    while self.size > self.limit and self.items:
+                        k, v = self.items.popitem(last=False)
+                        self.size -= len(k) + len(v)
+        return z
 
 
 class AgentCivServer(ThreadingHTTPServer):
@@ -72,12 +92,43 @@ class AgentCivServer(ThreadingHTTPServer):
 
     daemon_threads = True
     allow_reuse_address = True
+    request_queue_size = 256  # listen backlog: bursts of spectators/agents connecting at once
 
-    def __init__(self, address, manager: GameManager, web_dir: str | Path | None = None):
+    def __init__(self, address, manager: GameManager, web_dir: str | Path | None = None,
+                 max_connections: int = MAX_CONNECTIONS):
         self.manager = manager
+        self.gzip_cache = _GzipCache()
         self.web_dir = Path(web_dir).resolve() if web_dir else DEFAULT_WEB_DIR
         self._thread: threading.Thread | None = None
+        self.max_connections = max_connections
+        self._conn_slots = threading.BoundedSemaphore(max_connections)
         super().__init__(address, Handler)
+
+    # One thread per connection, but never more than ``max_connections`` at once: a flood of idle
+    # or slow connections gets 503s instead of exhausting threads and file descriptors.
+    def process_request(self, request, client_address):
+        if not self._conn_slots.acquire(blocking=False):
+            body = b'{"error":"server busy: too many open connections; retry shortly"}'
+            try:
+                request.settimeout(1.0)
+                request.sendall(b"HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\n"
+                                b"Retry-After: 1\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\n"
+                                b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
+            except OSError:
+                pass
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._conn_slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._conn_slots.release()
 
     @property
     def url(self) -> str:
@@ -108,21 +159,25 @@ class AgentCivServer(ThreadingHTTPServer):
 
 
 def create_server(host: str = "127.0.0.1", port: int = 8765, data_dir: str = "data",
-                  web_dir: str | Path | None = None) -> AgentCivServer:
-    """Create (but don't start) a server. ``port=0`` picks a free port."""
-    return AgentCivServer((host, port), GameManager(data_dir), web_dir)
+                  web_dir: str | Path | None = None, open_ratings: bool = False) -> AgentCivServer:
+    """Create (but don't start) a server. ``port=0`` picks a free port.
+    ``open_ratings`` rates every ``rated`` game (see GameManager)."""
+    return AgentCivServer((host, port), GameManager(data_dir, open_ratings=open_ratings), web_dir)
 
 
 class Handler(BaseHTTPRequestHandler):
     server: AgentCivServer
     protocol_version = "HTTP/1.1"
     server_version = "AgentCiv/0.1"
+    timeout = REQUEST_TIMEOUT  # StreamRequestHandler applies it to the socket
 
     # ------------------------------------------------------------ plumbing
     def send_error(self, code, message=None, explain=None):
         """Protocol-level errors (bad request line, headers…) as JSON too."""
         try:
             self.close_connection = True
+            if getattr(self, "request_version", "HTTP/0.9") in ("HTTP/0.9", ""):
+                self.request_version = "HTTP/1.0"  # parsing failed before the version was known: send headers
             self._error(code, message or HTTPStatus(code).phrase)
         except Exception:
             pass
@@ -135,17 +190,27 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
         self.send_header("Access-Control-Max-Age", "86400")
+        self.send_header("Access-Control-Expose-Headers", "X-Server-Time")
 
     def _send(self, status: int, body: bytes, ctype: str = "application/json", extra: dict | None = None) -> None:
+        # path/headers/command are missing when http.server fails early (bad request line, 414…)
+        headers = getattr(self, "headers", None)
+        path = getattr(self, "path", None) or ""
+        if (headers is not None and len(body) >= GZIP_MIN and "gzip" in headers.get("Accept-Encoding", "")
+                and (ctype.startswith(("application/json", "text/")) or "javascript" in ctype)):
+            body = self.server.gzip_cache.get(body)
+            extra = {**(extra or {}), "Content-Encoding": "gzip", "Vary": "Accept-Encoding"}
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         for k, v in (extra or {}).items():
             self.send_header(k, v)
+        if path.startswith("/api"):
+            self.send_header("X-Server-Time", f"{time.time():.3f}")  # lets clients correct clock skew for deadlines
         self._cors()
         self.end_headers()
-        if self.command != "HEAD":
+        if getattr(self, "command", None) != "HEAD":
             self.wfile.write(body)
 
     def _json(self, obj, status: int = 200) -> None:
@@ -174,6 +239,8 @@ class Handler(BaseHTTPRequestHandler):
             return json.loads(raw)
         except (ValueError, UnicodeDecodeError) as e:
             raise ApiError(400, f"invalid JSON body: {e}") from None
+        except RecursionError:
+            raise ApiError(400, "invalid JSON body: nested too deeply") from None
 
     def _token(self, query: dict) -> str | None:
         auth = self.headers.get("Authorization", "")
@@ -191,13 +258,22 @@ class Handler(BaseHTTPRequestHandler):
             return None
         found = self.server.manager.resolve_token(token)
         if found is None:
-            raise ApiError(401, "invalid token")
+            raise ApiError(401, "invalid token: use the token returned by POST /api/quickmatch or "
+                                "/api/games/{id}/join (tokens do not survive a server restart)")
         if found[0] != game_id:
             raise ApiError(403, f"this token belongs to game {found[0]}, not {game_id}")
         return found[1]
 
     # ------------------------------------------------------------ dispatch
+    def _discard_body(self) -> None:
+        """A GET/HEAD/OPTIONS request with a body: its bytes must not be parsed
+        as the next request on this connection (keep-alive desync / request
+        smuggling behind a proxy), so the connection is closed after the reply."""
+        if self.headers.get("Transfer-Encoding") or (self.headers.get("Content-Length") or "0").strip() not in ("", "0"):
+            self.close_connection = True
+
     def do_OPTIONS(self):
+        self._discard_body()
         self.send_response(204)
         self._cors()
         self.send_header("Content-Length", "0")
@@ -214,6 +290,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _dispatch(self, method: str) -> None:
         self._body_consumed = False
+        if method != "POST":
+            self._discard_body()
         try:
             url = urlsplit(self.path)
             query = parse_qs(url.query)
@@ -232,8 +310,8 @@ class Handler(BaseHTTPRequestHandler):
             if method == "POST" and not self._body_consumed:
                 self.close_connection = True  # unread body bytes would corrupt keep-alive
             self._error(e.status, e.message, **e.extra)
-        except (BrokenPipeError, ConnectionResetError):
-            self.close_connection = True
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
+            self.close_connection = True  # client gone, or too slow to send its body
         except Exception as e:  # never let a request kill the server
             log.exception("error handling %s %s", method, self.path)
             try:
@@ -256,20 +334,22 @@ class Handler(BaseHTTPRequestHandler):
         mgr = self.server.manager
         p = path.rstrip("/")
         if p == "/api":
-            return self._json(API_INDEX)
+            return self._json(api_index(self._base_url()))
         if p == "/api/rules":
-            return self._send(200, rules_markdown(), "text/markdown; charset=utf-8")
+            body = rules_markdown() + api_quickref_markdown(self._base_url()).encode()
+            return self._send(200, body, "text/markdown; charset=utf-8")
         if p == "/api/rules.json":
             return self._json(rules_json())
         if p == "/api/games":
-            return self._json(mgr.list_games())
+            limit = self._int_query(query, "limit", None)
+            return self._json(mgr.list_games(None if limit is None else min(max(limit, 0), 10_000)))
         if p == "/api/leaderboard":
             return self._json(mgr.leaderboard())
         if p == "/api/bots":
             return self._json(available_bots())
         game_id, action = self._route(p)
         if game_id is None:
-            raise ApiError(404, f"no such endpoint: GET {path}")
+            raise ApiError(404, f"no such endpoint: GET {path} (GET /api lists the endpoints)")
         game = mgr.get(game_id)
         if action == "":
             return self._json(game.summary())
@@ -280,12 +360,22 @@ class Handler(BaseHTTPRequestHandler):
             since = self._int_query(query, "since_turn", None)
             timeout = self._float_query(query, "timeout", 30.0)
             timeout = min(max(timeout, 0.0), MAX_WAIT)
+            if self.command == "HEAD":
+                timeout = 0.0  # HEAD must not block
             return self._json(game.wait(since, timeout))
         if action == "replay":
-            return self._send(200, game.replay_bytes())
+            compact = (query.get("compact") or ["0"])[0].lower() in ("1", "true", "yes")
+            lo = self._int_query(query, "from", None)
+            hi = self._int_query(query, "to", None)
+            return self._send(200, game.replay_bytes(compact=compact, lo=lo, hi=hi))
         if action == "stream":
             return self._stream(game)
-        raise ApiError(404, f"no such endpoint: GET {path}")
+        raise ApiError(404, f"no such endpoint: GET {path} (GET /api lists the endpoints)")
+
+    def _base_url(self) -> str:
+        host = self.headers.get("Host") or self.server.url.split("://", 1)[1]
+        proto = self.headers.get("X-Forwarded-Proto", "http").split(",")[0].strip() or "http"
+        return f"{proto}://{host}"
 
     @staticmethod
     def _int_query(query: dict, key: str, default):
@@ -294,7 +384,7 @@ class Handler(BaseHTTPRequestHandler):
             return default
         try:
             return int(float(vals[0]))
-        except ValueError:
+        except (ValueError, OverflowError):  # int(float("1e400")) overflows
             raise ApiError(400, f"{key} must be an integer") from None
 
     @staticmethod
@@ -322,6 +412,8 @@ class Handler(BaseHTTPRequestHandler):
         self._cors()
         self.end_headers()
         self.close_connection = True
+        if self.command == "HEAD":
+            return  # headers only: no event stream
         mgr = self.server.manager
         key = None
         try:
@@ -339,6 +431,8 @@ class Handler(BaseHTTPRequestHandler):
                     break
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
+        except Exception:  # headers are already sent: log and end the stream (clients reconnect)
+            log.exception("error in event stream of game %s", getattr(game, "game_id", "?"))
 
     # ------------------------------------------------------------ POST
     def _api_post(self, path: str, query: dict, body) -> None:
@@ -346,28 +440,44 @@ class Handler(BaseHTTPRequestHandler):
         p = path.rstrip("/")
         if p == "/api/games":
             session = mgr.create_game(body)
-            return self._json({"game_id": session.game_id, "status": session.status})
+            return self._json({"game_id": session.game_id, "status": session.status,
+                               "creator_token": session.creator_token, "rated": session.opts["rated"],
+                               "unrated_reason": session.opts.get("unrated_reason")})
         if p == "/api/quickmatch":
             session, seat = mgr.quickmatch(body)
             return self._json({"game_id": session.game_id, "player_id": seat.pid, "token": seat.token,
                                "status": session.status})
         game_id, action = self._route(p)
         if game_id is None:
-            raise ApiError(404, f"no such endpoint: POST {path}")
+            raise ApiError(404, f"no such endpoint: POST {path} (GET /api lists the endpoints)")
         game = mgr.get(game_id)
         if action == "join":
             if not isinstance(body, dict):
                 raise ApiError(400, "body must be {\"name\": ...}")
-            seat = game.join(body.get("name"))
+            seat = game.join(body.get("name"), _player_key(body))
             return self._json({"game_id": game_id, "player_id": seat.pid, "token": seat.token,
                                "status": game.status})
         if action == "start":
-            started = game.start()
+            started = game.start(authorized=self._may_start(game, query))
             return self._json({"ok": True, "started": started, "status": game.status})
         if action == "orders":
             pid = self._player(game_id, query, required=True)
             return self._json(game.submit(pid, body))
-        raise ApiError(404, f"no such endpoint: POST {path}")
+        raise ApiError(404, f"no such endpoint: POST {path} (GET /api lists the endpoints)")
+
+    def _may_start(self, game, query: dict) -> bool:
+        """A seated player's token or the creator token authorises POST /start."""
+        token = self._token(query)
+        if token is None:
+            return False
+        if game.creator_token and secrets.compare_digest(token, game.creator_token):
+            return True
+        found = self.server.manager.resolve_token(token)
+        if found is None:
+            raise ApiError(401, "invalid token")
+        if found[0] != game.game_id:
+            raise ApiError(403, f"this token belongs to game {found[0]}, not {game.game_id}")
+        return True
 
     # ------------------------------------------------------------ static
     def _static(self, path: str) -> None:
@@ -390,9 +500,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def serve(host: str = "127.0.0.1", port: int = 8765, data_dir: str = "data",
-          web_dir: str | Path | None = None) -> None:
+          web_dir: str | Path | None = None, open_ratings: bool = False) -> None:
     """Run the server in the foreground until Ctrl-C."""
-    srv = create_server(host, port, data_dir, web_dir)
+    srv = create_server(host, port, data_dir, web_dir, open_ratings=open_ratings)
     log.info("AgentCiv server on %s (data: %s, web: %s)", srv.url, data_dir, srv.web_dir)
     print(f"AgentCiv server listening on http://{host}:{srv.server_address[1]}  "
           f"(GUI: {srv.url}/ , API index: {srv.url}/api)", flush=True)

@@ -81,3 +81,16 @@ def test_equal_starting_economy(n):
         assert st[pid]["income"] == first["income"]
         assert st[pid]["units"] == first["units"]
     assert all(p.resources == C.START_RESOURCES for p in g.players)
+
+
+@pytest.mark.parametrize("n,seed", [(9, 2), (9, 10), (7, 0), (12, 1)])
+def test_regions_have_equal_terrain_mix(n, seed):
+    """DESIGN §3: every region has the same number of hills, forest and gold
+    tiles (±1). Regression: at 9 players protected start-core tiles made
+    some regions keep up to 3 extra hills."""
+    from agentciv.engine.mapgen import land_shares
+    m = generate_map(n, seed)
+    _share, region = land_shares(m.terrain, m.width, m.height, m.starts)
+    for t in "hfg":
+        counts = [sum(1 for _d, i in reg if m.terrain[i] == t) for reg in region]
+        assert max(counts) - min(counts) <= 1, (t, counts)

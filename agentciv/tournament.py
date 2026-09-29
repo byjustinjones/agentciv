@@ -15,7 +15,8 @@ list is repeated. Duplicate bot names get suffixes (``random#1``,
 Reported per bot: games, wins, win rate, average placement, OpenSkill
 rating (``agentciv.ratings``; display rating = mu - 3·sigma), wins by
 condition, pre-validation errors and think time. Overall: distribution of
-ending conditions, average game length and per-game timing.
+ending conditions, median/average game length, per-game timing, and win
+rates by seat and by start slot (map position, for fairness checks).
 
 ``run_game(bot_specs, seed, max_turns)`` is the reusable single-game API.
 """
@@ -103,13 +104,14 @@ def run_game(bot_specs: list, seed: int, max_turns: int = C.DEFAULT_MAX_TURNS,
             orders_n[lab] += len(orders) if isinstance(orders, list) else 0
         g.step()
         if record_views:
-            frames.append(g.spectator_view())
+            frames.append(g.spectator_view(full=True))  # offline: omniscient
     res = g.result or {}
     turns = res.get("turn", g.turn) + 1
     lab = pid_label
+    slot_of = start_slots(g)
     out = {
         "seed": seed,
-        "seats": [{"pid": pid, "label": lab[pid], "bot": name}
+        "seats": [{"pid": pid, "label": lab[pid], "bot": name, "slot": slot_of.get(pid)}
                   for pid, (_, name) in zip(pid_label, specs)],
         "winner": lab.get(res.get("winner")),
         "condition": res.get("condition"),
@@ -128,6 +130,12 @@ def run_game(bot_specs: list, seed: int, max_turns: int = C.DEFAULT_MAX_TURNS,
     if record_views:
         out["frames"] = frames
     return out
+
+
+def start_slots(g: Game) -> dict:
+    """pid -> index of the player's start position in the (seed-independent)
+    start layout, to measure positional fairness."""
+    return dict(getattr(g, "start_slots", {}) or {})
 
 
 def _run_one(args: tuple) -> dict:
@@ -189,7 +197,21 @@ def summarize(results: list, wall_seconds: float = 0.0) -> dict:
     conds: Counter = Counter()
     lengths = []
     seconds = []
+    seat_stats: dict = defaultdict(lambda: [0, 0, 0])      # pid -> [games, wins, place_sum]
+    slot_stats: dict = defaultdict(lambda: [0, 0, 0])      # start slot -> [games, wins, place_sum]
     for r in results:
+        place_of = {lab: k for k, lab in enumerate(r["placements"], start=1)}
+        for seat in r.get("seats", []):
+            k = place_of.get(seat["label"])
+            if k is None:
+                continue
+            for key, table_ in ((seat["pid"], seat_stats), (seat.get("slot"), slot_stats)):
+                if key is None:
+                    continue
+                row = table_[key]
+                row[0] += 1
+                row[1] += k == 1
+                row[2] += k
         places = r["placements"]
         if len(places) >= 2:
             ratings.update(table, places)
@@ -234,11 +256,22 @@ def summarize(results: list, wall_seconds: float = 0.0) -> dict:
         })
     bots.sort(key=lambda b: (-(b["rating"] if b["rating"] is not None else -1e9), b["avg_place"] or 99))
     n = len(results)
+    srt = sorted(lengths)
+    median = (srt[n // 2] if n % 2 else (srt[n // 2 - 1] + srt[n // 2]) / 2) if n else 0
+
+    def seat_rows(tab, key_fn):
+        return [{"seat": k, "games": v[0], "wins": v[1],
+                 "win_rate": round(v[1] / v[0], 3) if v[0] else 0.0,
+                 "avg_place": round(v[2] / v[0], 2) if v[0] else None}
+                for k, v in sorted(tab.items(), key=lambda kv: key_fn(kv[0]))]
     return {
         "games": n,
         "bots": bots,
         "conditions": {c: conds.get(c, 0) for c in CONDITIONS if conds.get(c)},
         "avg_turns": round(sum(lengths) / n, 1) if n else 0,
+        "median_turns": median,
+        "seats": seat_rows(seat_stats, lambda pid: int(str(pid)[1:]) if str(pid)[1:].isdigit() else 0),
+        "start_slots": seat_rows(slot_stats, int),
         "min_turns": min(lengths) if lengths else 0,
         "max_turns": max(lengths) if lengths else 0,
         "avg_game_seconds": round(sum(seconds) / n, 3) if n else 0,
@@ -262,9 +295,13 @@ def format_summary(s: dict) -> str:
     total = s["games"] or 1
     lines.append("ending conditions: " + ", ".join(f"{c} {k} ({100 * k / total:.0f}%)"
                                                 for c, k in sorted(s["conditions"].items(), key=lambda kv: -kv[1])))
-    lines.append(f"game length: avg {s['avg_turns']} turns (min {s['min_turns']}, max {s['max_turns']}); "
+    lines.append(f"game length: median {s.get('median_turns')}, avg {s['avg_turns']} turns (min {s['min_turns']}, max {s['max_turns']}); "
                  f"time per game: avg {s['avg_game_seconds']} s, max {s['max_game_seconds']} s; "
                  f"wall {s['wall_seconds']} s for {s['games']} games")
+    if s.get("start_slots"):
+        lines.append("win% by start slot: " + ", ".join(
+            f"{r['seat']}:{100 * r['win_rate']:.0f}%" for r in s["start_slots"])
+            + " | by seat: " + ", ".join(f"{r['seat']}:{100 * r['win_rate']:.0f}%" for r in s["seats"]))
     exc = [b["bot"] for b in s["bots"] if b["exceptions"]]
     if exc:
         lines.append("bots that raised: " + ", ".join(exc))

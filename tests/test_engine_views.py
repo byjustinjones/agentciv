@@ -9,7 +9,8 @@ TOP_KEYS = {"game_id", "turn", "max_turns", "status", "deadline", "season", "you
             "cities", "armies", "market", "treaties", "treaty_proposals", "trade_offers", "messages",
             "events", "victory", "costs"}
 PLAYER_KEYS = {"id", "name", "color", "alive", "eliminated_turn", "resources", "income", "cities", "tiles",
-               "capitals_held", "military_power", "units", "wonder_stage", "relics_held", "relic_streak",
+               "capitals_held", "military_power", "units", "wonder_stage", "relics_held", "relics_guarded",
+               "relic_streak",
                "betrayals", "score", "submitted", "victory_progress"}
 YOU_KEYS = {"id", "name", "resources", "caps", "income", "upkeep", "claim_cost", "settle_cost", "submitted"}
 
@@ -35,7 +36,7 @@ def test_player_view_shape():
     assert cap["capital"] and cap["garrison"] == C.GARRISON_CAPITAL
     assert cap["buildings"] == {"walls": 0, "warehouse": 0, "market_hall": 0}
     assert {"x", "y", "owner", "units"} == set(v["armies"][0])
-    assert len(m["relics"]) == 4 and {"x", "y", "owner"} == set(m["relics"][0])
+    assert len(m["relics"]) == 5 and {"x", "y", "owner", "guarded"} == set(m["relics"][0])
     assert all({"x", "y", "resource", "remaining"} == set(d) for d in m["deposits"])
     assert set(v["market"]["prices"]) == {"food", "wood", "stone"}
     assert v["market"]["prices"] == {"food": 1.0, "wood": 1.5, "stone": 2.0}
@@ -61,7 +62,8 @@ def test_events_last_turn_only_and_private_filtering():
     ev1 = g.player_view("p1")["events"]
     assert any(e["type"] == "order_failed" for e in ev1)
     assert not any(e["type"] == "order_failed" for e in g.player_view("p2")["events"])
-    assert any(e["type"] == "order_failed" for e in g.spectator_view()["events"])
+    assert not any(e["type"] == "order_failed" for e in g.spectator_view()["events"])  # private while running
+    assert any(e["type"] == "order_failed" for e in g.spectator_view(full=True)["events"])
     run_turn(g)
     assert not any(e["type"] == "order_failed" for e in g.player_view("p1")["events"])
     assert all(e["turn"] == 1 for e in g.spectator_view()["events"])

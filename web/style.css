@@ -179,8 +179,13 @@ input[type=checkbox] { accent-color: var(--accent); }
   display: flex; align-items: center; justify-content: center; overflow: hidden;
 }
 #map { display: block; cursor: crosshair; }
-.map-empty { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
-  gap: 10px; color: var(--text-2); text-align: center; padding: 24px; }
+.map-empty { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: safe center;
+  gap: 10px; color: var(--text-2); text-align: center; padding: 24px; overflow-y: auto; }
+.map-empty .lobby-plist { justify-content: center; margin: 4px 0 2px; max-width: 620px; }
+.map-empty .lobby-when { font-size: 13px; }
+.map-empty .lobby-actions { margin: 4px 0; }
+.map-empty .lobby-code { text-align: left; position: relative; width: min(680px, 100%); }
+.map-empty .lobby-code .copy { position: absolute; top: 6px; right: 6px; }
 .map-empty h2 { font-size: 20px; color: var(--text); }
 .map-empty .code-block { max-width: min(620px, 100%); }
 .map-empty .code-block pre { white-space: pre-wrap; word-break: break-all; }
@@ -217,13 +222,15 @@ input[type=checkbox] { accent-color: var(--accent); }
 
 .overlay { position: absolute; inset: 0; z-index: 20; display: flex; align-items: center; justify-content: center;
   background: rgba(8, 9, 12, .62); backdrop-filter: blur(2px); padding: 16px; }
-.victory-card { width: min(440px, 100%); max-height: 100%; overflow: auto; background: var(--panel); border: 1px solid rgba(243, 201, 105, .5);
+.victory-card { width: min(440px, 100%); max-height: 100%; overflow: hidden; display: flex; flex-direction: column; background: var(--panel); border: 1px solid rgba(243, 201, 105, .5);
   border-radius: 14px; padding: 22px 22px 18px; box-shadow: 0 20px 60px rgba(0, 0, 0, .6); text-align: center; }
 .victory-card .crown { width: 54px; height: 54px; margin: 0 auto 6px; color: var(--accent); }
 .victory-card .kicker { color: var(--muted); text-transform: uppercase; letter-spacing: .14em; font-size: 11px; }
 .victory-card h2 { font-size: 24px; margin: 4px 0 2px; }
 .victory-card .cond { color: var(--accent); font-weight: 600; margin-bottom: 14px; }
-.placements { list-style: none; margin: 0 0 16px; padding: 0; text-align: left; }
+.placements { list-style: none; margin: 0 0 16px; padding: 0; text-align: left; overflow-y: auto; min-height: 0; flex: 1 1 auto; }
+.victory-card > * { flex: none; }
+.victory-card > .placements { flex: 1 1 auto; }
 .placements li { display: grid; grid-template-columns: 28px 1fr auto; align-items: center; gap: 8px; padding: 6px 8px;
   border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
 .placements li:first-child { background: rgba(243, 201, 105, .08); border-radius: 8px; }
@@ -260,6 +267,10 @@ input[type=checkbox] { accent-color: var(--accent); }
 .players-table .pname b { font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 84px; }
 .players-table .sub { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--line-2); }
 .players-table .sub.yes { background: var(--good); }
+.tag { font-size: 9.5px; font-weight: 650; letter-spacing: .04em; text-transform: uppercase; padding: 0 4px; border-radius: 4px;
+  border: 1px solid var(--line-2); color: var(--muted); line-height: 14px; flex: none; }
+.tag.agent { color: var(--accent-2); border-color: rgba(96, 165, 250, .45); padding: 0 1px; display: inline-flex; }
+.tag.agent svg { width: 11px; height: 11px; }
 .players-table .score { font-weight: 700; color: var(--text); }
 .players-table .inc { display: block; font-size: 10px; color: var(--muted); line-height: 1.1; }
 .players-table .inc.neg { color: var(--bad); }
@@ -348,7 +359,8 @@ input[type=checkbox] { accent-color: var(--accent); }
   .view-lobby, .view-game { padding: 10px 8px; gap: 10px; }
   .form { grid-template-columns: 1fr; }
   .controls { flex-wrap: wrap; height: auto; }
-  .turn-label { min-width: 0; flex: 1; }
+  .turn-label { min-width: 0; flex: 1; font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
+  #btn-first { display: none; }
   #slider { order: 10; flex-basis: 100%; }
   .market { grid-template-columns: 1fr; }
   .race { grid-template-columns: 60px repeat(5, minmax(0, 1fr)); gap: 3px 3px; }
