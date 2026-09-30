@@ -20,7 +20,7 @@ orders = bot.act(game.player_view("p1"))
 |------|-------|---------------------|----------|
 | `idle` | submits nothing | – | baseline |
 | `random` | random, mostly legal orders | – | weakest |
-| `economist` | peaceful builder, sells surplus, hoards gold, weak defence | economic | medium |
+| `economist` | peaceful builder, sells surplus, banks gold, weak defence | economic | medium |
 | `rusher` | infantry/cavalry rush on the nearest weak capital | conquest | medium (feast or famine) |
 | `turtle` | walls, archers, treaties; wonder or temples | wonder / influence | medium |
 | `strategist` | adaptive: picks the fastest race, raids, relic control, threat response; the skilled trader | whatever is fastest | strongest |
@@ -113,20 +113,21 @@ more than 1.5x the market value it receives.
   caps.
 * **Market:** sells everything above small reserves every turn, and dumps at
   almost any price what would otherwise overflow the storage cap.
-* **Economic push:** from turn 55, or once it holds 700 gold, it keeps its
-  gold and only makes investments that pay back quickly.
+* **Banking:** from turn 10 it banks the gold left after the turn's plan (up
+  to the bank limit, keeping 40 gold and the turn's contract instalments);
+  earlier steps leave the allowance untouched.
 * **Defence:** its weak spot. It keeps 2 units in the capital, never raises
   walls, and when an army comes within 2 turns it recruits the best counter
   from its stock, spending at most 15% of its gold per turn on emergency
   food/wood purchases. A rich economist is a juicy target: capturing its
-  capital plunders half its gold.
+  capital plunders half its gold and half its bank, and ends its streak.
 * **Relic streaks:** like every planner bot it attacks the weakest guarded
   relic of a hostile player whose relic streak runs (see `counter_relics`).
 * **Trading:** offers its surplus (stock above its small keep levels) to the
   player who needs it most at a *fair* price (half of the estimated gain
   from the trade each — both save the market fee and slippage). A patient
   lender (it discounts future gold by only 0.5% per turn): from turn 12,
-  while its own gold race is far off (under half the target), it offers
+  while its own bank is under half the target, it offers
   **loans** — up to 600 gold, about 22 turns of the borrower's gold income,
   and no more than the borrower's credit limit (below),
   repaid with 20% interest over 15 turns — to one solvent player at a time
@@ -191,9 +192,11 @@ It uses the economist's economy, then adds these behaviours on top:
 
 1. **Victory ETA model.** Every turn it estimates, for itself and every
    rival, how many turns each condition is away.
-   * **Economic and influence:** from how fast gold and influence grew over
-     the last 6 turns. For itself it uses potential income: all surplus sold
-     at the current pool prices.
+   * **Economic and influence:** turns to reach the bank/legacy target, from
+     how fast bank and legacy grew over the last 6 turns (for its own bank at
+     least min(bank limit, potential gold income), for legacy at least the
+     influence income), plus the streak turns still missing; infinite while
+     the player does not hold its original capital.
    * **Wonder:** the remaining stage costs valued at market prices divided
      by production value, and (for rivals) the value of the stages built
      per turn since their first stage.
@@ -208,7 +211,8 @@ It uses the economist's economy, then adds these behaviours on top:
    influence, whose temples pay late) it commits:
    * **Wonder:** reserves the next stage (stone/wood up to the storage cap),
      buys the rest on the market in the build turn.
-   * **Economic:** keeps its gold and raises the bar for investments.
+   * **Economic:** banks every turn (as the economist) and raises the bar
+     for investments.
    * **Influence:** temples everywhere (buying their stone), influence kept.
    * **Relics:** a campaign (see 3).
 2. **Raids.** Every other turn it looks for a rival original capital or
@@ -319,8 +323,10 @@ gold, for any player, from public information:
   target, −400 for relic runners).
 * **The guard:** `danger(world, q)` is `q`'s best victory progress
   (conquest only once a rival capital is taken); `helps_winner` also
-  projects the deal (net gold for the economic race, next wonder stage
-  affordable). Bots never deal with a player at 0.7+ (strategist 0.55) or
+  projects the deal (economic: bank plus net gold, at most 10 turns of the
+  receiver's bank limit; next wonder stage affordable). Contract valuation
+  counts the bank: a default takes the rest of the obligation from the
+  payer's bank, so part of a payer's bank is collateral in its credit limit. Bots never deal with a player at 0.7+ (strategist 0.55) or
   one the deal would bring there.
 * **War supplies:** no bot sells food or wood to a hostile army that can
   reach it, to a conqueror (2+ capitals) or to an army 1.5× the average.

@@ -97,8 +97,8 @@ add a separate NPC buyer: stronger reversion is that buyer, with one number.
 
 | | before | now |
 |---|---|---|
-| economic | 2000 gold | **13500** gold |
-| influence | 600 | **3350** |
+| economic | 2000 gold | 13500 gold (replaced by a banked target, §7) |
+| influence | 600 | 3350 (replaced by a legacy target, §7) |
 | wonder stage k | 60·k stone, 40·k wood, 40·k gold | **165·k stone, 120·k wood, 130·k gold** (total 2475 / 1800 / 1950) |
 | temple | 30 stone + 30 gold, +2 influence | **20 stone + 20 gold, +1 influence** |
 | relic influence | 3 | **2** |
@@ -412,6 +412,71 @@ B). The
 * **The rusher's opportunism** (breaking a treaty with a weak partner) also
   plays without barter, so `--rounds 0` differs slightly from the §4 tables
   (field B: strategist 57.5% instead of 54.2%).
-* README.md (not part of the balance work) still quotes the old thresholds
-  (600 influence, 2000 gold, a relic majority for 10 turns, ceil(n/2)
-  capitals).
+
+## 7. Economic and influence victories: bank, legacy and streaks
+
+The stock thresholds (13500 gold, 3350 influence) were out of reach for LLM
+players (the best reached 13.5% of the gold target) and gave no warning. They
+are replaced by held targets (rules §5, §11):
+
+* **Economic:** `bank` orders move up to 10 gold per city + 10 per market hall
+  each turn into a bank that cannot be spent; it pays floor(bank/100) interest.
+  Win at bank ≥ 3600 for 10 consecutive turn ends while owning the original
+  capital.
+* **Influence:** legacy = total influence income; win at legacy ≥ 3000 for 10
+  consecutive turn ends with the original capital.
+* Targets scale with min(1, max(0.5, max_turns/150)). Capturing an original
+  capital takes half the bank and a quarter of the legacy; a contract default
+  takes the remaining obligation's gold value from the payer's bank and ends
+  its economic streak. Market hall gold 3 → 5. Bank and legacy are public in
+  fog games too.
+
+Tuning sweep (prototype engine, 240 games per row over six fields A6, B6, S6,
+M6, A5, S5; 150 max turns; cell = share of games (median win turn);
+B = bank target, L = legacy target, "+div" = +1 influence per active treaty):
+
+| Config | conquest | wonder | relics | influence | economic | score | median game |
+|---|---|---|---|---|---|---|---|
+| **Baseline, old rules (480 games, seeds 1–6)** | 12% (t71) | 20% (t78.5) | 25% (t47) | 28% (t97) | 14% (t90) | 0 | t84 |
+| B3000, L2800, +div | 11% (t65) | 9% (t68) | 25% (t42) | 28% (t88) | 27% (t74) | 0 | t73 |
+| Allowance 5 per city + 15 per hall | 12% | 16% | 24% | 46% (t87) | 1% (t122) | 0 | t82 |
+| B3300, L3000, +div | 15% | 12% | 26% | 24% (t90) | 23% (t79) | 0 | t78 |
+| + a 1.2× legacy lead clause | 16% | 15% | 26% | 10% | 25% | 8% (t150) | t78 |
+| B3300, L2800, no div | 14% | 14% | 25% | 26% (t89.5) | 21% (t80) | 0 | t79 |
+| same + hall gold 5, seeds 4–6 | 11% | 10% | 26% | 28% (t90) | 26% (t82.5) | 0 | t81.5 |
+| B3600, L2800, no div | 15% | 13% | 26% | 31% (t89.5) | 15% (t84) | 0 | t83 |
+| same, no interest | 12% | 13% | 26% | 32% (t89) | 16% (t85) | 0 | t83.5 |
+| same, hall gold 5 | 12% | 13% | 26% | 32% (t90) | 16% (t84) | 0 | t83 |
+| B3600, L3000, no div | 14% | 15% | 27% | 26% (t94) | 18% (t85) | 0 | t83 |
+| **Chosen: B3600, L3000, interest, hall gold 5 (480 games, seeds 1–6)** | 12% (t69.5) | 14% (t81) | 26% (t47) | 28% (t94) | 20% (t85) | 0 | t84 |
+
+The shipped implementation (same fields and seeds, 480 games, which adds
+the contract-default bank seizure and the bot collateral/recovery valuation)
+reproduces the chosen row, with no bot exceptions:
+
+| | conquest | wonder | relics | influence | economic | score | median game |
+|---|---|---|---|---|---|---|---|
+| implementation, seeds 1–6 | 12% (t69.5) | 15% (t80.5) | 26% (t47) | 29% (t93) | 18% (t85) | 0 | t84 |
+| … seeds 1–3 / seeds 4–6 | 12 / 12 | 15 / 14 | 27 / 26 | 28 / 30 | 18 / 18 | 0 / 0 | t83 / t85 |
+
+`python -m agentciv.tournament` with the default field A (60 games) and the
+same field with `--fog` (30 games), 150 max turns:
+
+| | conquest | wonder | relics | influence | economic | score | median game |
+|---|---|---|---|---|---|---|---|
+| field A, standard (60) | 17% (t76) | 32% (t70) | 17% (t35.5) | 7% (t98.5) | 28% (t84) | 0 | t83 |
+| field A, fog (30) | 13% (t67.5) | 23% (t73) | 27% (t45) | 7% (t98.5) | 30% (t84) | 0 | t73.5 |
+
+Field A alone has few influence wins (the turtle is the only influence
+racer besides the strategist; the prototype's A6 runs gave 2–5%); the
+six-field mix is the balance reference.
+
+* Interest and hall gold 5 barely move bot results (the economist is limited
+  by the allowance, not by gold, and bots build one market hall); both help
+  gold-starved LLM players.
+* Streaks are a visible race, but bots seldom attack a streak holder's
+  capital (18 of 600 streaks broken in the prototype runs).
+* Wonder's share fell from 20% to 14–15%; watch it in LLM games (fixes: a
+  larger bank target or cheaper wonder stages).
+* The strategist rarely picks the economic path; strategist_lite does bank.
+
