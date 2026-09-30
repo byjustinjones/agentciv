@@ -64,16 +64,42 @@ def season(turn: int) -> tuple[int, str, dict]:
     return idx, name, mods
 
 
+def victory_scale(max_turns: int) -> float:
+    """Factor applied to the bank and legacy targets for games shorter than
+    VICTORY_REF_TURNS (never below VICTORY_MIN_SCALE, never above 1)."""
+    return min(1.0, max(C.VICTORY_MIN_SCALE, max_turns / C.VICTORY_REF_TURNS))
+
+
+def _scaled_target(base: int, max_turns: int) -> int:
+    # integer form of floor(base * victory_scale(max_turns)), avoiding float error
+    v = min(base, max(int(base * C.VICTORY_MIN_SCALE), base * max_turns // C.VICTORY_REF_TURNS))
+    return v // 10 * 10
+
+
+def bank_target(max_turns: int) -> int:
+    return _scaled_target(C.BANK_VICTORY, max_turns)
+
+
+def legacy_target(max_turns: int) -> int:
+    return _scaled_target(C.LEGACY_VICTORY, max_turns)
+
+
+def bank_limit(cities: int, halls: int) -> int:
+    """Gold that may be moved into the bank per turn."""
+    return C.BANK_PER_CITY * cities + C.BANK_PER_MARKET_HALL * halls
+
+
 def thresholds(n_players: int, max_turns: int) -> dict:
     r = relic_count(n_players)
     return {
         "conquest_capitals": conquest_capitals(n_players),
         "wonder_stage": C.WONDER_VICTORY_STAGE,
-        "influence": C.INFLUENCE_VICTORY,
+        "legacy": legacy_target(max_turns),
         "relics_needed": relics_needed(r),
         "relics_total": r,
         "relic_turns": C.RELIC_VICTORY_TURNS,
-        "economic_gold": C.ECONOMIC_VICTORY_GOLD,
+        "bank": bank_target(max_turns),
+        "streak_turns": C.VICTORY_STREAK_TURNS,
         "max_turns": max_turns,
     }
 
@@ -219,10 +245,15 @@ def _build_rules() -> dict:
         "victory": {
             "conquest": f"own >= floor(n/2)+1 original capitals (all of them if n <= {C.CONQUEST_SMALL_GAME}), or be the last player standing",
             "wonder_stage": C.WONDER_VICTORY_STAGE,
-            "influence": C.INFLUENCE_VICTORY,
+            "legacy": {"target": C.LEGACY_VICTORY, "capital_loss": C.LEGACY_CAPITAL_LOSS},
             "relics_needed": f"ceil(R/2) (floor(R/2)+1 if R < {C.RELIC_HALF_MIN})",
             "relic_turns": C.RELIC_VICTORY_TURNS,
-            "economic_gold": C.ECONOMIC_VICTORY_GOLD,
+            "bank": {"target": C.BANK_VICTORY, "per_city": C.BANK_PER_CITY,
+                     "per_market_hall": C.BANK_PER_MARKET_HALL,
+                     "interest_divisor": C.BANK_INTEREST_DIVISOR,
+                     "seize_fraction": C.BANK_SEIZE_FRACTION},
+            "streak_turns": C.VICTORY_STREAK_TURNS,
+            "scale": {"reference_turns": C.VICTORY_REF_TURNS, "min": C.VICTORY_MIN_SCALE},
             "default_max_turns": C.DEFAULT_MAX_TURNS,
         },
         "score": {"weights": dict(C.SCORE_WEIGHTS), "divisors": dict(C.SCORE_DIVISORS)},
@@ -230,7 +261,6 @@ def _build_rules() -> dict:
             "applies_to": "games created with fog: true",
             "vision": {"territory": C.FOG_VISION_TERRITORY, "city": C.FOG_VISION_CITY,
                        "units": C.FOG_VISION_UNITS, "cavalry": C.FOG_VISION_CAVALRY},
-            "progress_step": C.FOG_PROGRESS_STEP,
             "hidden_fields": list(C.FOG_HIDDEN_FIELDS),
             "sighting_turns": C.FOG_SIGHTING_TURNS,
             "orders": list(C.FOG_ORDER_TYPES),

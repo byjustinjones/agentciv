@@ -22,7 +22,7 @@ if TYPE_CHECKING:  # pragma: no cover
 ORDER_TYPES = (
     "move", "recruit", "build", "claim", "settle", "disband", "market",
     "offer_trade", "accept_trade", "propose_treaty", "accept_treaty",
-    "break_treaty", "message",
+    "break_treaty", "message", "bank",
     # diplomacy actions (§13), processed in phase 1; the three legacy names
     # above (offer_trade, accept_trade, message) are aliases of these
     "propose", "counter", "accept", "reject", "withdraw", "say",
@@ -448,6 +448,12 @@ class Validator:
             raise OrderError("duplicate break_treaty")
         self.ctx.broken.add(w)
         return {"type": "break_treaty", "with": w}
+
+    def v_bank(self, o: dict) -> dict:
+        n = as_int(o.get("gold"), "gold")
+        if n < 1:
+            raise OrderError("gold must be >= 1")
+        return {"type": "bank", "gold": n}
 
     # ------------------------------------------------------ fog games (§14)
     def v_spy(self, o: dict) -> dict:

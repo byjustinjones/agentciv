@@ -27,11 +27,11 @@ from . import views
 from .mapgen import generate_map
 from .model import City, Player
 from .orders import prevalidate
-from .rules import (building_cost, claim_cost, relics_needed,
+from .rules import (bank_limit, bank_target, building_cost, claim_cost, legacy_target, relics_needed,
                     rules_json, season, settle_cost, storage_cap, thresholds,
                     unit_cost)
 
-ACTION_TYPES = ("build", "claim", "settle", "recruit", "disband")
+ACTION_TYPES = ("build", "claim", "settle", "recruit", "disband", "bank")
 
 
 @dataclass
@@ -68,6 +68,14 @@ def _pay(res: dict, cost: dict) -> None:
 
 def _fmt_cost(cost: dict) -> str:
     return ", ".join(f"{v} {r}" for r, v in cost.items())
+
+
+def _ledger_progress(have: int, target: int, streak: int) -> float:
+    """Economic/influence progress: LEDGER_PROGRESS_WEIGHT for the bank or
+    legacy target, the rest for the streak (1.0 only at the win)."""
+    w = C.LEDGER_PROGRESS_WEIGHT
+    return round(w * min(1.0, max(0, have) / max(1, target))
+                 + (1 - w) * min(1.0, streak / C.VICTORY_STREAK_TURNS), 3)
 
 
 class Game:
@@ -600,10 +608,12 @@ class Game:
         cities = {i: (c.owner, c.walls, c.warehouse, c.market_hall, c.wonder_stage) for i, c in self.cities.items()}
         return (list(self.owner), list(self.improvement), {q.id: q.tiles for q in self.players},
                 dict(p.resources), p.wonder_city, p.city_counter, cities,
-                len(self._recruit_queue), len(self._events), set(self._wonder_built))
+                len(self._recruit_queue), len(self._events), set(self._wonder_built),
+                (p.bank, p.banked))
 
     def _restore(self, p: Player, snap: tuple) -> None:
-        owner, imp, tiles, res, wcity, counter, cities, nq, nev, wb = snap
+        owner, imp, tiles, res, wcity, counter, cities, nq, nev, wb, bank = snap
+        p.bank, p.banked = bank
         self.owner[:] = owner
         self.improvement[:] = imp
         for q in self.players:
@@ -695,6 +705,36 @@ class Game:
             setattr(city, b, level + 1)
             self._emit("build", player=p.id, building=b, level=level + 1, **self._xy_fields(i))
         return None
+
+    def bank_limit(self, pid: str) -> int:
+        """Gold ``pid`` may move into its bank per turn (cities and market
+        halls owned right now)."""
+        cities = halls = 0
+        for c in self.cities.values():
+            if c.owner == pid:
+                cities += 1
+                halls += 1 if c.market_hall else 0
+        return bank_limit(cities, halls)
+
+    def _act_bank(self, p: Player, o: dict):
+        room = self.bank_limit(p.id) - p.banked
+        if room <= 0:
+            return "bank limit for this turn reached"
+        amt = min(o["gold"], max(0, p.resources["gold"]), room)
+        if amt <= 0:
+            return "no gold to bank"
+        p.resources["gold"] -= amt
+        p.bank += amt
+        p.banked += amt
+        self._emit("bank", vis=[p.id], player=p.id, gold=amt, bank=p.bank)
+        return None
+
+    def _end_streak(self, p: Player, condition: str, **fields) -> None:
+        """Reset ``p``'s economic/influence streak, announcing it if it was running."""
+        attr = condition + "_streak"
+        if getattr(p, attr) > 0:
+            setattr(p, attr, 0)
+            self._emit("streak_ended", player=p.id, condition=condition, **fields)
 
     def _act_claim(self, p: Player, o: dict):
         i = o["at"]
@@ -1002,8 +1042,19 @@ class Game:
                     victim.resources[r] -= amt
                     p.resources[r] += amt
                     plunder[r] = amt
+            seized = int(victim.bank * C.BANK_SEIZE_FRACTION)
+            if seized > 0:
+                victim.bank -= seized
+                p.resources["gold"] += seized
+                plunder["bank"] = seized
+            legacy_lost = int(victim.legacy * C.LEGACY_CAPITAL_LOSS)
+            victim.legacy -= legacy_lost
+            extra = {"legacy_lost": legacy_lost}
+        else:
+            extra = {}
         self._emit("city_captured", **self._xy_fields(i), city=city.name, **{"from": old, "to": pid},
-                   capital=city.capital, plunder=plunder, wonder_destroyed=wonder_lost, tiles=transferred)
+                   capital=city.capital, plunder=plunder, wonder_destroyed=wonder_lost, tiles=transferred,
+                   **extra)
 
     # ---------------------------------------------------------------- 6
     def _phase_spawn(self) -> None:
@@ -1061,6 +1112,9 @@ class Game:
                     acc[r] += v
             if i in relics:
                 acc["influence"] += C.RELIC_INFLUENCE
+        for p in self.players:          # bank interest (§5)
+            if p.alive and p.bank > 0:
+                inc[p.id]["gold"] += p.bank // C.BANK_INTEREST_DIVISOR
         return inc, extraction
 
     def _seasoned(self, raw: dict, turn: int) -> dict:
@@ -1079,6 +1133,7 @@ class Game:
             inc = self._seasoned(raw[p.id], self.turn)
             for r, v in inc.items():
                 p.resources[r] += v
+            p.legacy += inc["influence"]
         D.pay_contracts(self)          # after yields, before upkeep (§13.3)
         for p in self._alive_in_order():
             upkeep = self._upkeep(p.id)
@@ -1180,6 +1235,23 @@ class Game:
         for p in self._alive_in_order():
             held = sum(1 for r in self.relics if self.owner[r] == p.id and self.relic_guarded(r))
             p.relic_streak = p.relic_streak + 1 if held >= need else 0
+        # economic and influence streaks (§11)
+        bt, lt = bank_target(self.max_turns), legacy_target(self.max_turns)
+        # players owning their original capital
+        home_of = {c.owner for c in self.cities.values() if c.capital and c.original_owner == c.owner}
+        for p in self._alive_in_order():
+            home = p.id in home_of
+            for condition, ok in (("economic", home and p.bank >= bt),
+                                  ("influence", home and p.legacy >= lt)):
+                if ok:
+                    attr = condition + "_streak"
+                    setattr(p, attr, getattr(p, attr) + 1)
+                    if getattr(p, attr) == 1:
+                        self._emit("streak_started", player=p.id, condition=condition)
+                else:
+                    self._end_streak(p, condition)
+        for p in self.players:
+            p.banked = 0
         # expiries
         for key in sorted(self.treaties):
             if self.treaties[key] <= t:
@@ -1258,7 +1330,8 @@ class Game:
             score = (sw["tiles"] * p.tiles + sw["cities"] * cities[p.id]
                      + sw["capitals_held"] * capitals[p.id] + sw["wonder_stage"] * ws
                      + res["influence"] // sd["influence"] + res["gold"] // sd["gold"]
-                     + sw["relics_held"] * relics[p.id] + mp // sd["military_power"])
+                     + sw["relics_held"] * relics[p.id] + mp // sd["military_power"]
+                     + p.bank // sd["gold"])
             if not p.alive and p.final_score is not None:
                 score = p.final_score
             if thr:
@@ -1269,10 +1342,10 @@ class Game:
                 progress = {
                     "conquest": round(conquest, 3),
                     "wonder": round(min(1.0, ws / C.WONDER_VICTORY_STAGE), 3),
-                    "influence": round(min(1.0, max(0, res["influence"]) / C.INFLUENCE_VICTORY), 3),
+                    "influence": _ledger_progress(p.legacy, thr["legacy"], p.influence_streak),
                     "relics": round(min(1.0, p.relic_streak / C.RELIC_VICTORY_TURNS)
                                     if guarded[p.id] >= thr["relics_needed"] else 0.0, 3),
-                    "economic": round(min(1.0, max(0, res["gold"]) / C.ECONOMIC_VICTORY_GOLD), 3),
+                    "economic": _ledger_progress(p.bank, thr["bank"], p.economic_streak),
                     "score": round(min(1.0, self.turn / self.max_turns) if self.max_turns else 1.0, 3),
                 }
             else:
@@ -1311,9 +1384,9 @@ class Game:
                 conds.add("wonder")
             if p.relic_streak >= C.RELIC_VICTORY_TURNS:
                 conds.add("relics")
-            if p.resources["influence"] >= C.INFLUENCE_VICTORY:
+            if p.influence_streak >= C.VICTORY_STREAK_TURNS:
                 conds.add("influence")
-            if p.resources["gold"] >= C.ECONOMIC_VICTORY_GOLD:
+            if p.economic_streak >= C.VICTORY_STREAK_TURNS:
                 conds.add("economic")
             if conds:
                 met[p.id] = next(c for c in C.VICTORY_CONDITIONS if c in conds)

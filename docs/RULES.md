@@ -35,15 +35,15 @@ an empty list counts as a submission). Max 100 orders per turn.
 1. **Diplomacy** — deal actions and messages placed *inside your orders* (§10) are applied, players round-robin (every player's 1st diplomacy order, then every player's 2nd, …; the starting player rotates each turn). Actions sent through the diplomacy channel during the turn have already taken effect.
 2. **Treaties** — `break_treaty`; `accept_treaty` (for proposals made last turn); new `propose_treaty`.
 3. **Market** — one batch auction per resource (§7).
-4. **Actions** — `build`, `claim`, `settle`, `recruit`, `disband`, in the order you submitted them, paying costs when executed.
+4. **Actions** — `build`, `claim`, `settle`, `recruit`, `disband`, `bank`, in the order you submitted them, paying costs when executed.
    Players' orders are interleaved round-robin (your 1st order, then the next player's 1st, …; the starting player rotates each turn).
    If two players `claim`/`settle` the same tile, or `settle` within 3 tiles (Chebyshev) of each other in the same turn, **all** of those orders fail at no cost.
    Only orders that would succeed if their player acted alone (resources, influence, adjacency — checked through that player's whole action list) count for contention: an order that fails anyway blocks nobody.
 5. **Movement & combat** — border clashes, then all moves land, battles, captures (§8).
 6. **Spawn** — recruited units appear in their city (lost if the city was captured this turn or hostile units stand on it). Recruits cannot move on the turn they are ordered.
-7. **Economy** — yields × season, deposits deplete, influence income, **contract instalments** (§10), upkeep & starvation, storage caps, market pools drift back.
+7. **Economy** — yields × season (including bank interest), deposits deplete, influence income (also added to your legacy), **contract instalments** (§10), upkeep & starvation, storage caps, market pools drift back.
 7½. **Espionage** (fog games only) — `counterintel`, then `spy` (§14).
-8. **Bookkeeping** — eliminations, relic streaks, treaty and deal expiry, victory checks, `turn += 1`.
+8. **Bookkeeping** — eliminations, relic streaks, economic and influence streaks, treaty and deal expiry, victory checks, `turn += 1`.
 
 Because resources are spent in step 4 *after* the market in step 3, you can sell/buy on the market and spend the result in the same turn. Within step 3 the resources clear one after another in the order food, wood, stone: gold from a sale is available to buy a resource that clears later in that order, not an earlier one. A buy the gold on hand cannot cover fails and is reported as an `order_failed` event.
 Income arrives in step 7, so it is available next turn.
@@ -93,7 +93,16 @@ Resources: food, wood, stone, gold (tradable) and influence (not tradable).
 * **Upkeep** (food per unit per turn): infantry 1, archer 1, cavalry 2, siege 2.
   If food would drop below 0 it becomes 0 and you lose ceil(deficit/2) units (**starvation**; highest-upkeep units first, from your largest stack).
 * **Influence income**: city 1 (+1 for an original capital), temple 1, each relic tile you own 2 (guarded or not).
-* **Market hall**: +3 gold per turn and a lower market fee.
+* **Market hall**: +5 gold per turn and a lower market fee.
+* **Bank**: the `bank` order moves gold from your stock into your bank (`players[].bank`). Each turn at most
+  10·(cities you own) + 10·(your cities with a market_hall) gold can be moved
+  (`you.bank_limit`; counted when the order executes; all `bank` orders of a turn share it). An order moves the smallest
+  of the amount given, your gold and what remains of the limit, and fails only if that is 0. Banked gold cannot be
+  spent, traded or withdrawn. In step 7 the bank pays floor(bank/100) gold, included in
+  `income.gold`. Banked gold leaves the bank only when your original capital is captured (§8) or when you default on a
+  contract (§10).
+* **Legacy** (`players[].legacy`): in step 7 your influence income is added to your legacy. Spending influence does not
+  lower it.
 * Your projected gross income for the current turn is `you.income` (season applied); `you.upkeep` is subtracted from food.
 
 ### Tile improvements (one per owned non-city tile)
@@ -112,7 +121,7 @@ Resources: food, wood, stone, gold (tradable) and influence (not tradable).
 |---|---|---|---|
 | `walls` | 3 | L1: 40 stone, 20 wood; L2: 80 stone, 40 wood; L3: 120 stone, 60 wood | defence multiplier (§8) |
 | `warehouse` | 1 | L1: 50 wood, 30 stone | +200 storage cap |
-| `market_hall` | 1 | L1: 40 wood, 40 stone | +3 gold/turn, your market fee 2% instead of 5% |
+| `market_hall` | 1 | L1: 40 wood, 40 stone | +5 gold/turn, your market fee 2% instead of 5% |
 | `wonder` | 5 | L1: 165 stone, 120 wood, 130 gold; L2: 330 stone, 240 wood, 260 gold; L3: 495 stone, 360 wood, 390 gold; L4: 660 stone, 480 wood, 520 gold; L5: 825 stone, 600 wood, 650 gold | **Wonder victory at stage 5** |
 
 Wonder rules: you may have a wonder in only one city (the first city where you build a stage), at most one stage per turn.
@@ -215,6 +224,8 @@ A stack can be split with several move orders (the total per unit type can't exc
    and the owner has no units there, it goes to the one of them hostile to the owner with the largest military power (ties: lowest seat) — so allies attacking together can capture.
    A city is captured only if its garrison was defeated. On city capture: walls drop one level; the victim's tiles in radius 1 (without other players' units) transfer;
    a wonder there is destroyed; and if it was the victim's **original capital**, the captor plunders 50% of the victim's food, wood, stone and gold.
+   Capturing an original capital from its original owner also moves floor(bank·0.5) of that player's bank to the captor as gold (`plunder.bank`)
+   and lowers that player's legacy by floor(legacy·0.25) (`legacy_lost` on the `city_captured` event). A recapture by the original owner does neither.
    Relic tiles are never handed over with a city.
 
 **Relics** are taken only by **occupation**: when, after the battles, the relic's owner has no units on it and some player with units there is hostile to the owner (or the relic is unowned), the capturer chosen as above becomes its owner (`tile_captured` event with `"relic": true`).
@@ -301,7 +312,12 @@ that turn, the contract is cancelled, the payer is fined influence and its publi
 is 1 influence per 5 units still owed (all remaining instalments, every resource
 counted 1:1), at least 25. What the payer cannot pay from its influence stock becomes public
 `influence_debt`, taken from its influence first thing in every later phase 7 until paid — spending your influence
-before defaulting does not help. A contract paid in full increments the payer's `contracts_honoured`. Contracts are **public**
+before defaulting does not help. A default also takes the **gold value of the remaining obligation** from the payer's
+bank (§5): gold still owed, plus every other resource still owed valued at its market spot price after that turn's
+market step (1 gold per unit for a resource without a price), each resource rounded down, with the same "still owed" as
+the fine. That value, or the whole bank if the bank holds less, moves from the payer's bank to the payee's gold
+(`seized` on the `contract_default` event). A default sets the payer's `economic_streak` to 0 (§11); legacy is
+unchanged. A contract paid in full increments the payer's `contracts_honoured`. Contracts are **public**
 (`contracts` in every view) and end if either party is eliminated.
 
 * **Loan** — lend 100 gold now, be repaid 12 gold per turn for 10 turns:
@@ -349,10 +365,25 @@ If several players meet a condition on the same turn, the one with the highest s
 |---|---|
 | conquest | own ≥ floor(n/2)+1 original capitals (a majority) (all of them if n ≤ 3; your own counts), or be the last player standing |
 | wonder | complete wonder stage 5 |
-| influence | influence ≥ 3350 |
+| influence | legacy ≥ L at 10 consecutive turn ends while you own your original capital |
 | relics | own and **guard** (have units on) ≥ ceil(R/2) relic tiles (a majority if R < 4) at 16 consecutive turn ends |
-| economic | gold ≥ 13500 |
+| economic | bank ≥ B at 10 consecutive turn ends while you own your original capital |
 | score | highest score when max_turns is reached |
+
+B = 3600 and L = 3000 apply to max_turns = 150; for other lengths both are multiplied by
+min(1, max(0.5, max_turns/150)) and rounded down to a multiple of 10 (`victory.thresholds.bank`,
+`.legacy`). `players[].economic_streak` / `influence_streak` count the consecutive turn ends; a turn end at which the
+requirement is not met sets the streak to 0. A contract default by you moves the gold value of the remaining obligation
+from your bank to the payee (up to the whole bank) and sets your `economic_streak` to 0 (§10). `streak_started` and
+`streak_ended` events {player, condition} are shown to everyone (`streak_ended` from a default also has
+`"reason": "contract_default"`).
+
+| max_turns | B (bank) | L (legacy) |
+|---|---|---|
+| 60 | 1800 | 1500 |
+| 90 | 2160 | 1800 |
+| 120 | 2880 | 2400 |
+| 150 | 3600 | 3000 |
 
 Thresholds by player count:
 
@@ -370,12 +401,13 @@ Thresholds by player count:
 | 11 | 34×34 | 6 | 11 | 6 |
 | 12 | 36×36 | 7 | 12 | 6 |
 
-**Score** = 2·tiles + 15·cities + 50·capitals_held + 60·wonder_stage + floor(influence/6) + floor(gold/25) + 15·relics_held + floor(military_power/20),
+**Score** = 2·tiles + 15·cities + 50·capitals_held + 60·wonder_stage + floor(influence/6) + floor(gold/25) + 15·relics_held + floor(military_power/20) + floor(bank/25),
 where military_power = Σ count·strength of your units.
 
 **Placements**: winner first; then surviving players by score; then eliminated players, latest-eliminated first.
-Each player's `victory_progress` gives progress (0–1) per condition. In fog games the economic and influence entries
-of other players are rounded down to a multiple of 0.1 (§14).
+Each player's `victory_progress` gives progress (0–1) per condition. `victory_progress.economic` =
+0.8·min(1, bank/B) + 0.2·economic_streak/10 (influence: legacy, L,
+influence_streak); it is 1.0 only when the condition is met.
 
 ## 12. Orders reference
 
@@ -397,6 +429,7 @@ Every order is a JSON object with `"type"`; coordinates are `[x, y]`.
 {"type":"propose_treaty","to":"p3","turns":20}
 {"type":"accept_treaty","from":"p3"}
 {"type":"break_treaty","with":"p3"}
+{"type":"bank","gold":60}                                      // up to 60 gold into your bank (§5)
 {"type":"say","to":"all","text":"hello"}
 {"type":"spy","target":"p3","mission":"treasury","invest":40}     // fog games only (§14)
 {"type":"counterintel","invest":30}                               // fog games only (§14)
@@ -408,8 +441,8 @@ and again when executed (e.g. resources are only checked then) — execution fai
 ## 13. The state view (what you see)
 
 * `turn`, `max_turns`, `status`, `deadline`, `season` {name, turns_left, modifiers, next}.
-* `you`: resources, caps, income, upkeep, claim_cost, settle_cost, market_fee, capital.
-* `players[]`: stats of every player (resources, income, cities, tiles, units, military_power, wonder_stage, relics_held, relics_guarded, relic_streak, betrayals, reputation, score, victory_progress, submitted); in fog games some fields of other players are `null` or rounded (§14).
+* `you`: resources, caps, income, upkeep, claim_cost, settle_cost, market_fee, bank_limit, capital.
+* `players[]`: stats of every player (resources, income, cities, tiles, units, military_power, wonder_stage, relics_held, relics_guarded, relic_streak, bank, legacy, economic_streak, influence_streak, betrayals, reputation, score, victory_progress, submitted); in fog games some fields of other players are `null` (§14).
 * `map`: width, height, terrain rows, owner grid, improvements, deposits, relics (`{x, y, owner, guarded}`).
 * `cities[]` (walls, warehouse, market_hall, wonder_stage, garrison), `armies[]` ({x, y, owner, units}).
 * `market`: fee, prices, pools, history (last 50 turns).
@@ -439,16 +472,14 @@ no sight.
 * The whole map: terrain, owners, improvements, deposits (with `remaining`) and relics (`owner`, `guarded`).
 * Every city (`cities[]`: buildings, wonder stage, garrison).
 * In every `players[]` row: id, name, color, alive, eliminated_turn, submitted, income, cities, tiles, capitals_held,
-  wonder_stage, relics_held, relics_guarded, relic_streak, betrayals, `reputation` (with `spy_incidents`), and the
-  conquest, wonder, relics and score entries of `victory_progress`.
+  wonder_stage, relics_held, relics_guarded, relic_streak, bank, legacy, economic_streak, influence_streak,
+  betrayals, `reputation` (with `spy_incidents`), and every entry of `victory_progress`.
 * Market prices, pools and history; treaties; public messages; executed deals (who and when) and contracts (who,
   turns left).
 
 ### Not shown for other players
 
 * `resources`, `units`, `military_power`, `upkeep`, `score` are `null` in other players' rows, which carry `"fogged": true` (your own row: `false`).
-* Their `victory_progress.economic` and `victory_progress.influence` are rounded down to a multiple of 0.1
-  (1.0 only when the threshold is reached).
 * `armies[]` lists only stacks on tiles in your sight (all of your own).
 * The `give`/`get` of `deals.log` entries between other players and the `per_turn` of their contracts.
 
@@ -473,9 +504,9 @@ While the fog is active, the events of a turn (`events`) are shown as follows:
 | `spy_detected` | the target only |
 | `city_captured` | everyone; `plunder` only to `from` and `to` |
 | `deal_executed` | everyone; `give`, `get` and `contracts` only to `from` and `to` |
-| `contract_default` | everyone; `per_turn`, `penalty` and `debt` only to `payer` and `payee` |
-| `build`, `city_founded`, `claim`, `eliminated`, `spy_incident`, `tile_captured`, `treaty_broken`, `treaty_expired`, `treaty_signed`, `victory`, `wonder_stage` | everyone |
-| `contract_completed`, `contract_paid`, `deal_countered`, `deal_expired`, `deal_failed`, `deal_proposed`, `deal_rejected`, `deal_withdrawn`, `order_failed`, `say`, `treaty_proposed` | as in standard games: the parties only (a `say` to `"all"`: everyone) |
+| `contract_default` | everyone; `per_turn`, `penalty`, `debt` and `seized` only to `payer` and `payee` |
+| `build`, `city_founded`, `claim`, `eliminated`, `spy_incident`, `streak_ended`, `streak_started`, `tile_captured`, `treaty_broken`, `treaty_expired`, `treaty_signed`, `victory`, `wonder_stage` | everyone |
+| `bank`, `contract_completed`, `contract_paid`, `deal_countered`, `deal_expired`, `deal_failed`, `deal_proposed`, `deal_rejected`, `deal_withdrawn`, `order_failed`, `say`, `treaty_proposed` | as in standard games: the parties only (a `say` to `"all"`: everyone) |
 
 Events sent to long-polling agents (`inbox`) follow the same rules.
 
@@ -533,7 +564,7 @@ sightings of that player's stacks (with `turn` = `as_of_turn`).
 * When the game ends, all views show everything (`fog.active` is false). In a running fog game the token-less
   spectator view has no sight; recorded full frames and the replay of a finished game show everything.
 * Rated fog games have their own leaderboard: `GET /api/leaderboard?mode=fog`.
-* Still observable in fog games: aggregate market pool movements; deposit `remaining`; banded progress;
+* Still observable in fog games: aggregate market pool movements; deposit `remaining`;
   `influence_debt`; that an owner guards a relic (`guarded`, `relics_guarded`); that a capturer had units on a
   captured tile or city; that deals and contracts exist and when; contract defaults; order failures on contact; a failed
   `accept` (one bit: which side could not deliver); espionage outcomes (they bound the target's rating); `diplomacy_seq`.

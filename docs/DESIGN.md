@@ -49,7 +49,7 @@ Resolution phases, in order:
 2. **Treaties** — `break_treaty` processed; `accept_treaty` for proposals made
    last turn; new `propose_treaty` stored.
 3. **Market** — batch auction per resource (§6).
-4. **Actions** — each player's `build`, `claim`, `settle`, `recruit`, `disband`
+4. **Actions** — each player's `build`, `claim`, `settle`, `recruit`, `disband`, `bank`
    orders executed **in the order submitted**, paying costs at execution time
    (an order that can't be paid is skipped with an error event). Contention:
    if two players `claim` or `settle` the same tile (or settle within 3
@@ -352,10 +352,27 @@ or after `max_turns` (default 150). Thresholds for n players:
 |------------|-------------|
 | conquest   | own ≥ `floor(n/2)+1` original capitals (a majority; n ≥ 4) or all of them (n ≤ 3), or be the last player standing |
 | wonder     | complete wonder stage 5 |
-| influence  | influence ≥ 3350 |
+| influence  | legacy ≥ L at 10 consecutive turn-ends while owning the original capital |
 | relics     | own **and guard** (units on the tile) ≥ `ceil(R/2)` relics (`floor(R/2)+1` if R < 4) at 16 consecutive turn-ends |
-| economic   | gold ≥ 13500 |
+| economic   | bank ≥ B at 10 consecutive turn-ends while owning the original capital |
 | score      | highest score when `max_turns` is reached |
+
+**Bank and legacy.** The `bank` order moves gold from stock into the bank
+(at most 10·cities + 10·cities-with-market_hall per turn, shared by all `bank`
+orders of the turn). Banked gold cannot be spent, traded or withdrawn; it pays
+floor(bank/100) gold interest in phase 7 (part of `income.gold`). Legacy is the
+total seasoned influence income received (added in phase 7 before contract
+instalments); spending influence never lowers it. Capturing an original capital
+from its original owner moves floor(bank·0.5) to the captor as gold
+(`plunder.bank`) and lowers the victim's legacy by floor(legacy·0.25)
+(`legacy_lost`). A contract default moves min(bank, gold value of the remaining
+obligation) from the payer's bank to the payee's gold (`seized`) and resets the
+payer's `economic_streak`. B = 3600 and L = 3000 at max_turns 150, scaled by
+min(1, max(0.5, max_turns/150)) and floored to a multiple of 10. Streaks
+(`economic_streak`, `influence_streak`) update in phase 8 after relic streaks;
+`streak_started` / `streak_ended` are public events. Bank, legacy and streaks
+are public in fog games too (interest in the public income reveals the bank;
+legacy is the running total of public income).
 
 Balance rationale and measurements: docs/BALANCE.md (each peaceful race takes
 roughly 70–110 turns when played well).
@@ -365,7 +382,8 @@ Several players meeting conditions on the same turn → highest score wins
 conquest, wonder, relics, influence, economic. Conquest needs n ≥ 2 players.
 
 **Score** = 2·tiles + 15·cities + 50·capitals_held + 60·wonder_stage +
-floor(influence/6) + floor(gold/25) + 15·relics_held + floor(military_power/20),
+floor(influence/6) + floor(gold/25) + 15·relics_held + floor(military_power/20)
++ floor(bank/25),
 where `military_power = Σ count·strength` and `relics_held` counts owned
 relics (guarded or not).
 
@@ -373,9 +391,10 @@ relics (guarded or not).
 eliminated players, latest-eliminated first.
 
 **Victory progress** reported per player as 0.0–1.0 per condition (conquest:
-capitals/required, wonder: stage/5, influence: influence/3350, relics:
-streak/16 if currently guarding the required count else 0, economic:
-gold/13500, score: turn/max_turns).
+capitals/required, wonder: stage/5, influence: 0.8·min(1, legacy/L) +
+0.2·influence_streak/10, relics: streak/16 if currently guarding the required
+count else 0, economic: 0.8·min(1, bank/B) + 0.2·economic_streak/10, score:
+turn/max_turns).
 
 ## 9. Orders (JSON)
 
@@ -431,7 +450,8 @@ diplomacy). Once the game is finished — or with `full=True` (offline
 tournaments, finished replays) — it shows all messages, offers, proposals and
 events. Views are freshly built on
 every call (callers may mutate them). Additional fields beyond the example:
-top-level `name`; `you.alive`, `you.market_fee`, `you.capital` ([x,y]);
+top-level `name`; `you.alive`, `you.market_fee`, `you.bank_limit`, `you.capital` ([x,y]);
+`players[].bank`, `.legacy`, `.economic_streak`, `.influence_streak` (§8);
 `players[].upkeep`; `players[].relics_guarded` and
 `map.relics[].guarded` (relics whose owner has units on them);
 `players[].reputation`, `deals`, `contracts`, `diplomacy_seq` (§13.5).
@@ -478,9 +498,9 @@ deals (no tiles, contract or peace) the viewer may see, as
   "deals": {"open":[...], "recent":[...], "log":[...]}, "contracts": [...], "diplomacy_seq": 57,
   "messages": [{"turn":11,"from":"p2","to":"all","text":"hello"}],
   "events": [{"turn":11,"type":"battle","x":5,"y":5,"sides":["p1","p2"],"winner":"p1","losses":{...}}],
-  "victory": {"thresholds":{"conquest_capitals":4,"wonder_stage":5,"influence":3350,
+  "victory": {"thresholds":{"conquest_capitals":4,"wonder_stage":5,"legacy":3000,
                             "relics_needed":3,"relics_total":6,"relic_turns":16,
-                            "economic_gold":13500,"max_turns":150},
+                            "bank":3600,"streak_turns":10,"max_turns":150},
               "result": null},
   "costs": { "units":{...}, "buildings":{...} }
 }

@@ -50,6 +50,7 @@ EVENT_POLICY = {
     "spy_report": "emitted",
     "spy_detected": "emitted",
     "counterintel": "emitted",
+    "bank": "emitted",
     "treaty_broken": "public",
     "treaty_signed": "public",
     "treaty_expired": "public",
@@ -64,6 +65,8 @@ EVENT_POLICY = {
     "deal_executed": "public",
     "contract_default": "public",
     "spy_incident": "public",
+    "streak_started": "public",
+    "streak_ended": "public",
     "market": "player",
     "starvation": "player",
     "recruit": "local",
@@ -75,7 +78,7 @@ EVENT_POLICY = {
 REDACT = {
     "city_captured": (("from", "to"), ("plunder",)),
     "deal_executed": (("from", "to"), ("give", "get", "contracts")),
-    "contract_default": (("payer", "payee"), ("per_turn", "penalty", "debt")),
+    "contract_default": (("payer", "payee"), ("per_turn", "penalty", "debt", "seized")),
 }
 
 _HIDDEN_KEYS = ("_vis", "_fog")
@@ -114,13 +117,6 @@ def vision(g: "Game", pid: str | None) -> frozenset:
 def vision_all(g: "Game") -> dict:
     """``{pid: frozenset(tiles)}`` for every living player."""
     return _vision_sets(g, [p.id for p in g.players if p.alive])
-
-
-def band(value, threshold: int) -> float:
-    """``value / threshold`` rounded down to a multiple of FOG_PROGRESS_STEP
-    (0.1), capped at 1.0; 1.0 only when the threshold is reached."""
-    steps = round(1 / C.FOG_PROGRESS_STEP)
-    return min(steps, (steps * max(0, int(value))) // threshold) / steps
 
 
 def ci_rating(g: "Game", pid: str) -> int:
@@ -260,14 +256,8 @@ def redact_event(ev: dict, viewer: str | None) -> dict:
 
 def redact_row(row: dict) -> dict:
     """Hide another player's stockpiles, army and exact score in a
-    ``players[]`` row (in place); round economic/influence progress down."""
-    res = row.get("resources") or {}
-    vp = row.get("victory_progress")
-    if vp and row.get("alive"):
-        if "economic" in vp:
-            vp["economic"] = band(res.get("gold", 0), C.ECONOMIC_VICTORY_GOLD)
-        if "influence" in vp:
-            vp["influence"] = band(res.get("influence", 0), C.INFLUENCE_VICTORY)
+    ``players[]`` row (in place). Bank, legacy, streaks and victory progress
+    stay exact."""
     for k in C.FOG_HIDDEN_FIELDS:
         row[k] = None
     row["fogged"] = True

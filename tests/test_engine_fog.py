@@ -63,12 +63,21 @@ def test_vision_radii():
     assert set(F.vision_all(g)) == {"p1", "p2"}
 
 
-def test_band_edges():
-    E, I = C.ECONOMIC_VICTORY_GOLD, C.INFLUENCE_VICTORY
-    assert F.band(6749, E) == 0.4 and F.band(6750, E) == 0.5
-    assert F.band(E - 1, E) == 0.9 and F.band(E, E) == 1.0 and F.band(10 * E, E) == 1.0
-    assert F.band(-50, E) == 0.0 and F.band(0, E) == 0.0
-    assert F.band(334, I) == 0.0 and F.band(335, I) == 0.1 and F.band(I - 1, I) == 0.9 and F.band(I, I) == 1.0
+def test_bank_legacy_and_progress_are_exact_in_fogged_rows():
+    g = world()
+    p2 = g.player("p2")
+    p2.resources.update(gold=6750, influence=1000)
+    p2.bank, p2.legacy, p2.economic_streak, p2.influence_streak = 1237, 611, 0, 0
+    g._invalidate()
+    full = g.spectator_view(full=True)
+    r = row(g.player_view("p1"), "p2")
+    assert r["fogged"] is True and r["resources"] is None
+    for k in ("bank", "legacy", "economic_streak", "influence_streak", "victory_progress"):
+        assert r[k] == row(full, "p2")[k], k
+    assert r["victory_progress"]["economic"] == round(0.8 * 1237 / C.BANK_VICTORY, 3)
+    assert r["victory_progress"]["influence"] == round(0.8 * 611 / C.LEGACY_VICTORY, 3)
+    assert "progress_step" not in g.player_view("p1")["fog"]
+    assert "progress_step" not in g.player_view("p1")["costs"]["fog"]
 
 
 # ============================================================ player rows and view shape
@@ -86,14 +95,9 @@ def test_own_row_complete_rival_rows_redacted():
         r, true = row(v, q), row(full, q)
         assert PLAYER_KEYS <= set(r) and r["fogged"] is True
         assert {k for k in r if r[k] is None and true.get(k) is not None} == HIDDEN
-        for k in PLAYER_KEYS - HIDDEN - {"victory_progress", "reputation"}:
+        for k in PLAYER_KEYS - HIDDEN - {"reputation"}:
             assert r[k] == true[k], k
         assert r["reputation"] == dict(true["reputation"])
-        assert {k: v_ for k, v_ in r["victory_progress"].items() if k not in ("economic", "influence")} == \
-               {k: v_ for k, v_ in true["victory_progress"].items() if k not in ("economic", "influence")}
-    assert row(v, "p2")["victory_progress"]["economic"] == 0.5
-    assert row(v, "p2")["victory_progress"]["influence"] == 0.2
-    assert row(full, "p2")["victory_progress"]["economic"] == round(6750 / C.ECONOMIC_VICTORY_GOLD, 3)
     assert v["you"]["counterintel"] == {"pool": 0, "rating": C.CI_BASE + C.CI_PER_CITY}
     assert me["reputation"]["spy_incidents"] == 0
     fog = v["fog"]

@@ -107,7 +107,7 @@ WAREHOUSE_STORAGE = 200
 CAPPED_RESOURCES = ("food", "wood", "stone")
 
 RELIC_INFLUENCE = 2
-MARKET_HALL_GOLD = 3
+MARKET_HALL_GOLD = 5
 
 # Tile improvements (one per owned non-city tile).
 IMPROVEMENTS = {
@@ -214,9 +214,18 @@ DEFAULT_MAX_TURNS = 150
 RELICS_PER_PLAYER = 1             # R = RELICS_PER_PLAYER * n relic tiles
 RELIC_HALF_MIN = 4                # R >= this: hold ceil(R/2) relics; else a majority
 WONDER_VICTORY_STAGE = 5
-INFLUENCE_VICTORY = 3350
 RELIC_VICTORY_TURNS = 16
-ECONOMIC_VICTORY_GOLD = 13500
+BANK_VICTORY = 3600            # economic: bank >= this (at max_turns = VICTORY_REF_TURNS)
+LEGACY_VICTORY = 3000          # influence: legacy >= this
+VICTORY_STREAK_TURNS = 10      # consecutive turn ends, original capital owned
+VICTORY_REF_TURNS = DEFAULT_MAX_TURNS
+VICTORY_MIN_SCALE = 0.5
+BANK_PER_CITY = 10             # gold that may be banked per turn per owned city
+BANK_PER_MARKET_HALL = 10      # ... plus this per owned city with a market_hall
+BANK_INTEREST_DIVISOR = 100    # floor(bank / 100) gold per turn
+BANK_SEIZE_FRACTION = PLUNDER_FRACTION
+LEGACY_CAPITAL_LOSS = 0.25
+LEDGER_PROGRESS_WEIGHT = 0.8
 CONQUEST_SMALL_GAME = 3           # n <= this: must own all original capitals
 
 SCORE_WEIGHTS = {"tiles": 2, "cities": 15, "capitals_held": 50, "wonder_stage": 60, "relics_held": 15}
@@ -232,7 +241,6 @@ FOG_VISION_TERRITORY = 1   # Chebyshev sight radius around every owned tile
 FOG_VISION_CITY = 2        # ... around every owned city
 FOG_VISION_UNITS = 1       # ... around every tile where the player has units
 FOG_VISION_CAVALRY = 2     # ... if those units include cavalry
-FOG_PROGRESS_STEP = 0.1    # other players' economic/influence progress is floored to this step
 FOG_SIGHTING_TURNS = 5     # remembered rival stacks older than this many turns are dropped
 FOG_HIDDEN_FIELDS = ("resources", "units", "military_power", "upkeep", "score")
 FOG_ORDER_TYPES = ("spy", "counterintel")

@@ -12,6 +12,7 @@ class Player:
         "capital", "betrayals", "relic_streak", "wonder_city", "city_counter",
         "tiles", "final_score", "deals", "contracts_honoured", "defaults",
         "influence_debt", "ci_pool", "spy_incidents",
+        "bank", "legacy", "economic_streak", "influence_streak", "banked",
     )
 
     def __init__(self, pid: str, name: str, index: int, color: str):
@@ -34,6 +35,12 @@ class Player:
         self.contracts_honoured = 0          # contracts paid in full as payer
         self.defaults = 0                    # contracts defaulted on as payer
         self.influence_debt = 0              # unpaid default penalties (taken from future influence)
+        # economic / influence victory (docs/RULES.md §5, §11)
+        self.bank = 0                        # banked gold (cannot be spent)
+        self.legacy = 0                      # total influence income received
+        self.economic_streak = 0             # consecutive turn ends with bank >= target, capital held
+        self.influence_streak = 0            # ... with legacy >= target
+        self.banked = 0                      # gold banked this turn (allowance used)
         # fog games only (docs/RULES.md §14)
         self.ci_pool = 0                     # hidden counter-intelligence pool (gold), decays each turn
         self.spy_incidents = 0               # public count of failed spy missions by this player

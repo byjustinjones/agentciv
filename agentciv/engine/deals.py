@@ -24,6 +24,7 @@ same seed reproduces a game exactly.
 """
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 from . import constants as C
@@ -798,6 +799,18 @@ def default_penalty(per_turn: dict, turns_left: int) -> int:
     return max(C.CONTRACT_DEFAULT_PENALTY, -(-owed // C.CONTRACT_DEFAULT_OWED_PER_INFLUENCE))
 
 
+def obligation_value(per_turn: dict, turns_left: int, prices: dict) -> int:
+    """Gold value of ``turns_left`` unpaid instalments of ``per_turn``: gold
+    at face value, every other resource at ``prices[r]`` gold per unit (1 if
+    it has no market price), each resource rounded down."""
+    n = max(0, turns_left)
+    total = 0
+    for r, v in per_turn.items():
+        qty = v * n
+        total += qty if r == "gold" else int(math.floor(qty * prices.get(r, 1) + 1e-9))
+    return total
+
+
 def pay_contracts(g: "Game") -> None:
     """Phase 7, after yields and before upkeep: every contract (in creation
     order) pays its full instalment or defaults."""
@@ -831,9 +844,14 @@ def pay_contracts(g: "Game") -> None:
             payer.resources["influence"] -= taken
             payer.influence_debt += penalty - taken      # paid from future influence
             payer.defaults += 1
+            # the remaining obligation is taken from the payer's bank (up to all of it)
+            seized = min(payer.bank, obligation_value(per, c["turns_left"], g._prices()))
+            payer.bank -= seized
+            payee.resources["gold"] += seized
             _emit(g, "contract_default", None, contract=c["id"], payer=payer.id, payee=payee.id,
                   per_turn=per, turns_left=c["turns_left"], penalty=penalty, debt=penalty - taken,
-                  deal=c["deal"])
+                  seized=seized, deal=c["deal"])
+            g._end_streak(payer, "economic", reason="contract_default")
     g.contracts = keep
     g._invalidate()
 
