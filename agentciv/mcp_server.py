@@ -24,7 +24,8 @@ import sys
 import traceback
 from typing import Any
 
-from .client import AgentCivClient, ApiError, _deals_lines, ascii_map, describe_event, summarize_view
+from .client import (AgentCivClient, ApiError, _deals_lines, ascii_map, describe_event, order_warnings,
+                     summarize_view)
 
 PROTOCOL_VERSION = "2025-06-18"
 SUPPORTED_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
@@ -368,6 +369,10 @@ class AgentCivMCP:
             if err.get("example"):
                 line += f" — correct shape: {json.dumps(err['example'], separators=(',', ':'))}"
             lines.append(line)
+        warnings = order_warnings(self.client.state(), orders)
+        if warnings:
+            lines.append("Warnings (estimates; these orders were accepted but may not work out):")
+            lines += [f"  - {w}" for w in warnings]
         if res["errors"]:
             lines.append("Fix the rejected orders and resubmit the WHOLE list now (resubmitting replaces it; "
                          "the turn waits only ~2 s for a fix — submit with ready=false first if you need longer), "

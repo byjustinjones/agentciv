@@ -49,6 +49,16 @@ def test_summary_mentions_threats_and_proposals():
     assert 'accept_treaty' in text
 
 
+def test_summary_lists_other_players_cities_with_units_inside():
+    g = new_game(2, seed=5)
+    x, y = g.xy(g.player("p2").capital)
+    g.place_units(x, y, "p2", {"archer": 4})
+    text = summarize_view(g.player_view("p1"))
+    line = next(l for l in text.splitlines() if f"p2 " in l and f"[{x},{y}]" in l and "walls" in l)
+    assert "(original capital)" in line and "archer" in line and "unit power" in line
+    assert "Other players' cities (1):" in text
+
+
 def test_ascii_map_lobby():
     g = new_game(2, start=False)
     assert "not started" in ascii_map(g.spectator_view())
@@ -210,3 +220,94 @@ def test_run_bot_recomputes_orders_after_its_own_post_order_accept(server):
                 pass
         t.join(30)
     assert out["r"]["result"]["turn"] == 1
+
+
+def test_summary_shows_relic_guards_and_every_victory_clock():
+    g = new_game(2, seed=5)
+    r = g.relics[0]
+    x, y = g.xy(r)
+    g.owner[r] = "p2"
+    g.place_units(x, y, "p2", {"infantry": 3})
+    g.player("p2").relic_streak = 4
+    g._stats = None
+    text = summarize_view(g.player_view("p1"))
+    relic = next(l for l in text.splitlines() if l.startswith(f"  [{x},{y}] owner p2"))
+    assert "guarded" in relic and "3 infantry" in relic and "streak 4" in relic
+    p2 = next(l for l in text.splitlines() if l.startswith("  p2 P2: "))
+    assert "streak 4/16" in p2 and "capitals 1/" in p2 and "wonder 0/5" in p2
+
+
+def test_summary_income_matches_what_the_engine_credits_and_warns_of_starvation():
+    import re
+    g = new_game(2, seed=5)
+    for season in ("summer", "winter"):
+        while g.player_view("p1")["season"]["name"] != season:
+            g.step()
+        v = g.player_view("p1")
+        before = v["you"]["resources"]["food"]
+        shown = int(re.search(r"Food this turn: \d+ \+ (\d+) income - (\d+) upkeep", summarize_view(v)).group(1))
+        upkeep = v["you"]["upkeep"]
+        g.step()
+        after = g.player("p1").resources["food"]
+        cap = g.caps("p1")["food"]
+        assert after == min(cap, before + shown - upkeep), (season, before, shown, upkeep, after)
+    x, y = g.xy(g.player("p1").capital)
+    g.place_units(x, y, "p1", {"cavalry": 60})
+    g.player("p1").resources["food"] = 10
+    g._stats = None
+    assert "WARNING: food runs out this turn" in summarize_view(g.player_view("p1"))
+
+
+def test_summary_puts_my_failed_orders_first():
+    g = new_game(2, seed=5)
+    g.submit_orders("p1", [{"type": "market", "side": "buy", "resource": "stone", "qty": 150}])
+    g.step()
+    text = summarize_view(g.player_view("p1"))
+    head = text.split("Your cities")[0]
+    assert "LAST TURN, THESE FAILED OR HURT YOU:" in head and "cannot afford" in head
+
+
+def test_order_warnings_market_order_and_recruit_food():
+    from agentciv.client import order_warnings
+    g = new_game(2, seed=5)
+    g.step()
+    v = g.player_view("p1")
+    gold = v["you"]["resources"]["gold"]
+    w = order_warnings(v, [{"type": "market", "side": "buy", "resource": "food", "qty": gold},
+                           {"type": "market", "side": "sell", "resource": "stone", "qty": 40}])
+    assert any("likely FAIL" in s for s in w) and any("in that order" in s for s in w)
+    x, y = g.xy(g.player("p1").capital)
+    w = order_warnings(v, [{"type": "recruit", "at": [x, y], "unit": "cavalry", "count": 50}])
+    assert any("will FAIL" in s for s in w)
+    assert order_warnings(v, []) == []
+
+
+def test_summary_counts_down_treaties_and_shows_all_resources():
+    g = new_game(3, seed=5)
+    g.treaties[g._pair("p1", "p2")] = g.turn + 3
+    text = summarize_view(g.player_view("p1"))
+    line = next(l for l in text.splitlines() if l.startswith("Your treaties:"))
+    assert "p2: peace until turn" in line and "ENDS SOON" in line and "p3: NO treaty" in line
+    p2 = next(l for l in text.splitlines() if l.startswith("  p2 P2: "))
+    food = g.player("p2").resources["food"]
+    assert f"| {food} " in p2  # food, wood, stone, gold, influence are all listed
+
+
+def test_order_warnings_limits_all_resources_and_open_offers():
+    from agentciv.client import order_warnings
+    g = new_game(2, seed=5)
+    g.step()
+    v = g.player_view("p1")
+    w = order_warnings(v, [{"type": "market", "side": "buy", "resource": "wood", "qty": 5, "limit": 0.01}])
+    assert any("has limit 0.01" in s for s in w)
+    x, y = g.xy(g.player("p1").capital)
+    wood = v["you"]["resources"]["wood"]
+    w = order_warnings(v, [{"type": "recruit", "at": [x, y], "unit": "archer", "count": wood // 15 + 1}])
+    assert any("wood" in s and "will FAIL" in s for s in w)
+    gold = g.player("p1").resources["gold"]
+    res = g.diplomacy("p1", [{"type": "propose", "to": "p2", "give": {"gold": gold}, "get": {}}])
+    assert res[0]["ok"], res
+    v = g.player_view("p1")
+    w = order_warnings(v, [{"type": "recruit", "at": [x, y], "unit": "infantry", "count": 1}])
+    assert any("open offers" in s for s in w)
+    assert "Promised in your open offers" in summarize_view(v)

@@ -554,6 +554,206 @@ def _units_str(units: dict) -> str:
     return " ".join(f"{n} {u}" for u, n in units.items() if n) or "none"
 
 
+def seasonal_income(view: dict, pid: str | None = None) -> dict:
+    """This turn's income (the engine already applies the current season's
+    modifier to ``income`` in the view), before upkeep."""
+    pid = pid or (view.get("you") or {}).get("id")
+    you = view.get("you") or {}
+    inc = you.get("income") or next((p.get("income", {}) for p in view.get("players", []) if p["id"] == pid), {})
+    return dict(inc)
+
+
+def _next_season_food_mod(view: dict) -> tuple[str | None, float]:
+    season = view.get("season") or {}
+    for s in ((view.get("costs") or {}).get("seasons") or {}).get("cycle", []):
+        if s.get("name") == season.get("next"):
+            return s["name"], s.get("modifiers", {}).get("food", 1.0)
+    return None, 1.0
+
+
+def _food_outlook(view: dict, pid: str, food: int, upkeep: int, extra_upkeep: int = 0) -> list[str]:
+    """Food balance at the end of this turn and a starvation warning (§ upkeep)."""
+    you = view.get("you") or {}
+    gain = seasonal_income(view, pid).get("food", 0)
+    upkeep += extra_upkeep
+    end = food + gain - upkeep
+    lines = [f"Food this turn: {food} + {gain} income - {upkeep} upkeep = {end} at turn end."]
+    if end < 0:
+        lines.append(f"WARNING: food runs out this turn; about {math.ceil(-end / 2)} unit(s) will starve "
+                     "(highest-upkeep units first) unless you add food or disband units.")
+    season = view.get("season") or {}
+    nxt, mod = _next_season_food_mod(view)
+    cur_mod = ((season.get("modifiers") or {}).get("food") or 1.0)
+    base_food = gain / cur_mod  # income in the view is already seasoned
+    next_net = int(math.floor(base_food * mod + 1e-9)) - upkeep
+    if nxt and next_net < 0:
+        at_switch = end + max(0, (season.get("turns_left") or 1) - 1) * (gain - upkeep)
+        turns = max(at_switch, 0) // -next_net
+        lasts = f"stored food lasts about {turns} turn(s) of {nxt}" if turns else "units start starving at once"
+        lines.append(f"Next season ({nxt}, in {season.get('turns_left')} turn(s)) food income becomes "
+                     f"{next_net + upkeep}/turn against {upkeep} upkeep: {next_net:+d}/turn, so {lasts}.")
+    return lines
+
+
+def _my_last_turn_problems(view: dict, pid: str, max_events: int) -> list[str]:
+    mine = [e for e in view.get("events", []) if e.get("player") == pid
+            and e.get("type") in ("order_failed", "starvation")]
+    if not mine:
+        return []
+    out = ["LAST TURN, THESE FAILED OR HURT YOU:"]
+    for e in mine[:max_events]:
+        if e["type"] == "starvation":
+            out.append(f"  starvation: food short by {e.get('deficit')}, lost {_units_str(e.get('lost') or {})}")
+        else:
+            out.append(f"  order #{e.get('index')} ({e.get('order_type')}) failed: {e.get('reason')}")
+    return out
+
+
+def _progress_str(p: dict, thr: dict) -> str:
+    vp = p.get("victory_progress") or {}
+    rt = thr.get("relic_turns") or 16
+    return (f"capitals {p.get('capitals_held', 0)}/{thr.get('conquest_capitals', '?')}, "
+            f"wonder {p.get('wonder_stage', 0)}/{thr.get('wonder_stage', 5)}, "
+            f"relics {p.get('relics_held', 0)} held {p.get('relics_guarded', 0)} guarded "
+            f"(need {thr.get('relics_needed', '?')}) streak {p.get('relic_streak', 0)}/{rt}, "
+            f"influence {vp.get('influence', 0) * 100:.0f}%, economic {vp.get('economic', 0) * 100:.0f}%")
+
+
+def _relic_lines(view: dict, players: dict, rules: dict) -> list[str]:
+    relics = (view.get("map") or {}).get("relics", [])
+    if not relics:
+        return []
+    on_tile: dict = {}
+    for a in view.get("armies", []):
+        on_tile.setdefault((a["x"], a["y"]), []).append(a)
+    out = ["Relics (units standing on each tile are public):"]
+    for r in relics:
+        stacks = on_tile.get((r["x"], r["y"]), [])
+        units = "; ".join(f"{a['owner']} {_units_str(a['units'])} (power {_power(a['units'], rules)})"
+                          for a in stacks if any(a["units"].values())) or "no units"
+        owner = r.get("owner")
+        streak = f", owner's streak {players[owner].get('relic_streak', 0)}" if owner in players else ""
+        out.append(f"  [{r['x']},{r['y']}] owner {owner or 'none'}, "
+                   f"{'guarded' if r.get('guarded') else 'unguarded'}: {units}{streak}")
+    return out
+
+
+def _auction_price(res: float, gold: float, net: int) -> float:
+    """Average price of ``net`` units bought (>0) or sold (<0) against a pool (engine/market.py)."""
+    if net == 0 or res <= 0:
+        return gold / res if res > 0 else math.inf
+    k = res * gold
+    if net > 0:
+        return (k / (res - net) - gold) / net if net < res else math.inf
+    return (gold - k / (res - net)) / -net
+
+
+def _pending_gives(view: dict, pid: str) -> tuple[dict, list]:
+    """Resources you'd hand over at once if the other side accepted your open offers now."""
+    total: dict = {}
+    ids = []
+    for d in (view.get("deals") or {}).get("open") or []:
+        if d.get("from") != pid:
+            continue
+        give = {r: v for r, v in (d.get("give") or {}).items() if r in RESOURCES and isinstance(v, (int, float)) and v}
+        if give:
+            ids.append(d["id"])
+            for r, v in give.items():
+                total[r] = total.get(r, 0) + v
+    return total, ids
+
+
+def order_warnings(view: dict, orders: list) -> list[str]:
+    """Estimated problems with an order list that pre-validation cannot see:
+    market orders that will likely fail (not enough gold when that resource
+    clears — the market clears food, then wood, then stone, and a sale only
+    funds buys of resources cleared after it — or a price limit the estimated
+    price misses); recruit/settle orders the resources on hand after the market
+    won't cover; food running out once new units' upkeep is added; and open
+    offers of yours whose acceptance would take resources before your orders
+    run. Estimates use current pool prices and your orders alone."""
+    you = view.get("you") or {}
+    pid = you.get("id")
+    if not pid or not isinstance(orders, list):
+        return []
+    rules = view.get("costs") or {}
+    res = dict(you.get("resources") or {})
+    fee = you.get("market_fee") or 0.05
+    pools = (view.get("market") or {}).get("pools") or {}
+    market_order = (rules.get("market") or {}).get("resources") or ["food", "wood", "stone"]
+    orders = [o for o in orders if isinstance(o, dict)]
+    warnings = []
+    after = dict(res)  # resources once the market has cleared
+    failed_at = None   # position in market_order of the first buy that likely fails
+    sold_at = []       # positions of resources sold
+    for i, r in enumerate(market_order):
+        mine = [o for o in orders if o.get("type") == "market" and o.get("resource") == r]
+        buy = sum(int(o.get("qty") or 0) for o in mine if o.get("side") == "buy")
+        sell = sum(int(o.get("qty") or 0) for o in mine if o.get("side") == "sell")
+        if not buy and not sell:
+            continue
+        pool = pools.get(r) or {}
+        price = _auction_price(pool.get("resource", 0), pool.get("gold", 0), buy - sell)
+        for o in mine:
+            lim = o.get("limit")
+            if not isinstance(lim, (int, float)):
+                continue
+            if o.get("side") == "buy" and price > lim:
+                warnings.append(f"market buy of {o.get('qty')} {r} has limit {lim} but the price is about "
+                                f"{price:.3f}: it will likely FAIL (limit orders are dropped, not partly filled)")
+                buy -= int(o.get("qty") or 0)
+            elif o.get("side") == "sell" and price < lim:
+                warnings.append(f"market sell of {o.get('qty')} {r} has limit {lim} but the price is about "
+                                f"{price:.3f}: it will likely FAIL")
+                sell -= int(o.get("qty") or 0)
+        cost = math.ceil(buy * price * (1 + fee)) if buy > 0 else 0
+        if buy > 0 and cost > after.get("gold", 0):
+            warnings.append(f"market buy of {buy} {r} costs about {cost} gold but only about "
+                            f"{after.get('gold', 0)} gold is available when {r} clears; it will likely FAIL")
+            failed_at = i if failed_at is None else failed_at
+            buy, cost = 0, 0
+        if sell > 0:
+            sold_at.append(i)
+        after["gold"] = after.get("gold", 0) + (math.floor(sell * price * (1 - fee)) if sell > 0 else 0) - cost
+        after[r] = after.get(r, 0) + max(buy, 0) - max(sell, 0)
+    if failed_at is not None and any(i > failed_at for i in sold_at):
+        warnings.append("the market clears " + ", ".join(market_order) + " in that order: gold from selling a "
+                        "resource later in that list is not available for an earlier buy the same turn")
+
+    unit_specs = rules.get("units") or {}
+    extra_upkeep = 0
+    need: dict = {}
+    for o in orders:
+        cost = {}
+        if o.get("type") == "recruit" and o.get("unit") in unit_specs:
+            n = int(o.get("count") or 0)
+            spec = unit_specs[o["unit"]]
+            extra_upkeep += n * spec.get("upkeep", 0)
+            cost = {r: n * v for r, v in (spec.get("cost") or {}).items()}
+        elif o.get("type") == "settle":
+            cost = dict(you.get("settle_cost") or {})
+        for r, v in cost.items():
+            need[r] = need.get(r, 0) + v
+    short = {r: v - after.get(r, 0) for r, v in need.items() if v > after.get(r, 0)}
+    if short:
+        warnings.append("recruit/settle orders need " + ", ".join(f"{need[r]} {r}" for r in short)
+                        + " but only about " + ", ".join(f"{after.get(r, 0)} {r}" for r in short)
+                        + " will be on hand when actions run (after the market; income arrives at the end of "
+                        "the turn): the later ones will FAIL")
+    elif extra_upkeep or after.get("food", 0) < res.get("food", 0):
+        warnings += _food_outlook(view, pid, after.get("food", 0) - need.get("food", 0),
+                                  you.get("upkeep", 0), extra_upkeep)[1:]
+    pending, ids = _pending_gives(view, pid)
+    if pending:
+        tight = [r for r, v in pending.items() if after.get(r, 0) - need.get(r, 0) - v < 0]
+        if tight:
+            warnings.append(f"your open offers {', '.join(ids)} would hand over "
+                            + ", ".join(f"{pending[r]} {r}" for r in tight)
+                            + " the moment they are accepted, before these orders run; if that happens, "
+                            "some of these orders will fail (withdraw an offer to keep the resources)")
+    return warnings
+
+
 def _power(units: dict, rules: dict | None = None) -> int:
     strength = {"infantry": 10, "archer": 8, "cavalry": 12, "siege": 4}
     if rules:
@@ -603,7 +803,8 @@ def ascii_map(view: dict, pid: str | None = None) -> str:
     legend = ", ".join(f"{_owner_symbol(p)}={p}{' (you)' if p == you else ''} {names[p]}" for p in names)
     lines.append("")
     lines.append("Legend: . plains  f forest  h hills  g gold  m mountain  ~ water  @ capital  C city  "
-                 "* relic  UPPERCASE = units present. 2nd char = owner: " + legend)
+                 "* relic  UPPERCASE = units present (@, C and * tiles may also hold units: see the city and relic "
+                 "lists in the state summary). 2nd char = owner: " + legend)
     return "\n".join(lines)
 
 
@@ -730,7 +931,7 @@ def summarize_view(view: dict, pid: str | None = None, max_events: int = 12, max
 
     if pid and me:
         res = you.get("resources") or me.get("resources", {})
-        inc = you.get("income") or me.get("income", {})
+        inc = seasonal_income(view, pid)
         caps = you.get("caps") or {}
         parts = []
         for r in RESOURCES:
@@ -739,14 +940,21 @@ def summarize_view(view: dict, pid: str | None = None, max_events: int = 12, max
         out.append(f"\nYOU: {pid} {me.get('name')} — {'alive' if me.get('alive', True) else 'ELIMINATED'}, "
                    f"score {me.get('score')}, {me.get('cities')} cities, {me.get('tiles')} tiles, "
                    f"military power {me.get('military_power')}.")
-        out.append("Resources (income/turn, before upkeep): " + ", ".join(parts))
+        out.append("Resources (income this turn with the season modifier, before upkeep): " + ", ".join(parts))
+        upkeep = you.get("upkeep", me.get("upkeep", 0))
         if you:
             sc = you.get("settle_cost") or {}
-            out.append(f"Upkeep {you.get('upkeep', me.get('upkeep', 0))} food/turn. Claim costs "
+            out.append(f"Upkeep {upkeep} food/turn. Claim costs "
                        f"{you.get('claim_cost')} influence. Settle costs "
                        f"{', '.join(f'{v} {k}' for k, v in sc.items())}. Market fee "
                        f"{(you.get('market_fee') or 0) * 100:.0f}%. Orders submitted this turn: "
                        f"{'yes' if you.get('submitted') else 'no'}.")
+        out += _food_outlook(view, pid, res.get("food", 0), upkeep)
+        pending, ids = _pending_gives(view, pid)
+        if pending:
+            out.append(f"Promised in your open offers ({', '.join(ids)}): {_units_str(pending)} — handed over the "
+                       "moment an offer is accepted, even mid-turn before your orders run.")
+        out += _my_last_turn_problems(view, pid, max_events)
 
         my_cities = [c for c in view.get("cities", []) if c["owner"] == pid]
         out.append(f"\nYour cities ({len(my_cities)}):")
@@ -783,10 +991,41 @@ def summarize_view(view: dict, pid: str | None = None, max_events: int = 12, max
                                f"(power {_power(a['units'], rules)}), {d} tile(s) from {c['name']}")
         out.append("Other players' armies within 3 tiles of your cities: " + ("\n" + "\n".join(nearby) if nearby else "none"))
 
+        # every other player's city: walls and the units standing in it (all public)
+        on_tile = {(a["x"], a["y"], a["owner"]): a["units"] for a in view.get("armies", [])}
+        others = [c for c in view.get("cities", []) if c["owner"] != pid]
+        lines = []
+        for c in others:
+            b = c.get("buildings", {})
+            units = on_tile.get((c["x"], c["y"], c["owner"])) or {}
+            inside = (f"{_units_str(units)} (unit power {_power(units, rules)})"
+                      if any(units.values()) else "no units")
+            lines.append(f"  {c['owner']} {c['name']} at [{c['x']},{c['y']}]"
+                         f"{' (original capital)' if c.get('capital') else ''}: walls {b.get('walls', 0)}, "
+                         f"garrison {c.get('garrison', 0)}, {inside}, wonder stage {c.get('wonder_stage', 0)}")
+        out.append(f"Other players' cities ({len(others)}): " + ("\n" + "\n".join(lines) if lines else "none"))
+
     # diplomacy
     treaties = view.get("treaties", [])
-    if treaties:
-        out.append("\nTreaties: " + "; ".join(f"{t['a']}–{t['b']} until turn {t['until_turn']}" for t in treaties))
+    if pid and me:
+        turn = view.get("turn") or 0
+        mine = {(t["b"] if t["a"] == pid else t["a"]): t["until_turn"] for t in treaties if pid in (t["a"], t["b"])}
+        lines = []
+        for q in sorted(players):
+            if q == pid or not players[q].get("alive", True):
+                continue
+            if q in mine:
+                left = mine[q] - turn
+                soon = " — ENDS SOON" if left <= 5 else ""
+                lines.append(f"{q}: peace until turn {mine[q]} ({left} turn(s) left){soon}")
+            else:
+                lines.append(f"{q}: NO treaty (either side may attack)")
+        if lines:
+            out.append("\nYour treaties: " + "; ".join(lines))
+    others_t = [t for t in treaties if pid not in (t["a"], t["b"])]
+    if others_t:
+        out.append(("Other treaties: " if pid and me else "\nTreaties: ")
+                   + "; ".join(f"{t['a']}–{t['b']} until turn {t['until_turn']}" for t in others_t))
     props = [p for p in view.get("treaty_proposals", []) if p.get("to") == pid]
     for p in props:
         out.append(f"Treaty proposal from {p['from']} ({p['turns']} turns) — accept THIS turn with "
@@ -812,31 +1051,23 @@ def summarize_view(view: dict, pid: str | None = None, max_events: int = 12, max
                    f"{thr.get('wonder_stage')}, influence {thr.get('influence')}, relics "
                    f"{thr.get('relics_needed')}/{thr.get('relics_total')} held for {thr.get('relic_turns')} turns, "
                    f"economic {thr.get('economic_gold')} gold, else best score at turn {thr.get('max_turns')}.")
-    out.append("Players (score | cities tiles | power | gold infl | wonder relics | best victory progress | "
-               "reputation):")
+    out.append("Players (score | cities tiles | power | food wood stone gold infl | victory progress toward every "
+               "condition | reputation):")
     for p in sorted(players.values(), key=lambda p: -p.get("score", 0)):
-        vp = {k: v for k, v in (p.get("victory_progress") or {}).items() if k != "score"}
-        best = max(vp.items(), key=lambda kv: kv[1]) if vp else ("-", 0)
         flag = "" if p.get("alive", True) else " [eliminated]"
         me_tag = " <- you" if p["id"] == pid else ""
         r = p.get("resources", {})
         out.append(f"  {p['id']} {p['name']}{flag}{me_tag}: {p.get('score')} | {p.get('cities')} {p.get('tiles')} | "
-                   f"{p.get('military_power')} | {r.get('gold', 0)} {r.get('influence', 0)} | "
-                   f"{p.get('wonder_stage', 0)} {p.get('relics_held', 0)} | {best[0]} {best[1] * 100:.0f}%"
-                   + _reputation_str(p))
-    relics = (view.get("map") or {}).get("relics", [])
-    if relics:
-        out.append("Relics: " + ", ".join(f"[{r['x']},{r['y']}] {r['owner'] or 'unowned'}" for r in relics))
+                   f"{p.get('military_power')} | "
+                   + " ".join(str(r.get(k, 0)) for k in RESOURCES) + f" | {_progress_str(p, thr)}" + _reputation_str(p))
+    out += _relic_lines(view, players, rules)
 
     events = view.get("events", [])
     if events:
-        mine = [e for e in events if e.get("type") == "order_failed" and e.get("player") == pid]
+        mine = [e for e in events if e.get("player") == pid and e.get("type") in ("order_failed", "starvation")]
         others = [e for e in events if e not in mine and e.get("type") in (
             "battle", "city_captured", "city_founded", "eliminated", "treaty_signed", "treaty_broken",
             "wonder_stage", "starvation", "trade_executed", "victory", "tile_captured", "contract_default")]
-        if mine:
-            out.append("\nYour failed orders last turn:")
-            out += [f"  #{e.get('index')} {e.get('order_type')}: {e.get('reason')}" for e in mine[:max_events]]
         if others:
             out.append("Notable events last turn:")
             for e in others[:max_events]:

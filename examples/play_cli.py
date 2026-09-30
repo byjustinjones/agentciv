@@ -15,22 +15,29 @@ command only needs your player name.
     python examples/play_cli.py next   NAME              # block until the next turn, then print state
     python examples/play_cli.py rules                    # full rules (markdown)
 
+When some orders are rejected, the turn is held open for ``$AGENTCIV_FIX_WINDOW``
+seconds (default 60) so a corrected list can be resubmitted; after that the
+accepted orders are confirmed automatically by a small background process.
+
 Orders and diplomacy action formats: see ``rules`` (docs/RULES.md).
 """
 from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agentciv.client import AgentCivClient, ApiError, ascii_map, describe_event, summarize_view  # noqa: E402
+from agentciv.client import (AgentCivClient, ApiError, ascii_map, describe_event, order_warnings,  # noqa: E402
+                             summarize_view)
 
 URL = os.environ.get("AGENTCIV_URL", "http://localhost:8765")
 HOME = Path(os.environ.get("AGENTCIV_HOME", Path.home() / ".agentciv"))
+FIX_WINDOW = float(os.environ.get("AGENTCIV_FIX_WINDOW", "60"))
 
 
 def _creds_path(name: str) -> Path:
@@ -60,8 +67,16 @@ def _parse_json(text: str):
     return data if isinstance(data, list) else [data]
 
 
-def _print_state(c: AgentCivClient) -> dict:
+def _seen(name: str, creds: dict, view: dict) -> None:
+    """Remember the turn this player last looked at: ``orders`` are for that turn."""
+    if view.get("status") == "running":
+        creds["seen_turn"] = view.get("turn")
+        _save(name, creds)
+
+
+def _print_state(c: AgentCivClient, name: str, creds: dict) -> dict:
     view = c.state()
+    _seen(name, creds, view)
     print(summarize_view(view, c.player_id))
     return view
 
@@ -76,15 +91,67 @@ def cmd_join(name: str, game_id: str) -> None:
 
 def cmd_orders(name: str, text: str) -> None:
     c, creds = _client(name)
-    view = c.state()
-    res = c.submit_orders(_parse_json(text), turn=view["turn"])
-    creds["acted_turn"] = view["turn"]
+    orders = _parse_json(text)
+    turn = creds.get("seen_turn")
+    before = c.state()  # the state these orders are written against (warnings use it, not a later turn)
+    if turn is None:
+        turn = before["turn"]
+    # Submit as a draft first so the turn cannot resolve while rejected orders are being fixed;
+    # a clean list is then confirmed at once, a list with rejections stays open for FIX_WINDOW seconds.
+    try:
+        res = c.submit_orders(orders, turn=turn, ready=False)
+        if not res.get("errors"):
+            res = c.submit_orders(orders, turn=turn)
+    except ApiError as e:
+        if e.status == 409 and "stale turn" in e.message:
+            sys.exit(f"NOT APPLIED: these orders were for turn {turn}, which has already resolved "
+                     f"(current turn: {e.body.get('turn')}). Run `state` (or `next`) and submit orders "
+                     "for the current turn.")
+        raise
+    stamp = time.time_ns()
+    creds.update(acted_turn=turn, submit_stamp=stamp)
+    errors = res.get("errors", [])
+    if errors:
+        creds.update(pending_orders=orders, pending_turn=turn)
     _save(name, creds)
-    print(f"Turn {res.get('turn')}: {res.get('accepted')} order(s) accepted.")
-    for err in res.get("errors", []):
+    if errors:
+        _spawn_release(name, stamp)
+    print(f"Turn {res.get('turn')}: {res.get('accepted')} order(s) accepted, {len(errors)} rejected.")
+    for err in errors:
         print(f"  REJECTED #{err.get('index')}: {err.get('error')}")
-    if res.get("errors"):
-        print("Fix the rejected orders and resubmit the WHOLE list (resubmitting replaces it).")
+        if err.get("example") is not None:
+            print(f"    example: {json.dumps(err['example'])}")
+        if err.get("hint"):
+            print(f"    hint: {err['hint']}")
+    warnings = order_warnings(before, orders) if before.get("turn") == turn else []
+    if warnings:
+        print("WARNINGS (estimates; accepted orders that may not work out):")
+        for w in warnings:
+            print(f"  - {w}")
+    if errors:
+        print(f"The {res.get('accepted')} accepted order(s) are queued; the rejected ones were dropped. "
+              f"Turn {turn} is held open for up to {FIX_WINDOW:g}s so you can fix them: run `orders` again "
+              "with the full corrected list, including the accepted orders (it replaces everything queued). "
+              f"If you don't, the accepted orders are confirmed automatically after {FIX_WINDOW:g}s.")
+
+
+def _spawn_release(name: str, stamp: int) -> None:
+    """Confirm a held-open submission after FIX_WINDOW unless it was replaced first."""
+    env = {**os.environ, "AGENTCIV_URL": URL, "AGENTCIV_HOME": str(HOME), "AGENTCIV_FIX_WINDOW": str(FIX_WINDOW)}
+    subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "_release", name, str(stamp)], env=env,
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True)
+
+
+def cmd_release(name: str, stamp: str) -> None:
+    time.sleep(FIX_WINDOW)
+    c, creds = _client(name)
+    if str(creds.get("submit_stamp")) != stamp:
+        return  # resubmitted in the meantime
+    try:
+        c.submit_orders(creds["pending_orders"], turn=creds["pending_turn"])
+    except ApiError:
+        pass  # the turn already resolved
 
 
 def cmd_deal(name: str, text: str) -> None:
@@ -126,7 +193,7 @@ def cmd_next(name: str) -> None:
             time.sleep(2)
         else:
             c.wait(since_turn=view.get("turn", 0), timeout=60)
-    view = _print_state(c)
+    view = _print_state(c, name, creds)
     if view.get("status") == "finished":
         print("\nGAME OVER:", json.dumps(view.get("victory", {}).get("result")))
 
@@ -142,11 +209,13 @@ def main(argv: list[str]) -> None:
         elif cmd == "join":
             cmd_join(args[0], args[1])
         elif cmd == "state":
-            c, _ = _client(args[0])
-            _print_state(c)
+            c, creds = _client(args[0])
+            _print_state(c, args[0], creds)
         elif cmd == "map":
-            c, _ = _client(args[0])
-            print(ascii_map(c.state(), c.player_id))
+            c, creds = _client(args[0])
+            view = c.state()
+            _seen(args[0], creds, view)
+            print(ascii_map(view, c.player_id))
         elif cmd == "orders":
             cmd_orders(args[0], args[1])
         elif cmd == "deal":
@@ -155,6 +224,8 @@ def main(argv: list[str]) -> None:
             cmd_inbox(args[0], float(args[1]) if len(args) > 1 else 0.0)
         elif cmd == "next":
             cmd_next(args[0])
+        elif cmd == "_release":
+            cmd_release(args[0], args[1])
         else:
             sys.exit(f"unknown command {cmd!r}\n{__doc__}")
     except IndexError:

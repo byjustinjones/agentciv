@@ -195,7 +195,7 @@ an empty list counts as a submission). Max {C.MAX_ORDERS_PER_TURN} orders per tu
 7. **Economy** — yields × season, deposits deplete, influence income, **contract instalments** (§10), upkeep & starvation, storage caps, market pools drift back.
 8. **Bookkeeping** — eliminations, relic streaks, treaty and deal expiry, victory checks, `turn += 1`.
 
-Because resources are spent in step 4 *after* the market in step 3, you can sell/buy on the market and spend the result in the same turn.
+Because resources are spent in step 4 *after* the market in step 3, you can sell/buy on the market and spend the result in the same turn. Within step 3 the resources clear one after another in the order food, wood, stone: gold from a sale is available to buy a resource that clears later in that order, not an earlier one. A buy the gold on hand cannot cover fails and is reported as an `order_failed` event.
 Income arrives in step 7, so it is available next turn.
 
 ## 3. Map
@@ -345,7 +345,7 @@ A stack can be split with several move orders (the total per unit type can't exc
 
 **Relics** are taken only by **occupation**: when, after the battles, the relic's owner has no units on it and some player with units there is hostile to the owner (or the relic is unowned), the capturer chosen as above becomes its owner (`tile_captured` event with `"relic": true`).
 An owned relic yields {C.RELIC_INFLUENCE} influence per turn and {C.SCORE_WEIGHTS['relics_held']} score, even when nobody stands on it; but it only counts for the relic victory while it is **guarded** — its owner has units on it at the end of the turn (`map.relics[].guarded`, `players[].relics_guarded`).
-Units left on a relic keep it; a hostile army that beats them (or walks onto an unguarded relic) takes it and resets the owner's streak.
+Units left on a relic keep it; a hostile army that beats them (or walks onto an unguarded relic) takes it. The relic streak counts consecutive turn-ends at which a player guards at least the required number of relics; it drops to 0 at the first turn-end where they guard fewer (losing one relic while still guarding enough does not reset it).
 
 **Disband** `{{"type":"disband","at":[x,y],"units":{{...}}}}` removes your units (no refund; their upkeep stops).
 
