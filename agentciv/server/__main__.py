@@ -16,13 +16,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--open-ratings", action="store_true",
                         help="rate every game created with rated=true (default: only games under standard "
                              "conditions: server seed, full turn limit, a deadline, no idle/random bots picked)")
+    parser.add_argument("--no-restore", action="store_true",
+                        help="don't resume the lobbies/running games checkpointed in DATA_DIR/live by an earlier "
+                             "run (their files are kept for a later run)")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     args = parser.parse_args(argv)
     logging.basicConfig(level=getattr(logging, args.log_level),
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     from .app import serve
     try:
-        serve(args.host, args.port, args.data_dir, args.web_dir, open_ratings=args.open_ratings)
+        serve(args.host, args.port, args.data_dir, args.web_dir, open_ratings=args.open_ratings,
+              restore=not args.no_restore)
     except OSError as e:
         print(f"error: could not start server: {e}", file=sys.stderr)
         return 1

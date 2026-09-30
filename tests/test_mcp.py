@@ -132,7 +132,8 @@ def test_quickmatch_tool(mcp):
     assert not err and "turn 0/150" in text
 
 
-def test_server_unreachable_and_bad_input():
+def test_server_unreachable_and_bad_input(monkeypatch):
+    monkeypatch.setenv("AGENTCIV_RETRY_SECONDS", "0")  # no server there at all: don't wait for one to come back
     out = io.StringIO()
     srv = MCPServer(AgentCivMCP("http://127.0.0.1:9"))
     lines = [
@@ -162,9 +163,10 @@ def test_tool_schemas_are_valid_json_schema_objects():
             assert req in schema["properties"]
 
 
-def test_tool_failures_are_tool_errors_not_protocol_errors():
+def test_tool_failures_are_tool_errors_not_protocol_errors(monkeypatch):
     """Review finding: exceptions inside tools, non-object params, KeyErrors inside tool bodies and
     tools/call notifications were misclassified."""
+    monkeypatch.setenv("AGENTCIV_RETRY_SECONDS", "0")
     tools = AgentCivMCP("http://127.0.0.1:9")
     tools.client.game_id, tools.client.player_id, tools.client.token = "g1", "p1", "t"
     calls = []

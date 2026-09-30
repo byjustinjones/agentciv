@@ -6,6 +6,7 @@ Layout under ``data_dir``::
     replays/index.json       {game_id: summary}   (rebuilt from the files if missing)
     leaderboard.json         {name: {"mu","sigma","games","wins","total_place"}}
     names.json               {casefolded name: sha256(key)}   (names registered with a key)
+    live/                    checkpoints of lobbies and running games (see persist.py)
 
 All writes are atomic (write to a temp file, then ``os.replace``).
 """

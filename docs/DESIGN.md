@@ -564,6 +564,8 @@ A game auto-starts when it reaches `max_players`, or when `lobby_timeout`
 seconds pass with ≥ `min_players` (filling with bots if `fill_with_bots`).
 Turns advance when all living remote players have submitted or `turn_timeout`
 elapses. Built-in bots ("house bots") run in-process.
+Lobbies and running games are checkpointed to `data/live/` and resume after a
+server restart (see "Server restarts" below).
 Finished games are saved to `data/replays/<game_id>.json` and results feed the
 leaderboard (`data/leaderboard.json`, Weng-Lin/OpenSkill Plackett-Luce ratings,
 display rating = mu − 3·sigma).
@@ -636,6 +638,28 @@ display rating = mu − 3·sigma).
 * Replay frames: frame 0 is the state at game start, then one per resolved
   turn (so `frames[k].turn == k`). The replay file is
   `{"game_id","summary","result","frames"}`.
+* **Server restarts.** Every lobby and running game is checkpointed to
+  `data/live/<game_id>.pkl` (a pickled plain-data snapshot: options, seats and
+  tokens, creator token, the engine `Game`, house-bot state — pickled, else
+  recreated from bot name + secret seed —, the turn's submissions and draft
+  flags, diplomacy, rating flags; written atomically) plus
+  `data/live/<game_id>.frames` (replay frames, appended once each as
+  length-prefixed zlib records). A snapshot is written right after every turn
+  resolves (and at game start) and at most once per second after other changes
+  (orders, diplomacy, joins, house-bot submissions); pickling happens under the
+  game lock, disk writes outside it, and a failed write is logged and retried,
+  never fatal. An orderly shutdown (Ctrl-C/SIGTERM) waits briefly for the game
+  workers, writes a final snapshot and answers 503 to later orders/diplomacy/joins.
+  On start the server resumes every checkpointed game with the same id and tokens
+  (new ids continue after them); the current turn gets a fresh deadline of
+  `turn_timeout` from now and lobby timers restart. Resuming from a snapshot that
+  was not written at shutdown (a crash) loses at most the last second of actions
+  and advances `diplomacy_seq` by 10000; `/inbox` treats a `since` beyond the
+  current seq as the current seq. When a finished game's replay is saved its live
+  files are deleted. Unreadable checkpoints are moved to `data/live/corrupt/`.
+  `--no-restore` skips resuming (files are kept). One server per data directory.
+  The SDK retries connection errors, timeouts and 502/503/504 (not 4xx) for up
+  to `retry_seconds` (default 600, `$AGENTCIV_RETRY_SECONDS`).
 * House bots are named after their bot type (`strategist`, then
   `strategist#2`, …) and are rated under the bare bot name (a name's best
   placement counts once per game). Remote players can't use these names;

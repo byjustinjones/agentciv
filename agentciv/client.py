@@ -39,6 +39,12 @@ your inbox, until shortly before the deadline.
 Also included: :func:`summarize_view` (compact text summary of a view, handy for
 LLM agents), :func:`ascii_map`, :func:`bundle_str` and :func:`describe_event`.
 
+**Server restarts.** Requests ride out a server restart: connection errors,
+timeouts and HTTP 502/503/504 are retried with backoff for up to
+``retry_seconds`` (default 600, or ``$AGENTCIV_RETRY_SECONDS``); 4xx errors are
+never retried. The server resumes running games with the same ids and tokens,
+so a client simply carries on (docs/CONNECTING.md, "Server restarts").
+
 Command line::
 
     python -m agentciv.client --url http://localhost:8765 --bot strategist --name MyBot --quickmatch
@@ -46,9 +52,11 @@ Command line::
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import math
 import os
+import random
 import sys
 import time
 import urllib.error
@@ -58,6 +66,9 @@ from typing import Any, Callable
 
 DEFAULT_URL = "http://localhost:8765"
 RESOURCES = ("food", "wood", "stone", "gold", "influence")
+DEFAULT_RETRY_SECONDS = 600.0   # how long requests keep retrying while the server is unreachable
+RETRY_STATUSES = (502, 503, 504)
+RETRY_MAX_DELAY = 5.0
 UNIT_TYPES = ("infantry", "archer", "cavalry", "siege")
 
 
@@ -72,26 +83,98 @@ class ApiError(Exception):
         self.body = body if body is not None else {}
 
 
+def _env_retry_seconds() -> float:
+    v = os.environ.get("AGENTCIV_RETRY_SECONDS")
+    if v:
+        try:
+            return max(0.0, float(v))
+        except ValueError:
+            pass
+    return DEFAULT_RETRY_SECONDS
+
+
+def _transient(exc: BaseException, idempotent: bool) -> bool:
+    """Is ``exc`` (from urlopen) worth retrying? A refused connection never
+    reached the server, so any request may be retried; a reset or timeout may
+    have happened after the server acted, so only idempotent requests are."""
+    if isinstance(exc, urllib.error.HTTPError):
+        return False
+    reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+    if isinstance(reason, ConnectionRefusedError):
+        return True
+    if isinstance(reason, (ConnectionError, TimeoutError, http.client.HTTPException)):
+        return idempotent  # reset/aborted/broken pipe/remote disconnected, timeouts, torn responses
+    if isinstance(reason, str) and "timed out" in reason:
+        return idempotent
+    return False
+
+
+def _describe_error(exc: BaseException) -> str:
+    if isinstance(exc, ApiError):
+        return f"HTTP {exc.status}"
+    reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+    return type(reason).__name__ if not isinstance(reason, str) else reason
+
+
 class AgentCivClient:
     """Thin wrapper over the HTTP API (docs/DESIGN.md §12).
 
     After :meth:`join` or :meth:`quickmatch` the client remembers
     ``game_id``, ``player_id`` and ``token``, so later calls need no arguments.
+
+    Requests survive server restarts: connection refused/reset, timeouts and
+    HTTP 502/503/504 are retried with exponential backoff (0.5 s … 5 s) for
+    up to ``retry_seconds`` in total (default ``$AGENTCIV_RETRY_SECONDS`` or
+    600; 0 disables retrying). 4xx errors are never retried. Requests that
+    are not idempotent (join, quickmatch, create, diplomacy) are retried only
+    when the server surely did not act on them (connection refused, 502, 503).
+    ``on_retry(message)``, if set, is called before each retry.
     """
 
     def __init__(self, base_url: str = DEFAULT_URL, token: str | None = None,
-                 game_id: str | None = None, player_id: str | None = None, timeout: float = 60.0):
+                 game_id: str | None = None, player_id: str | None = None, timeout: float = 60.0,
+                 retry_seconds: float | None = None, on_retry: Callable[[str], None] | None = None):
         self.base_url = base_url.rstrip("/")
         self.token = token
         self.game_id = game_id
         self.player_id = player_id
         self.timeout = timeout
+        self.retry_seconds = _env_retry_seconds() if retry_seconds is None else max(0.0, float(retry_seconds))
+        self.on_retry = on_retry
         self.creator_tokens: dict[str, str] = {}  # game_id -> creator_token of games this client created
         self.inbox_seq = 0  # diplomacy_seq seen by the last inbox() call (the default ``since`` of the next)
 
     # ------------------------------------------------------------ transport
     def _request(self, method: str, path: str, body: Any = None, query: dict | None = None,
                  auth: bool = False, raw: bool = False, timeout: float | None = None, token: str | None = None):
+        """One API call, retried through server restarts (see the class doc)."""
+        idempotent = method == "GET" or path.endswith(("/orders", "/start"))
+        start = time.monotonic()
+        attempt = 0
+        while True:
+            try:
+                return self._request_once(method, path, body, query, auth, raw, timeout, token)
+            except ApiError as e:
+                if e.status not in RETRY_STATUSES or (e.status == 504 and not idempotent):
+                    raise
+                err: Exception = e
+            except (OSError, http.client.HTTPException) as e:
+                if not _transient(e, idempotent):
+                    raise
+                err = e
+            delay = min(RETRY_MAX_DELAY, 0.5 * 2 ** attempt) * random.uniform(0.8, 1.2)
+            if time.monotonic() - start + delay > self.retry_seconds:
+                raise err
+            attempt += 1
+            if self.on_retry is not None:
+                try:
+                    self.on_retry(f"server unavailable ({_describe_error(err)}), retrying...")
+                except Exception:
+                    pass
+            time.sleep(delay)
+
+    def _request_once(self, method: str, path: str, body: Any, query: dict | None, auth: bool, raw: bool,
+                      timeout: float | None, token: str | None):
         url = self.base_url + path
         if query:
             q = {k: v for k, v in query.items() if v is not None}
@@ -287,7 +370,9 @@ class AgentCivClient:
                             query={"since": since, "timeout": timeout, "turn": turn}, auth=True,
                             timeout=timeout + 15)
         if game_id in (None, self.game_id):
-            self.inbox_seq = max(self.inbox_seq, int(res.get("seq") or 0))
+            seq = int(res.get("seq") or 0)
+            # a seq below ``since``: the server restarted from an earlier checkpoint; follow it
+            self.inbox_seq = seq if seq < since else max(self.inbox_seq, seq)
         return res
 
     # ------------------------------------------------------------ info
@@ -385,6 +470,8 @@ def run_bot(bot_or_callable, base_url: str = DEFAULT_URL, game_id: str | None = 
             raise ValueError("pass game_id=..., quickmatch=True, or a joined client")
     say = (lambda *a: print(*a, file=sys.stderr, flush=True)) if verbose else (lambda *a: None)
     say(f"[{name}] joined {c.game_id} as {c.player_id}")
+    if verbose and c.on_retry is None:
+        c.on_retry = lambda msg: say(f"[{name}] {msg}")
 
     def run_negotiate(view: dict) -> bool:
         """negotiate + send; True if one of our own ``accept``s executed a deal
@@ -486,10 +573,15 @@ def run_bot(bot_or_callable, base_url: str = DEFAULT_URL, game_id: str | None = 
         if view["status"] == "finished":
             break
         turn = view["turn"]
+        you = view.get("you") or {}
+        if view["status"] == "running" and (turn < last or (turn == last and you.get("alive", True)
+                                                            and you.get("submitted") is False)):
+            # the server restarted from a checkpoint taken before our orders for this turn: play it again
+            say(f"[{name}] turn {turn} is being replayed after a server restart; acting again")
+            last = turn - 1
         if turn <= last:
             continue
         last = turn
-        you = view.get("you") or {}
         if not you.get("alive", True):
             continue  # eliminated: just follow the game to the end
         if negotiate is None:

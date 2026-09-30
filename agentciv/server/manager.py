@@ -8,10 +8,16 @@ A :class:`GameSession` wraps one :class:`agentciv.engine.Game` with
   and advances the turn when every living remote player has submitted or the
   deadline passes,
 * cached JSON bytes of the spectator view (cheap for many GUI clients) and the
-  replay frames (one spectator view per turn).
+  replay frames (one spectator view per turn),
+* checkpoints in ``<data_dir>/live`` (:mod:`.persist`): a pickled snapshot
+  after every resolved turn and, throttled to one write per
+  ``CHECKPOINT_INTERVAL``, after orders, diplomacy and joins; replay frames
+  are appended to a side file once each.
 
 The :class:`GameManager` owns all sessions, tokens, quickmatch lobbies and the
-:class:`~agentciv.server.storage.Storage` (replays + leaderboard).
+:class:`~agentciv.server.storage.Storage` (replays + leaderboard), and on
+start-up restores the lobbies and running games checkpointed by an earlier
+server process (same ids and tokens; the current turn gets a fresh deadline).
 """
 from __future__ import annotations
 
@@ -19,6 +25,7 @@ import importlib
 import json
 import logging
 import math
+import pickle
 import random
 import re
 import secrets
@@ -35,6 +42,8 @@ from ..engine import constants as C
 from ..engine.deals import ACTION_TYPES as DIPLOMACY_TYPES
 from ..engine.deals import ALL_ACTION_TYPES, DealError, parse_action
 from .guide import ORDER_EXAMPLES, order_hint
+from .persist import FORMAT as CHECKPOINT_FORMAT
+from .persist import LiveStore
 from .replay import ArchivedReplay, FrameStore, envelope, slice_full_replay
 from .storage import Storage
 
@@ -70,6 +79,11 @@ FINISHED_TTL = 300.0             # ... for at most this many seconds after finis
 BOT_ONLY_SLOTS = 2               # bot-only games whose house bots may think at the same time
 RETIRED_TOKENS = 100_000         # tokens of evicted games still recognised (so late calls get 409, not 401)
 MAX_GAMES_LISTED = 100           # default number of games in GET /api/games (all live ones + recent archived)
+
+# Checkpoints (docs/DESIGN.md §12 "Server restarts")
+CHECKPOINT_INTERVAL = 1.0        # at most one throttled checkpoint write per game per this many seconds
+SHUTDOWN_JOIN = 5.0              # on shutdown, wait up to this long for game workers before the final checkpoint
+CRASH_SEQ_GAP = 10_000           # diplomacy_seq jump when resuming from a checkpoint not written at shutdown
 
 
 class ApiError(Exception):
@@ -300,24 +314,42 @@ class Seat:
     nudge_first: float | None = None
     reactive: int = 0                # reactive negotiations this turn
     acted_seq: int = 0               # diplomacy_seq when the house bot last computed its orders
+    bot_seed: int | None = None      # house bot: its secret seed (to recreate it if its state can't be pickled)
+    bot_blob: bytes | None = field(default=None, repr=False)  # house bot: pickled state at the last checkpoint
+    bot_pickle_failed: bool = False
+
+    def snapshot(self) -> dict:
+        """Plain data for a checkpoint (no bot object, no monotonic times)."""
+        return {"pid": self.pid, "name": self.name, "is_bot": self.is_bot, "bot_name": self.bot_name,
+                "token": self.token, "bot_errors": self.bot_errors, "draft": self.draft,
+                "verified": self.verified, "reactive": self.reactive, "acted_seq": self.acted_seq,
+                "bot_seed": self.bot_seed, "bot_blob": self.bot_blob,
+                "nudge_pending": self.nudge_due is not None}
 
 
 class GameSession:
     """One live game. All public methods are thread-safe."""
 
     def __init__(self, manager: "GameManager", game_id: str, opts: dict):
+        self._init_runtime(manager, game_id, opts)
+        self.created = time.time()
+        self.game = Game(GameConfig(seed=opts["seed"], max_turns=opts["max_turns"], game_id=game_id,
+                                    name=self.name, max_players=opts["max_players"]))
+        self.frames: FrameStore | None = FrameStore()  # zlib-compressed, freed once saved to disk
+        with self.cond:
+            for b in opts["bots"]:
+                self._add_bot(b)
+
+    def _init_runtime(self, manager: "GameManager", game_id: str, opts: dict) -> None:
+        """Everything that is not part of a checkpoint (locks, thread, caches, timers)."""
         self.manager = manager
         self.game_id = game_id
         self.opts = opts
         self.name = opts["name"] or f"Game {game_id}"
-        self.created = time.time()
         self._created_mono = time.monotonic()
         self.lock = threading.RLock()
         self.cond = threading.Condition(self.lock)
-        self.game = Game(GameConfig(seed=opts["seed"], max_turns=opts["max_turns"], game_id=game_id,
-                                    name=self.name, max_players=opts["max_players"]))
         self.seats: dict[str, Seat] = {}
-        self.frames: FrameStore | None = FrameStore()  # zlib-compressed, freed once saved to disk
         self.saved = False
         self.error: str | None = None
         self.version = 0
@@ -331,9 +363,15 @@ class GameSession:
         self._bots_done = True
         self._public_dip = 0          # bumped when public diplomacy happens mid-turn (pushes an SSE frame)
         self._thread = threading.Thread(target=self._run, name=f"game-{game_id}", daemon=True)
-        with self.cond:
-            for b in opts["bots"]:
-                self._add_bot(b)
+        # checkpoints (see checkpoint())
+        self._ckpt_io = threading.Lock()   # serialises checkpoint writes; taken before (never inside) self.lock
+        self._ckpt_dirty = True            # state changed since the last checkpoint
+        self._ckpt_force = True            # write at once (a turn resolved), ignoring the throttle
+        self._ckpt_last = 0.0              # monotonic time of the last checkpoint snapshot
+        self._ckpt_pending: list[tuple[bytes, bytes | None]] = []  # frames not yet appended to disk
+        self._ckpt_frames_size = 0         # bytes of live/<id>.frames known to be good
+        self._ckpt_disabled = False        # no more writes (finished and saved, closed, or shut down)
+        self._ckpt_errors = 0
 
     # ------------------------------------------------------------ properties
     @property
@@ -353,7 +391,15 @@ class GameSession:
 
     def _touch(self) -> None:
         self.version += 1
+        self._ckpt_dirty = True
         self.cond.notify_all()
+
+    def _check_stopping(self) -> None:
+        """Mutations are refused once the server is shutting down (under the
+        lock), so nothing is acknowledged after the final checkpoint."""
+        if self.manager.stopping:
+            raise ApiError(503, "server is restarting; retry in a few seconds",
+                           turn=self.game.turn, status=self.game.status)
 
     # ------------------------------------------------------------ seats
     def _unique_bot_name(self, bot_name: str) -> str:
@@ -368,9 +414,10 @@ class GameSession:
     def _add_bot(self, bot_name: str) -> Seat:
         # A secret per-bot seed: deriving it from the published game seed let players re-run a house
         # bot on its (reconstructible) view and predict its exact orders before submitting their own.
-        bot, actual = make_bot(bot_name, secrets.randbits(31))
+        seed = secrets.randbits(31)
+        bot, actual = make_bot(bot_name, seed)
         pid = self._add_player(self._unique_bot_name(actual))
-        seat = Seat(pid, self.game.player(pid).name, True, actual, None, bot)
+        seat = Seat(pid, self.game.player(pid).name, True, actual, None, bot, bot_seed=seed)
         self.seats[pid] = seat
         self._touch()
         return seat
@@ -389,6 +436,7 @@ class GameSession:
         with self.cond:
             if self.closed:
                 raise ApiError(409, f"lobby {self.game_id} was closed")
+            self._check_stopping()
             if self.status != "lobby":
                 raise ApiError(409, f"game {self.game_id} has already started" if self.status == "running"
                                else f"game {self.game_id} is finished")
@@ -419,6 +467,7 @@ class GameSession:
                 return False
             if self.closed:
                 raise ApiError(409, f"lobby {self.game_id} was closed")
+            self._check_stopping()
             if not authorized and any(not s.is_bot for s in self.seats.values()):
                 raise ApiError(403, "only a seated player (their token) or the game's creator (the creator_token "
                                     "from POST /api/games) can start a lobby that remote players have joined")
@@ -465,6 +514,9 @@ class GameSession:
         if self.frames is not None:
             full, public = self._spectator_pair()
             self.frames.append(full, public)
+            if self.manager.live is not None and not self._ckpt_disabled:
+                self._ckpt_pending.append(self.frames.last_blobs())
+        self._ckpt_force = True  # a turn resolved (or the game started): checkpoint at once
 
     def _living_remote(self) -> list[Seat]:
         alive = set(self.game.alive_players())
@@ -526,13 +578,15 @@ class GameSession:
     def _run(self) -> None:
         while not self.manager.stopping and not self.closed:
             job = None
+            if self._ckpt_wait() <= 0:
+                self.checkpoint(bots_idle=True)  # this thread runs the house bots, so they are idle now
             with self.cond:
-                if self.closed:
+                if self.closed or self.manager.stopping:
                     break
                 if self.status == "lobby":
                     wait = self._lobby_wait()
                     if self.status == "lobby":
-                        self.cond.wait(wait)
+                        self.cond.wait(max(0.0, min(wait, self._ckpt_wait())))
                     continue
                 if self.status == "finished":
                     break
@@ -556,7 +610,7 @@ class GameSession:
                         else:
                             nxt = min((s.nudge_due for s in self.seats.values() if s.nudge_due is not None),
                                       default=math.inf)
-                            self.cond.wait(max(0.0, min(wait, 1.0, nxt - time.monotonic())))
+                            self.cond.wait(max(0.0, min(wait, 1.0, nxt - time.monotonic(), self._ckpt_wait())))
                             continue
             # house bots think outside the lock so state requests stay fast; bot-only games share a
             # few compute slots so a pile of them can't starve the API and games with remote players
@@ -569,6 +623,7 @@ class GameSession:
             else:
                 self._react(turn, job[1])
         if self.status == "finished" and not self.manager.stopping:
+            self.checkpoint(bots_idle=True)  # the final state, in case saving the replay fails
             self._finalize()
             self.manager._retire(self)
 
@@ -780,6 +835,7 @@ class GameSession:
             p = g.player(pid)
             if p is None or not p.alive:
                 raise ApiError(409, "you have been eliminated", turn=g.turn, status=g.status)
+            self._check_stopping()
             results = self._apply_diplomacy(pid, actions)
             for r in results:  # malformed actions get a correctly shaped example (like rejected orders)
                 i = r.get("index", -1)
@@ -797,6 +853,9 @@ class GameSession:
         end = time.monotonic() + timeout
         with self.cond:
             g = self.game
+            # a ``since`` beyond the current seq (the server restarted from a checkpoint taken before
+            # events the caller had already seen): deliver whatever happens from now on
+            since = min(since, g.diplomacy_seq) if isinstance(since, int) else since
             turn0, status0 = (g.turn if turn is None else turn), g.status
             timed_out = False
             while True:
@@ -842,8 +901,10 @@ class GameSession:
             with self.cond:
                 self.saved = True
                 self.frames = None  # served from disk from now on
+            self.discard_checkpoint()
         except OSError:
-            log.exception("game %s: could not save replay", self.game_id)
+            log.exception("game %s: could not save replay (the live checkpoint is kept; a restart retries)",
+                          self.game_id)
         if ranked:
             try:
                 self.manager.storage.record_result([n for n, _ in ranked], [r for _, r in ranked])
@@ -985,6 +1046,7 @@ class GameSession:
             p = g.player(pid)
             if p is None or not p.alive:
                 raise ApiError(409, "you have been eliminated", turn=g.turn, status=g.status)
+            self._check_stopping()
             errors = g.submit_orders(pid, orders)
             seat = self.seats.get(pid)
             if seat is not None:
@@ -1049,6 +1111,189 @@ class GameSession:
         with self.cond:
             self.cond.notify_all()
 
+    # ------------------------------------------------------------ checkpoints (persist.py)
+    def _ckpt_wait(self) -> float:
+        """Seconds until a checkpoint is due (0 = now, inf = nothing to write)."""
+        if self._ckpt_disabled or self.manager.live is None:
+            return math.inf
+        if self._ckpt_force:
+            return 0.0
+        if self._ckpt_dirty:
+            return max(0.0, self._ckpt_last + CHECKPOINT_INTERVAL - time.monotonic())
+        return math.inf
+
+    def _pickle_bots(self) -> None:
+        """Refresh each house bot's pickled state (only while no bot is running:
+        from the worker thread between jobs, or once it has stopped)."""
+        for seat in self.seats.values():
+            if not seat.is_bot or seat.bot is None:
+                continue
+            try:
+                seat.bot_blob = pickle.dumps(seat.bot, protocol=pickle.HIGHEST_PROTOCOL)
+            except Exception as e:
+                seat.bot_blob = None  # restored from bot name + seed instead
+                if not seat.bot_pickle_failed:
+                    seat.bot_pickle_failed = True
+                    log.info("game %s: house bot %s (%s) can't be pickled (%s: %s); a restore recreates it "
+                             "from its name and seed", self.game_id, seat.pid, seat.bot_name, type(e).__name__, e)
+
+    def snapshot_state(self, clean: bool = False) -> dict:
+        """Plain-data snapshot of the session (under the lock): no locks,
+        threads or bot objects (bots travel as pickled blobs), no frames.
+        ``clean``: the final checkpoint of an orderly shutdown (nothing lost)."""
+        return {
+            "clean": clean,
+            "format": CHECKPOINT_FORMAT,
+            "game_id": self.game_id,
+            "name": self.name,
+            "opts": dict(self.opts),
+            "created": self.created,
+            "saved_at": time.time(),
+            "creator_token": self.creator_token,
+            "error": self.error,
+            "version": self.version,
+            "game": self.game,
+            "seats": [seat.snapshot() for seat in self.seats.values()],
+            "bots_done": self._bots_done,
+            "public_dip": self._public_dip,
+            "frames": len(self.frames) if self.frames is not None else 0,
+            "deadline": self.game.deadline,
+        }
+
+    def checkpoint(self, force: bool = False, bots_idle: bool = False, clean: bool = False) -> bool:
+        """Write ``live/<id>.pkl`` (and append new replay frames) if anything
+        changed. The snapshot is pickled under the game lock (a few ms); the
+        disk writes happen outside it. Never raises: failures are logged and
+        retried at the next opportunity. Returns True if a snapshot was written."""
+        store = self.manager.live
+        if store is None:
+            return False
+        with self._ckpt_io:
+            if self._ckpt_disabled:
+                return False
+            with self.cond:
+                if self.closed or not (force or self._ckpt_force or self._ckpt_dirty):
+                    return False
+                try:
+                    if bots_idle:
+                        self._pickle_bots()
+                    blob = pickle.dumps(self.snapshot_state(clean), protocol=pickle.HIGHEST_PROTOCOL)
+                except Exception:
+                    self._ckpt_failed("could not pickle the game state")
+                    self._ckpt_dirty = self._ckpt_force = False  # retried on the next change
+                    self._ckpt_last = time.monotonic()
+                    return False
+                frames, self._ckpt_pending = self._ckpt_pending, []
+                self._ckpt_dirty = self._ckpt_force = False
+                self._ckpt_last = time.monotonic()
+            try:
+                if frames:
+                    self._ckpt_frames_size = store.append_frames(self.game_id, frames, self._ckpt_frames_size)
+                    frames = []
+                store.write_state(self.game_id, blob)
+                return True
+            except Exception:
+                self._ckpt_failed("could not write the checkpoint")
+                with self.cond:
+                    self._ckpt_pending[:0] = frames  # not on disk yet: append them next time
+                    self._ckpt_dirty = True          # retried after CHECKPOINT_INTERVAL
+                return False
+
+    def _ckpt_failed(self, what: str) -> None:
+        self._ckpt_errors += 1
+        n = self._ckpt_errors
+        if n <= 3 or n % 100 == 0:
+            log.exception("game %s: %s (failure #%d; the game goes on)", self.game_id, what, n)
+
+    def discard_checkpoint(self) -> None:
+        """Stop checkpointing and delete the live files (finished and saved, or closed)."""
+        store = self.manager.live
+        with self._ckpt_io:
+            self._ckpt_disabled = True
+            if store is None:
+                return
+            try:
+                store.delete(self.game_id)
+            except OSError:
+                log.exception("game %s: could not delete its live checkpoint", self.game_id)
+
+    def close_checkpoints(self) -> None:
+        """Server shutdown: write a final checkpoint, then no more writes."""
+        if self.saved or self.closed:
+            return
+        self.checkpoint(force=True, bots_idle=not self._thread.is_alive(), clean=True)
+        with self._ckpt_io:
+            self._ckpt_disabled = True
+
+    @classmethod
+    def from_snapshot(cls, manager: "GameManager", state: dict,
+                      frames: list[tuple[bytes, bytes | None]], frames_size: int) -> "GameSession":
+        """Rebuild a session from :meth:`snapshot_state` output and its frames
+        (the caller launches it). Tokens stay the same; the current turn gets
+        a fresh deadline (``turn_timeout`` from now) and lobby timers restart."""
+        self = cls.__new__(cls)
+        self._init_runtime(manager, state["game_id"], state["opts"])
+        self.name = state["name"]
+        self.created = float(state["created"])
+        self.creator_token = state.get("creator_token")
+        self.error = state.get("error")
+        self.version = int(state.get("version", 0)) + 1
+        self.game = state["game"]
+        if not isinstance(self.game, Game):
+            raise ValueError("checkpoint holds no Game")
+        self._bots_done = bool(state.get("bots_done", True))
+        self._public_dip = int(state.get("public_dip", 0))
+        self.frames = FrameStore()
+        for zfull, zpub in frames:
+            self.frames.append_blobs(zfull, zpub)
+        self._ckpt_frames_size = frames_size
+        now = time.monotonic()
+        for d in state["seats"]:
+            seat = Seat(d["pid"], d["name"], bool(d["is_bot"]), d.get("bot_name"), d.get("token"),
+                        bot_errors=int(d.get("bot_errors", 0)), draft=bool(d.get("draft")),
+                        verified=bool(d.get("verified")), reactive=int(d.get("reactive", 0)),
+                        acted_seq=int(d.get("acted_seq", 0)), bot_seed=d.get("bot_seed"),
+                        bot_blob=d.get("bot_blob"))
+            if seat.is_bot:
+                if seat.bot_blob:
+                    try:
+                        seat.bot = pickle.loads(seat.bot_blob)
+                    except Exception as e:
+                        log.warning("game %s: could not unpickle house bot %s (%s: %s); recreating it",
+                                    self.game_id, seat.pid, type(e).__name__, e)
+                if seat.bot is None:
+                    seed = seat.bot_seed if seat.bot_seed is not None else secrets.randbits(31)
+                    seat.bot, _ = make_bot(seat.bot_name or "idle", seed)
+                    seat.bot_seed = seed
+                if d.get("nudge_pending"):
+                    seat.nudge_first, seat.nudge_due = now, now + NEGOTIATE_DEBOUNCE
+            self.seats[seat.pid] = seat
+        g = self.game
+        if not state.get("clean") and g.status != "finished":
+            # After a crash, events newer than this checkpoint are lost, and clients may have seen
+            # their seq numbers already: continue well above them so inbox cursors (?since=) never
+            # hide new events. (An orderly shutdown loses nothing and keeps seq as it was.)
+            g.diplomacy_seq += CRASH_SEQ_GAP
+            log.warning("game %s: the server did not shut down cleanly; resumed from the checkpoint written "
+                        "%.1f s ago (anything after it is lost)", self.game_id,
+                        max(0.0, time.time() - float(state.get("saved_at", time.time()))))
+        if g.status == "running":
+            # agents get a full turn after a restart
+            self._turn_started = now
+            tt = self.opts["turn_timeout"]
+            if tt > 0:
+                self._deadline_mono = now + tt
+                g.deadline = round(time.time() + tt, 3)
+            else:
+                self._deadline_mono = None
+                g.deadline = None
+        elif g.status == "finished":
+            g.deadline = None
+            self.finished_mono = now
+        self._ckpt_force = True  # re-checkpoint at once (new deadline; no longer a "clean" snapshot)
+        self._ckpt_last = now
+        return self
+
 
 class ArchivedGame:
     """A finished game known only from its replay file (after a restart, or
@@ -1100,10 +1345,16 @@ class GameManager:
 
     ``open_ratings=True`` rates every game created with ``rated: true``
     (handy for private servers and tests); by default only games played
-    under standard conditions count (see :func:`unrated_reason`)."""
+    under standard conditions count (see :func:`unrated_reason`).
 
-    def __init__(self, data_dir: str = "data", open_ratings: bool = False):
+    Lobbies and running games are checkpointed to ``<data_dir>/live``;
+    ``restore=True`` (default) resumes them on start-up (``False`` leaves
+    the files alone). ``checkpoints=False`` disables checkpointing."""
+
+    def __init__(self, data_dir: str = "data", open_ratings: bool = False, restore: bool = True,
+                 checkpoints: bool = True):
         self.storage = Storage(data_dir)
+        self.live: LiveStore | None = LiveStore(self.storage.root / "live") if checkpoints else None
         self.open_ratings = open_ratings
         self.lock = threading.RLock()
         self._qm_lock = threading.Lock()  # quickmatch lobby choice; never held with self.lock
@@ -1115,8 +1366,9 @@ class GameManager:
         self.stopping = False
         self._archives: OrderedDict[str, ArchivedReplay] = OrderedDict()
         self._archive_lock = threading.Lock()
-        numbers = [int(g[1:]) for g in self.storage.archived_ids() if re.fullmatch(r"g\d+", g)]
-        self._counter = max(numbers, default=0)
+        ids = self.storage.archived_ids() + (self.live.ids() if self.live is not None else [])
+        numbers = [int(g[1:]) for g in ids if re.fullmatch(r"g\d+", g)]
+        self._counter = max(numbers, default=0)  # new ids continue after archived and checkpointed ones
         self._quickmatch_counter = 0
         self.max_live_games = MAX_LIVE_GAMES
         self.max_open_lobbies = MAX_OPEN_LOBBIES
@@ -1124,6 +1376,48 @@ class GameManager:
         self.finished_keep = FINISHED_KEEP
         self.finished_ttl = FINISHED_TTL
         self.bot_slots = threading.BoundedSemaphore(BOT_ONLY_SLOTS)
+        self._shut_down = False
+        self.restored: list[str] = []   # ids of the games resumed from checkpoints
+        if restore:
+            self.restore_games()
+
+    # ------------------------------------------------------------ restore
+    def restore_games(self) -> list[str]:
+        """Resume every checkpointed lobby/running game (unreadable ones are
+        logged and moved to ``live/corrupt``). Returns the restored ids."""
+        live = self.live
+        if live is None or self.restored:
+            return self.restored
+        live.cleanup()
+        sessions: list[GameSession] = []
+        for gid in live.ids():
+            if self.storage.summary(gid) is not None:  # finished and saved; the delete didn't happen
+                live.delete(gid)
+                continue
+            try:
+                state = live.load_state(gid)
+                frames, ends = live.read_frames(gid)
+                want = int(state.get("frames", len(frames)))
+                if len(frames) > want:  # appended just before a crash, never counted by a snapshot
+                    frames, ends = frames[:want], ends[:want]
+                elif len(frames) < want:
+                    log.warning("game %s: checkpoint expects %d replay frames, found %d", gid, want, len(frames))
+                session = GameSession.from_snapshot(self, state, frames, ends[-1] if ends else 0)
+            except Exception as e:
+                live.move_aside(gid, f"{type(e).__name__}: {e}")
+                continue
+            sessions.append(session)
+        for session in sessions:
+            with self.lock:
+                self.sessions[session.game_id] = session
+            for seat in session.seats.values():
+                if seat.token:
+                    self._register_token(seat.token, session.game_id, seat.pid)
+            session.launch()
+            self.restored.append(session.game_id)
+            log.info("restored game %s (%s, %s, turn %s)", session.game_id, session.name, session.status,
+                     session.game.turn)
+        return self.restored
 
     # ------------------------------------------------------------ registry
     def _next_id(self) -> str:
@@ -1211,6 +1505,7 @@ class GameManager:
                     with self.lock:
                         self.sessions[s.game_id] = s
                     continue
+            s.discard_checkpoint()
             self._drop_tokens(s, retire=False)
         for s in evict:
             self._drop_tokens(s, retire=True)
@@ -1352,8 +1647,23 @@ class GameManager:
         return rows
 
     def shutdown(self) -> None:
+        """Stop all games: wake every waiter, let the game workers finish their
+        current step (up to ``SHUTDOWN_JOIN`` s in total), then write a final
+        checkpoint of every lobby/running game. Idempotent."""
         self.stopping = True
         with self.lock:
             sessions = list(self.sessions.values())
+            first = not self._shut_down
+            self._shut_down = True
         for s in sessions:
             s.notify()
+        if not first:
+            return
+        end = time.monotonic() + SHUTDOWN_JOIN
+        me = threading.current_thread()
+        for s in sessions:
+            t = s._thread
+            if t.is_alive() and t is not me:
+                t.join(max(0.0, end - time.monotonic()))
+        for s in sessions:
+            s.close_checkpoints()
