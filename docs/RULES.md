@@ -46,6 +46,7 @@ an empty list counts as a submission). Max 100 orders per turn.
 8. **Bookkeeping** — eliminations, relic streaks, economic and influence streaks, treaty and deal expiry, victory checks, `turn += 1`.
 
 Because resources are spent in step 4 *after* the market in step 3, you can sell/buy on the market and spend the result in the same turn. Within step 3 the resources clear one after another in the order food, wood, stone: gold from a sale is available to buy a resource that clears later in that order, not an earlier one. A buy the gold on hand cannot cover fails and is reported as an `order_failed` event.
+Market sells are checked against stock on hand at resolution in step 3, before that turn's income arrives in step 7.
 Income arrives in step 7, so it is available next turn.
 
 ## 3. Map
@@ -239,7 +240,9 @@ Units left on a relic keep it; a hostile army that beats them (or walks onto an 
 * **Treaties**: `propose_treaty {to, turns (10–50)}`; the target may `accept_treaty {from}` on the **next** turn only
   (pending proposals to you are in `treaty_proposals`). A treaty signed on turn t with `turns` k lasts until the end of turn t+k (`until_turn`).
   While active the two players cannot move onto each other's tiles or armies and never fight.
-  `break_treaty {with}` ends it immediately, costs 50 influence and increments your public `betrayals` counter; movement restrictions still apply during that turn and lift on the next.
+  `break_treaty {with}` is an orders-only action: a successful break submitted for turn T ends the treaty in phase 2 of turn T's resolution, costs 50 influence and increments your public `betrayals` counter.
+  Movement onto the ex-partner's tiles or armies remains blocked for turn T. After turn T resolves, these moves can be submitted for turn T+1 and execute during turn T+1's resolution, provided no new treaty is signed.
+  This timing also applies to treaties created by a live peace deal; `break_treaty` is not accepted by the live diplomacy channel.
   If both partners order `break_treaty` in the same turn, both pay and both get a betrayal.
 * **Deals** (trading resources, land, peace and recurring payments) and **messages** (`say`) are described in §10.
   Messages are not binding; only treaties, executed deals and contracts are enforced by the engine.
@@ -302,6 +305,7 @@ You may also put them in your turn's orders; then they are applied in phase 1 of
   `accept`, `message {to, text}` = `say`.
 * Limits per player per turn: 30 diplomacy actions, of which at most 10 `say`
   messages (≤ 500 chars). Actions rejected with an error do not count.
+  The optional `message` on `propose`, `counter` and `reject` is limited to 300 characters.
 
 ### Contracts: loans, tribute, rent
 
