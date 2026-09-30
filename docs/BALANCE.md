@@ -491,3 +491,54 @@ six-field mix is the balance reference.
   same-turn market orders. If it is still used, burn the seizure instead of
   paying it out.
 
+
+## 8. Treaties: slots, bonds and priced breaks
+
+Bots signed ~23 treaties per 6-player game and a leader was at peace with
+about half the field; breaking cost a flat 50 influence, so the rational
+breaker broke often. The treaty rules (rules §9) make treaties scarce and a
+break visibly expensive:
+
+* **Slots:** max(1, ceil(L/2)) treaties per player, L = other living players
+  (`TREATY_SLOT_DIVISOR = 2`); renewals need no slot, treaties over the limit
+  after an elimination are kept until they end.
+* **Lengths** 20–40 turns (was 10–50; the lengths alone changed almost
+  nothing in the sims).
+* **Bonds:** each side pledges banked gold (an optional bond + 50 × its
+  betrayals); pledges are recorded, not moved.
+* **Break:** 50 × (1+b) influence, p% of legacy and p% of the bank to the
+  victim (p = min(40, 10·(1+b))), plus the breaker's bond and a pro-rated
+  refund of what the victim paid in the deals behind the treaty; a 15-turn
+  re-sign cooldown and one extra turn of movement restriction.
+* Rejected in the design runs: a signing fee (it removed every economist
+  win), a bank bond for every signer (treaties fell from 18 to 1.5 per game)
+  and a renewal window (rules without effect).
+
+48 games per row, 150 max turns, seed 1, field F1 =
+`strategist,strategist,rusher,turtle,economist,strategist_lite`
+(`python -m agentciv.tournament --bots ... --games 48 --jobs 6 [--fog]`;
+design numbers from the prototype runs, "shipped" = this implementation):
+
+| Run | Signed/game | Live/player | Peak/player | Breaks/game | Battles/game | Cities captured/game | Median turns | Victories | Economist wins |
+|---|---|---|---|---|---|---|---|---|---|
+| F1 old rules | 23.5 | 2.56 | 3.98 | 0.17 | 13.7 | 5.3 | 88 | influence 18, economic 14, wonder 11, relics 4, conquest 1 | 11 |
+| F1 design | 18.2 | 1.88 | 2.84 | 0.10 | 13.0 | 5.3 | 89 | influence 23, economic 14, wonder 7, conquest 2, relics 2 | 9 |
+| **F1 shipped** | 18.25 | 1.88 | 2.84 | 0.10 | 12.96 | 5.27 | 89 | influence 23, economic 14, wonder 7, conquest 2, relics 2 | 9 |
+| F1 fog old rules | 23.4 | 2.50 | 3.43 | 0.48 | 13.6 | 5.2 | 91 | influence 23, economic 13, relics 10, conquest 1, wonder 1 | 9 |
+| F1 fog design | 20.6 | 2.08 | 2.90 | 0.35 | 13.8 | 5.0 | 92 | influence 22, economic 16, relics 7, wonder 2, conquest 1 | 9 |
+| **F1 fog shipped** | 20.6 | 2.08 | 2.90 | 0.35 | 13.52 | 4.92 | 91.5 | influence 22, economic 16, relics 7, wonder 2, conquest 1 | 9 |
+
+In the design runs with a treaty-exploiting bot (F2) the rational breaker
+broke 56–70% less, cities captured doubled (attacks land on players without a
+treaty) and the score leader was at peace with at most ~46% of its opponents.
+The turtle loses its blanket protection (F1 wins 5 → 1).
+
+* **Watch:** the aggressive field (F3: two rushers, a betrayer) went from 3
+  to 16 conquest wins. If LLM games turn too bloody, the documented fallback
+  is `TREATY_SLOT_DIVISOR = 1.5` (slots ceil(L/1.5); 10 conquest wins in F3).
+* No bot broke a treaty while holding a bank, so the bank share and bond
+  forfeits are covered by the tests, not by the sims; deterrence of rich
+  breakers has to come from LLM games.
+* The cooldown also stops a victim from buying peace from its breaker for 15
+  turns. If LLM games show victims trapped, exempt peace proposed by the
+  victim.

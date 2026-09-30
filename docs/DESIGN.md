@@ -46,8 +46,10 @@ Resolution phases, in order:
    player that rotates every turn (`turn % alive_count`). Failures are
    `order_failed` events. (Actions sent through the diplomacy channel during
    the turn have already taken effect.)
-2. **Treaties** — `break_treaty` processed; `accept_treaty` for proposals made
-   last turn; new `propose_treaty` stored.
+2. **Treaties** — `break_treaty` processed, then mutual `release_treaty`;
+   `accept_treaty` for proposals made last turn; new `propose_treaty` stored.
+   Each signing is checked against treaty slots, the pair cooldown and bonds
+   (§7 Treaties).
 3. **Market** — batch auction per resource (§6).
 4. **Actions** — each player's `build`, `claim`, `settle`, `recruit`, `disband`, `bank`
    orders executed **in the order submitted**, paying costs at execution time
@@ -268,7 +270,9 @@ archer → infantry. Archers defending a city tile get ×1.5 strength.
 
 **Movement.** `move` orders take units from a stack on a tile you occupy and
 move them along a `path` of 1 step (or 2 steps if every moved unit is cavalry).
-Paths may not enter impassable tiles, tiles owned by a treaty partner, and a
+Paths may not enter impassable tiles, tiles owned by a treaty partner (or by
+a player whose treaty with the mover was broken or released this turn, or
+broken last turn), and a
 2-step path's first step may not contain a hostile army or a hostile city (its
 garrison blocks the way) at the start of the turn. A stack can be split by several `move` orders; the total moved per unit
 type can't exceed what is there at the start of the turn. Recruits can't move
@@ -328,18 +332,50 @@ subject to the walls multiplier.
    owner has units on it; owned relics give influence and score whether
    guarded or not, but only guarded relics count for the relic victory.
 
-**Treaties.** `propose_treaty {to, turns (10–50)}`; the target may
-`accept_treaty {from}` on the next turn. While active, the two players can't
-move onto each other's tiles or armies and never fight. `break_treaty {with}`
-ends it immediately, costs 50 influence (the order fails if you can't pay) and
-increments your public `betrayals` counter; the two are hostile (can fight)
-from that turn on, but movement restrictions lift only on the following turn.
-If both partners order `break_treaty` in the same turn, both pay and both get
-a betrayal (whoever can pay; no seat order advantage).
-A treaty accepted on turn t for `turns` k has `until_turn = t + k` and is
-removed at the end of turn `until_turn`. Treaty proposals can be accepted only
-on the turn after they were made. A deal with `"peace": k` (§13) signs (or
-extends) a treaty immediately on acceptance.
+**Treaties.** `propose_treaty {to, turns (20–40), bond?}`; the target may
+`accept_treaty {from, bond?}` on the next turn. While active, the two players
+can't move onto each other's tiles or armies and never fight. A treaty
+accepted on turn t for `turns` k has `until_turn = t + k` and is removed at
+the end of turn `until_turn`. Treaty proposals can be accepted only on the
+turn after they were made. A deal with `"peace": k` (§13) signs a treaty
+immediately on acceptance, or renews one between partners (end = the later of
+the two; no slot needed).
+
+Treaties are scarce and breaking one is priced (constants `TREATY_*`):
+
+* **Slots.** A player may hold at most max(1, ceil(L/2)) treaties, L = other
+  living players (`you.treaty.slots`). Treaties signed before an elimination
+  are kept until they end, but no new one is signed while at or over the limit.
+  (If games get too bloody, the documented fallback is ceil(L/1.5), see
+  BALANCE.md.)
+* **Bonds.** Each party pledges banked gold on each treaty: its offered `bond`
+  plus 50 × its `betrayals`. Pledges on all of a player's treaties together
+  cannot exceed its bank. Pledged gold stays in the bank (it counts for the
+  bank victory and earns interest); it is recorded, not moved. Bonds are public
+  (`treaties[].bond`). A renewal without a new offer keeps the old bond (raised
+  to the required minimum).
+* **One check.** `Game.treaty_sign_problem(a, b, bonds)` (cooldown, slots
+  unless renewing, bond coverage) runs at order propose, order accept, deal
+  propose/counter (`_terms_error`) and deal settlement (`_settle_detail`). It
+  reads only public facts, so it never leaks fog.
+* **Ending at no cost.** Expiry, `release_treaty {with}` by both parties in
+  the same turn, or elimination; bonds are released (`treaty_expired` carries
+  `released`, the new public `treaty_released {a, b}`).
+* **Breaking.** `break_treaty {with}` ends it in phase 2. With b = earlier
+  betrayals and p = min(40, 10·(1+b)) %: pay 50·(1+b) influence (must be
+  held); lose p% of legacy; pay the partner, as gold, p% of the bank, the own
+  bond on the treaty, and for each deal that signed or renewed the treaty the
+  net start-price value of the lump resources the partner handed over times the
+  unexpired share of that deal's peace (`deals.peace_refund`), from the bank,
+  then gold, the rest as `influence_debt` (1 per 2 gold); cancel that deal's
+  contracts the partner pays the breaker (`contract_cancelled`, parties only);
+  end the influence streak (the break turn's end does not count); betrayals +1.
+  The pair cannot sign again for 15 turns (`treaty_cooldowns`) and stays
+  movement-restricted during the break turn and the next. If both partners
+  break in the same turn, each pays in full and each is paid by the other.
+  `you.treaty.break_preview` lists these amounts per own treaty. Under fog,
+  `treaty_broken` shows `refund`, `paid`, `debt` and `cancelled` only to the
+  two parties.
 
 **Disband** `{at, units}` removes your units (no refund).
 
@@ -416,8 +452,9 @@ Every order is an object with `"type"`. Coordinates are `[x, y]`.
 {"type":"market","side":"buy","resource":"stone","qty":40,"limit":2.5}
 {"type":"offer_trade","to":"p2","give":{"wood":50},"want":{"gold":40}}  // = propose (§13)
 {"type":"accept_trade","offer_id":"d7"}                                 // = accept (§13)
-{"type":"propose_treaty","to":"p3","turns":20}
-{"type":"accept_treaty","from":"p3"}
+{"type":"propose_treaty","to":"p3","turns":20}         // optional "bond"
+{"type":"accept_treaty","from":"p3"}                   // optional "bond"
+{"type":"release_treaty","with":"p3"}
 {"type":"break_treaty","with":"p3"}
 {"type":"message","to":"p2","text":"Truce?"}          // = say; "to":"all" = public
 {"type":"propose","to":"p2","give":{"wood":60},"get":{"gold":45}}  // any §13.2 action
@@ -498,7 +535,8 @@ deals (no tiles, contract or peace) the viewer may see, as
   "market": {"fee":0.05,"prices":{"food":1.0,"wood":1.5,"stone":2.0},
              "pools":{"food":{"resource":2400,"gold":2400}, "...":{}},
              "history":[{"turn":11,"prices":{"food":1.0,"wood":1.5,"stone":2.0}}]},
-  "treaties": [{"a":"p1","b":"p2","until_turn":40}],
+  "treaties": [{"a":"p1","b":"p2","until_turn":40,"signed_turn":12,"bond":{"p1":0,"p2":30}}],
+  "treaty_cooldowns": [{"a":"p2","b":"p3","until_turn":27}],
   "treaty_proposals": [{"from":"p3","to":"p1","turns":20,"turn":11}],
   "trade_offers": [{"id":"d7","from":"p2","to":"p1","give":{"wood":50},"want":{"gold":40},"turn":12,"expires_turn":14}],
   "deals": {"open":[...], "recent":[...], "log":[...]}, "contracts": [...], "diplomacy_seq": 57,
@@ -520,7 +558,8 @@ events generated while resolving the previous turn (players only see events
 public or involving them; most events are public). Event types include:
 `battle, city_captured, city_founded, tile_captured, claim, build, recruit,
 disband, wonder_stage, starvation, eliminated, treaty_proposed, treaty_signed,
-treaty_broken, treaty_expired, market, order_failed, victory` and the deal
+treaty_broken, treaty_expired, treaty_released, contract_cancelled, market,
+order_failed, victory` and the deal
 events of §13.5 (private: `order_failed`, `treaty_proposed` and the private
 deal events). Events of diplomacy actions sent through the channel during
 turn t are reported with the events of turn t (after it resolves) and are
@@ -687,12 +726,13 @@ proposer hands over) and `get` (what the proposer receives). A bundle:
 ```json
 {"food":0, "wood":50, "stone":0, "gold":0,     // immediate resources (omit zeros)
  "tiles":[[5,6]],                              // owned non-city, non-relic tiles
- "per_turn":{"gold":5}, "turns":10}           // contract: paid each turn for `turns` turns
+ "per_turn":{"gold":5}, "turns":10,           // contract: paid each turn for `turns` turns
+ "bond":30}                                    // with peace only: this side's pledge on the treaty (§7)
 ```
 
-Deal-level options: `"peace": k` (10–50) — on acceptance both sides are
-bound by a peace treaty for k turns (extends an existing treaty to the later
-`until_turn`); `"message"`: free text ≤ 300 chars shown with the deal;
+Deal-level options: `"peace": k` (20–40) — on acceptance both sides are
+bound by a peace treaty for k turns (renews an existing treaty to the later
+`until_turn`), subject to the treaty slots, cooldown and bonds of §7; `"message"`: free text ≤ 300 chars shown with the deal;
 `"expires_in"`: 1–5 turns (default 2).
 
 Validity at proposal time: both parties alive, `from ≠ to`, at least one
@@ -832,7 +872,7 @@ reason}`, `deal_failed {deal, reason}`, `deal_expired {deal}`, `contract_paid
 payer, payee, deal}`, `contract_default {contract, payer, payee, per_turn,
 turns_left, penalty, debt, deal}` (`penalty` = the whole fine, `debt` = the
 part added to `influence_debt`), `say {from, to, text}`. A deal's peace also
-emits the public `treaty_signed {a, b, until_turn, deal}`.
+emits the public `treaty_signed {a, b, until_turn, bond, deal, renewal?}`.
 
 Open deals in views also carry `deliverable` (bool) and `problem` (null or
 why accepting it right now would fail — computed from public information).
