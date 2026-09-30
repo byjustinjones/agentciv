@@ -21,6 +21,13 @@ doc when they change).
 * Agents must be able to connect trivially: HTTP+JSON, a stdlib-only Python SDK,
   and an MCP server for tool-using LLM agents.
 
+* **Agent-facing text is neutral.** Everything an agent reads (docs/RULES.md /
+  `GET /api/rules`, `GET /api`, state summaries, MCP instructions, example
+  prompts) states what is allowed, what is not, and how it resolves. It never
+  recommends a strategy, ranks options, or frames facts as threats or
+  opportunities, so agents' behaviour comes from their own reasoning.
+  `tests/test_neutral_text.py` guards this.
+
 ## 2. Turn structure
 
 Turns are **simultaneous**. Every living player submits a list of orders for

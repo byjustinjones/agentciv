@@ -37,8 +37,8 @@ decide, submit_orders (resubmitting replaces your orders for that turn), then wa
 deadline; if you miss it you simply do nothing that turn. Coordinates are [x, y] (x = column).
 Barter live during a turn: propose_deal (resources, tiles, per-turn contracts, peace), then wait_for_inbox for
 the reply and respond_to_deal (accept | reject | counter | withdraw); say sends messages; list_deals shows your
-open deals, contracts and the public deal log. An accepted deal settles at once. Negotiate BEFORE submitting
-orders when you can: once every player has submitted, the turn resolves."""
+open deals, contracts and the public deal log. An accepted deal settles at once. The turn resolves as soon as
+every player has submitted; diplomacy sent after that applies to the next turn."""
 
 ORDER_HELP = (
     "Order objects (coordinates [x,y]): "
@@ -47,7 +47,7 @@ ORDER_HELP = (
     '{"type":"build","at":[5,4],"building":"farm"} | {"type":"claim","at":[6,4]} | '
     '{"type":"settle","at":[9,9]} | {"type":"disband","at":[3,4],"units":{"infantry":1}} | '
     '{"type":"market","side":"buy","resource":"stone","qty":40,"limit":2.5} | '
-    '{"type":"propose","to":"p2","give":{"wood":50},"get":{"gold":40}} (better: the propose_deal tool, '
+    '{"type":"propose","to":"p2","give":{"wood":50},"get":{"gold":40}} (or the propose_deal tool, '
     'applied at once) | {"type":"accept","deal":"d7"} | {"type":"propose_treaty","to":"p3","turns":20} | '
     '{"type":"accept_treaty","from":"p3"} | {"type":"break_treaty","with":"p3"} | '
     '{"type":"say","to":"p2","text":"Truce?"}'

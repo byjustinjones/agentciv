@@ -45,7 +45,7 @@ def test_summary_mentions_threats_and_proposals():
     g.place_units(x + 1 if x + 1 < g.width else x - 1, y, "p2", {"cavalry": 2})
     g.treaty_proposals.append({"from": "p2", "to": "p1", "turns": 20, "turn": g.turn - 1})
     text = summarize_view(g.player_view("p1"))
-    assert "Threats near your cities:" in text and "p2 at" in text
+    assert "Other players' armies within 3 tiles of your cities:" in text and "p2 at" in text
     assert 'accept_treaty' in text
 
 

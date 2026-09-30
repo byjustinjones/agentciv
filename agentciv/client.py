@@ -767,10 +767,10 @@ def summarize_view(view: dict, pid: str | None = None, max_events: int = 12, max
                     imps[imp["building"]] = imps.get(imp["building"], 0) + 1
             out.append("Your improvements: " + (", ".join(f"{k} {v}" for k, v in sorted(imps.items())) or "none"))
 
-        # threats: hostile armies within 3 tiles of your cities
+        # other players' armies within 3 tiles of your cities (reported as facts, not judged)
         partners = {t["b"] if t["a"] == pid else t["a"] for t in view.get("treaties", [])
                     if pid in (t["a"], t["b"])}
-        threats = []
+        nearby = []
         for a in view.get("armies", []):
             if a["owner"] == pid:
                 continue
@@ -779,9 +779,9 @@ def summarize_view(view: dict, pid: str | None = None, max_events: int = 12, max
             if near:
                 d, c = min(near, key=lambda t: t[0])
                 tag = " (treaty partner)" if a["owner"] in partners else ""
-                threats.append(f"  {a['owner']}{tag} at [{a['x']},{a['y']}]: {_units_str(a['units'])} "
+                nearby.append(f"  {a['owner']}{tag} at [{a['x']},{a['y']}]: {_units_str(a['units'])} "
                                f"(power {_power(a['units'], rules)}), {d} tile(s) from {c['name']}")
-        out.append("Threats near your cities: " + ("\n" + "\n".join(threats) if threats else "none"))
+        out.append("Other players' armies within 3 tiles of your cities: " + ("\n" + "\n".join(nearby) if nearby else "none"))
 
     # diplomacy
     treaties = view.get("treaties", [])
