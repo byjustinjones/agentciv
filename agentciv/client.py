@@ -625,12 +625,15 @@ def _my_last_turn_problems(view: dict, pid: str, max_events: int) -> list[str]:
 def _progress_str(p: dict, thr: dict) -> str:
     vp = p.get("victory_progress") or {}
     rt = thr.get("relic_turns") or 16
-    pre = "≥" if p.get("fogged") else ""   # fog: rounded down to a multiple of 0.1
+    st = thr.get("streak_turns") or 10
     return (f"capitals {p.get('capitals_held', 0)}/{thr.get('conquest_capitals', '?')}, "
             f"wonder {p.get('wonder_stage', 0)}/{thr.get('wonder_stage', 5)}, "
             f"relics {p.get('relics_held', 0)} held {p.get('relics_guarded', 0)} guarded "
             f"(need {thr.get('relics_needed', '?')}) streak {p.get('relic_streak', 0)}/{rt}, "
-            f"influence {pre}{vp.get('influence', 0) * 100:.0f}%, economic {pre}{vp.get('economic', 0) * 100:.0f}%")
+            f"legacy {p.get('legacy', 0)}/{thr.get('legacy', '?')} streak {p.get('influence_streak', 0)}/{st} "
+            f"({vp.get('influence', 0) * 100:.0f}%), "
+            f"bank {p.get('bank', 0)}/{thr.get('bank', '?')} streak {p.get('economic_streak', 0)}/{st} "
+            f"({vp.get('economic', 0) * 100:.0f}%)")
 
 
 def _relic_lines(view: dict, players: dict, rules: dict) -> list[str]:
@@ -980,8 +983,8 @@ def summarize_view(view: dict, pid: str | None = None, max_events: int = 12, max
     visible = (view.get("map") or {}).get("visible") if fog else None
     if fog:
         n = (view.get("fog") or {}).get("visible_tiles")
-        out.append("Fog of war: other players' resources, units, military_power, upkeep and score are hidden; "
-                   "economic and influence progress are rounded down to steps of 0.1; armies are listed on the "
+        out.append("Fog of war: other players' resources, units, military_power, upkeep and score are hidden "
+                   "(bank, legacy and victory progress are shown); armies are listed on the "
                    f"{n if n is not None else '?'} tiles in your sight.")
 
     def in_sight(x: int, y: int) -> bool:
@@ -1010,7 +1013,8 @@ def summarize_view(view: dict, pid: str | None = None, max_events: int = 12, max
             out.append(f"Upkeep {upkeep} food/turn. Claim costs "
                        f"{you.get('claim_cost')} influence. Settle costs "
                        f"{', '.join(f'{v} {k}' for k, v in sc.items())}. Market fee "
-                       f"{(you.get('market_fee') or 0) * 100:.0f}%. Orders submitted this turn: "
+                       f"{(you.get('market_fee') or 0) * 100:.0f}%. Bank {me.get('bank', 0)} "
+                       f"(up to {you.get('bank_limit', 0)} gold can be banked this turn). Orders submitted this turn: "
                        f"{'yes' if you.get('submitted') else 'no'}.")
         out += _food_outlook(view, pid, res.get("food", 0), upkeep)
         pending, ids = _pending_gives(view, pid)
@@ -1112,9 +1116,11 @@ def summarize_view(view: dict, pid: str | None = None, max_events: int = 12, max
     thr = vic.get("thresholds") or {}
     if thr:
         out.append(f"\nVictory thresholds: conquest {thr.get('conquest_capitals')} original capitals, wonder stage "
-                   f"{thr.get('wonder_stage')}, influence {thr.get('influence')}, relics "
+                   f"{thr.get('wonder_stage')}, influence: legacy {thr.get('legacy')} held "
+                   f"{thr.get('streak_turns')} turns, relics "
                    f"{thr.get('relics_needed')}/{thr.get('relics_total')} held for {thr.get('relic_turns')} turns, "
-                   f"economic {thr.get('economic_gold')} gold, else best score at turn {thr.get('max_turns')}.")
+                   f"economic: bank {thr.get('bank')} held {thr.get('streak_turns')} turns (original capital "
+                   f"owned), else best score at turn {thr.get('max_turns')}.")
     out.append("Players (score | cities tiles | power | food wood stone gold infl | victory progress toward every "
                "condition | reputation):")
     for p in sorted(players.values(), key=lambda p: (p.get("score") is None, -(p.get("score") or 0))):
@@ -1134,7 +1140,8 @@ def summarize_view(view: dict, pid: str | None = None, max_events: int = 12, max
         mine = [e for e in events if e.get("player") == pid and e.get("type") in ("order_failed", "starvation")]
         others = [e for e in events if e not in mine and e.get("type") in (
             "battle", "city_captured", "city_founded", "eliminated", "treaty_signed", "treaty_broken",
-            "wonder_stage", "starvation", "trade_executed", "victory", "tile_captured", "contract_default")]
+            "wonder_stage", "starvation", "trade_executed", "victory", "tile_captured", "contract_default",
+            "streak_started", "streak_ended")]
         if others:
             out.append("Notable events last turn:")
             for e in others[:max_events]:

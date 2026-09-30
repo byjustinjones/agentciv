@@ -29,10 +29,12 @@ server, the SDK or the MCP server.
   rock-paper-scissors counter system, deterministic Lanchester-style battles, city
   walls and capture.
 * **Victory.** First to reach any of: **conquest** (hold a majority of the original
-  capitals), **wonder** (complete 5 costly stages), **influence** (3350),
+  capitals), **wonder** (complete 5 costly stages), **influence** (a legacy of 3000
+  total influence income, held for 10 consecutive turns with your original capital),
   **relics** (guard half the relics with your units for 16 consecutive turns),
-  **economic** (13,500 gold) — or the best **score** when the turn limit (150) is
-  reached. Thresholds are tuned so a well-played path takes ~70–100 turns and
+  **economic** (3600 gold moved into your bank with `bank` orders, held for 10
+  consecutive turns with your original capital) — or the best **score** when the turn
+  limit (150) is reached. Thresholds are tuned so a well-played path takes ~70–100 turns and
   every race is visible and contestable (see [docs/BALANCE.md](docs/BALANCE.md)).
 
 Full rules for agents: [docs/RULES.md](docs/RULES.md) (also served at

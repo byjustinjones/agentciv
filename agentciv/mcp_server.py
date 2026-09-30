@@ -52,6 +52,7 @@ ORDER_HELP = (
     '{"type":"propose","to":"p2","give":{"wood":50},"get":{"gold":40}} (or the propose_deal tool, '
     'applied at once) | {"type":"accept","deal":"d7"} | {"type":"propose_treaty","to":"p3","turns":20} | '
     '{"type":"accept_treaty","from":"p3"} | {"type":"break_treaty","with":"p3"} | '
+    '{"type":"bank","gold":60} (gold into your bank, rules §5) | '
     '{"type":"say","to":"p2","text":"Truce?"} | '
     '{"type":"spy","target":"p3","mission":"treasury","invest":40} (fog games) | '
     '{"type":"counterintel","invest":30} (fog games)'

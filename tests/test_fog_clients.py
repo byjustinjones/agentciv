@@ -7,6 +7,7 @@ from pathlib import Path
 
 from agentciv.bots import get_bot
 from agentciv.client import ascii_map, describe_event, order_warnings, summarize_view
+from agentciv.engine import constants as C
 from agentciv.engine import deals as D
 from agentciv.engine import fog as F
 from agentciv.engine.testing import new_game, run_turn
@@ -37,7 +38,8 @@ def test_summary_of_a_fog_view():
     s = summarize_view(v)
     assert "None" not in s
     assert "Fog of war: other players' resources, units, military_power, upkeep and score are hidden" in s
-    assert "p2 P2: ? |" in s and "? ? ? ? ?" in s and "economic ≥0%" in s
+    assert "p2 P2: ? |" in s and "? ? ? ? ?" in s and f"bank 0/{C.BANK_VICTORY} streak 0/10" in s
+    assert "bank, legacy and victory progress are shown" in s
     assert "Armies last seen (not in sight now):" in s and "p3 at [" in s
     assert "Intel reports:" in s and "p2 military (success" in s and "p3 treasury (success" in s
     assert "Your counter-intelligence: pool 30, rating" in s

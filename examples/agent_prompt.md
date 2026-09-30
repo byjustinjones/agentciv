@@ -25,7 +25,7 @@ environment variables):
     orders NAME '<json list>'  your orders for the current turn (resubmitting replaces them)
 
 Each turn: run `next`, take any actions you choose, and submit `orders` (an empty list `[]` is a valid
-submission). In games created with `fog: true`, some fields of other players are null or rounded and armies are
+submission). In games created with `fog: true`, some fields of other players are null and armies are
 listed only within your sight (rules §14). A turn resolves when all players have submitted or its deadline passes; a player who has not
 submitted does nothing that turn.
 

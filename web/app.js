@@ -2094,21 +2094,26 @@
       const th = v.victory?.thresholds || {};
       const wmax = Rules.wonderMax(th);
       const rows = this.sortedPlayers(v);
+      // replays recorded before the bank/legacy rules carry `influence` / `economic_gold` thresholds
+      const legacyRules = th.bank == null && th.economic_gold != null;
+      const streakT = th.streak_turns ?? '?';
       const need = {
         conquest: `${th.conquest_capitals ?? '?'} capitals`,
         wonder: `stage ${wmax}`,
-        influence: `${fmt(th.influence)} inf`,
+        influence: legacyRules ? `${fmt(th.influence)} inf` : `legacy ${fmt(th.legacy)} ×${streakT}t`,
         relics: `${th.relics_needed ?? '?'}× ${th.relic_turns ?? '?'}t`,
-        economic: `${fmt(th.economic_gold)} gold`,
+        economic: legacyRules ? `${fmt(th.economic_gold)} gold` : `bank ${fmt(th.bank)} ×${streakT}t`,
       };
       const detail = (p, c) => {
         const r = p.resources || {};
         switch (c) {
           case 'conquest': return `${num(p.capitals_held)}/${th.conquest_capitals ?? '?'} original capitals`;
           case 'wonder': return `wonder stage ${num(p.wonder_stage)}/${wmax}`;
-          case 'influence': return `${fmt(r.influence)}/${fmt(th.influence)} influence`;
+          case 'influence': return legacyRules ? `${fmt(r.influence)}/${fmt(th.influence)} influence`
+            : `legacy ${fmt(num(p.legacy))}/${fmt(th.legacy)}, streak ${num(p.influence_streak)}/${streakT}`;
           case 'relics': return `${num(p.relics_held)}/${th.relics_needed ?? '?'} relics held, streak ${num(p.relic_streak)}/${th.relic_turns ?? '?'}`;
-          case 'economic': return `${fmt(r.gold)}/${fmt(th.economic_gold)} gold`;
+          case 'economic': return legacyRules ? `${fmt(r.gold)}/${fmt(th.economic_gold)} gold`
+            : `bank ${fmt(num(p.bank))}/${fmt(th.bank)}, streak ${num(p.economic_streak)}/${streakT}`;
           default: return '';
         }
       };
@@ -2288,7 +2293,8 @@
           const by = e.to ?? e.player ?? e.by ?? e.new_owner;
           const from = e.from ?? e.previous_owner ?? e.old_owner;
           const extra = [e.plunder && bagText(e.plunder) ? 'plunder ' + bag(e.plunder) : '',
-            num(e.tiles) ? `${e.tiles} tiles` : '', num(e.wonder_destroyed) ? `wonder stage ${e.wonder_destroyed} destroyed` : '']
+            num(e.tiles) ? `${e.tiles} tiles` : '', num(e.wonder_destroyed) ? `wonder stage ${e.wonder_destroyed} destroyed` : '',
+            num(e.legacy_lost) ? `legacy −${fmt(e.legacy_lost)}` : '']
             .filter(Boolean).join(' · ');
           return {
             icon: 'flag', color: '#fb923c', major: true,
@@ -2364,7 +2370,13 @@
         case 'contract_completed':
           return { icon: 'contract', color: '#4ade80', html: `${P(e.payer)} honoured contract ${esc(e.contract ?? '')} to ${P(e.payee)} in full${e.deal ? ` <span class="muted">(deal ${esc(e.deal)})</span>` : ''}` };
         case 'contract_default':
-          return { icon: 'contract', color: '#f87171', major: true, html: `${P(e.payer)} <span class="betray">defaulted</span> on contract ${esc(e.contract ?? '')} to ${P(e.payee)} <span class="muted">(owed ${bag(e.per_turn) || '?'}/turn, ${esc(e.turns_left ?? '?')} turns left${e.penalty != null ? `; −${esc(e.penalty)} influence` : ''})</span>` };
+          return { icon: 'contract', color: '#f87171', major: true, html: `${P(e.payer)} <span class="betray">defaulted</span> on contract ${esc(e.contract ?? '')} to ${P(e.payee)} <span class="muted">(owed ${bag(e.per_turn) || '?'}/turn, ${esc(e.turns_left ?? '?')} turns left${e.penalty != null ? `; −${esc(e.penalty)} influence` : ''}${num(e.seized) ? `; ${fmt(e.seized)} gold from the bank` : ''})</span>` };
+        case 'bank':
+          return { icon: 'coin', color: '#f3c969', html: `${P(who)} banked ${fmt(num(e.gold))} gold <span class="muted">(bank ${fmt(num(e.bank))})</span>` };
+        case 'streak_started':
+          return { icon: 'clock', color: '#f3c969', major: true, html: `${P(who)} started a <b>${esc(COND_LABEL[e.condition] || human(e.condition))}</b> victory streak` };
+        case 'streak_ended':
+          return { icon: 'clock', color: '#94a3b8', major: true, html: `${P(who)}'s ${esc(COND_LABEL[e.condition] || human(e.condition))} victory streak ended${e.reason === 'contract_default' ? ' <span class="muted">(contract default)</span>' : ''}` };
         case 'say':
           return { icon: 'chat', color: e.to === 'all' ? '#60a5fa' : '#c084fc', html: `${P(e.from ?? e.by)} → ${e.to === 'all' || e.to == null ? 'everyone' : P(e.to)}: <span class="quote">“${esc(e.text)}”</span>` };
         case 'trade_offered':

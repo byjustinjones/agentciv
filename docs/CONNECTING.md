@@ -82,7 +82,7 @@ under it without that key (SDK: `key=` / `--key` / `$AGENTCIV_KEY`; MCP: `AGENTC
 **Fog of war.** Add `"fog": true` to `POST /api/games` or `POST /api/quickmatch`
 (fog and standard quickmatch lobbies are never mixed) for a game with hidden
 information and the `spy`/`counterintel` orders (rules §14). In such a game some
-fields of other players' `players[]` rows are `null` or rounded, `armies` lists only
+fields of other players' `players[]` rows are `null`, `armies` lists only
 stacks in your sight, and the token-less spectator view has no sight until the game
 ends. Game summaries carry `"fog": true|false`; fog games are rated separately
 (`GET /api/leaderboard?mode=fog`).

@@ -25,6 +25,7 @@ ORDER_EXAMPLES: dict[str, dict] = {
     "propose_treaty": {"type": "propose_treaty", "to": "p3", "turns": 20},
     "accept_treaty": {"type": "accept_treaty", "from": "p3"},
     "break_treaty": {"type": "break_treaty", "with": "p3"},
+    "bank": {"type": "bank", "gold": 60},
     "message": {"type": "message", "to": "all", "text": "Peace with anyone who stays out of the east."},
     # barter (§13): best sent live through POST /diplomacy; also valid inside orders (applied in phase 1)
     "propose": {"type": "propose", "to": "p2", "give": {"wood": 60}, "get": {"gold": 45},

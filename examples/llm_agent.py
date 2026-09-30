@@ -45,7 +45,7 @@ score; the rules below describe what is allowed.
 
 Each turn you receive a state summary, an ASCII map, new diplomacy from your inbox and your notes from last
 turn. Use get_full_state if you need exact details (tile owners, armies, improvements, deals). In games created
-with fog: true, some fields of other players are null or rounded and armies are listed only within your sight
+with fog: true, some fields of other players are null and armies are listed only within your sight
 (rules §14).
 
 Diplomacy is live: deals settle the moment they are accepted. Tools: propose_deal and respond_to_deal
