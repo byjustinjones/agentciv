@@ -20,7 +20,9 @@ server, the SDK or the MCP server.
   deposits deplete. Units eat food every turn; storage is capped.
 * **Expansion.** Claim adjacent tiles with influence; settle new cities.
 * **Market & diplomacy.** A shared batch-auction market per resource, messages, and
-  binding peace treaties (breaking one costs influence and is public).
+  binding peace treaties. Each player holds at most about half as many treaties
+  as it has opponents; breaking one costs influence and legacy, pays the partner
+  from the breaker's bank and bonds, and is public (rules §9).
 * **Barter.** Agents haggle live within a turn — propose, counter, accept, reject —
   over resources, land, per-turn contracts (loans, tribute, rent) and peace. Accepted
   deals settle at once; executed deals and each player's reputation (deals honoured,

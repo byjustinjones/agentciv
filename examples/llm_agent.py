@@ -62,19 +62,22 @@ THE RULES:
 BUNDLE = {
     "type": "object",
     "description": 'resources {"food","wood","stone","gold"} (integers), "tiles": [[x,y],...] (owned non-city '
-                   'tiles), and/or a contract "per_turn": {"gold": 5} with "turns": 1-30. {} = nothing.',
+                   'tiles), and/or a contract "per_turn": {"gold": 5} with "turns": 1-30; with peace, "bond": banked '
+                   'gold that side pledges on the treaty (rules §9). {} = nothing.',
     "properties": {
         "food": {"type": "integer"}, "wood": {"type": "integer"}, "stone": {"type": "integer"},
         "gold": {"type": "integer"},
         "tiles": {"type": "array", "items": {"type": "array", "items": {"type": "integer"}}},
         "per_turn": {"type": "object", "additionalProperties": {"type": "integer"}},
         "turns": {"type": "integer"},
+        "bond": {"type": "integer"},
     },
 }
 DEAL_TERMS = {
     "give": {**BUNDLE, "description": "what YOU hand over. " + BUNDLE["description"]},
     "get": {**BUNDLE, "description": "what YOU receive. " + BUNDLE["description"]},
-    "peace": {"type": "integer", "description": "optional: 10-50 turns of binding peace on acceptance"},
+    "peace": {"type": "integer", "description": "optional: 20-40 turns of binding peace on acceptance, subject to "
+                                               "treaty slots, cooldowns and bonds (rules §9)"},
     "message": {"type": "string", "description": "optional short note (<= 300 chars)"},
 }
 
@@ -82,7 +85,8 @@ TOOLS = [
     {
         "name": "get_full_state",
         "description": "Return parts of the full, current JSON game view. Sections: you, players, map, cities, "
-                       "armies, market, treaties, treaty_proposals, deals, contracts, messages, events, victory, "
+                       "armies, market, treaties, treaty_cooldowns, treaty_proposals, deals, contracts, messages, "
+                       "events, victory, "
                        "costs.",
         "input_schema": {
             "type": "object",

@@ -24,6 +24,7 @@ ORDER_EXAMPLES: dict[str, dict] = {
     "accept_trade": {"type": "accept_trade", "offer_id": "d7"},
     "propose_treaty": {"type": "propose_treaty", "to": "p3", "turns": 20},
     "accept_treaty": {"type": "accept_treaty", "from": "p3"},
+    "release_treaty": {"type": "release_treaty", "with": "p3"},
     "break_treaty": {"type": "break_treaty", "with": "p3"},
     "bank": {"type": "bank", "gold": 60},
     "message": {"type": "message", "to": "all", "text": "Peace with anyone who stays out of the east."},
@@ -49,6 +50,8 @@ DEAL_EXAMPLES: list[dict] = [
     {"type": "propose", "to": "p4", "give": {"tiles": [[5, 6]]}, "get": {"stone": 80}, "message": "land sale"},
     {"type": "propose", "to": "p2", "give": {"per_turn": {"food": 5}, "turns": 20}, "get": {}, "peace": 20,
      "message": "tribute for peace"},
+    {"type": "propose", "to": "p5", "give": {"bond": 40}, "get": {"bond": 40}, "peace": 30,
+     "message": "peace with a 40-gold bond from each side"},
 ]
 
 ORDER_NOTES = {
@@ -63,9 +66,16 @@ ORDER_NOTES = {
     "market": "side buy|sell; resource food|wood|stone; limit = worst acceptable gold price per unit (optional)",
     "message": "to = a player id or \"all\"",
     "propose": "give = what you hand over, get = what you receive; a bundle may hold food/wood/stone/gold, "
-               "tiles [[x,y],...], a contract {\"per_turn\":{...},\"turns\":n}; optional peace (turns), message, "
+               "tiles [[x,y],...], a contract {\"per_turn\":{...},\"turns\":n}, and with peace a bond (banked gold "
+               "pledged on the treaty, rules §9); optional peace (turns), message, "
                "expires_in. Send it live: POST /api/games/{id}/diplomacy {\"actions\":[...]}",
     "counter": "only the recipient of deal d7 can counter; give/get are from YOUR point of view",
+    "propose_treaty": "turns 20-40; optional bond (banked gold pledged on the treaty); limited by treaty slots, "
+                      "cooldowns and bonds (you.treaty, treaty_cooldowns; rules §9)",
+    "accept_treaty": "only on the turn after the proposal; optional bond",
+    "release_treaty": "ends the treaty at no cost only if the partner also orders it in the same turn",
+    "break_treaty": "ends the treaty at once; costs influence, legacy and gold to the partner "
+                    "(you.treaty.break_preview; rules §9)",
     "accept": "only the recipient can accept; settles at once if both sides can deliver",
     "say": "to = a player id or \"all\" (public)",
     "spy": "fog games only (rules §14): mission military|treasury; invest 20-1000 gold, paid at resolution",

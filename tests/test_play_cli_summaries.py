@@ -20,6 +20,7 @@ def alert_view():
                       {"x": 2, "y": 2, "owner": "p1", "units": {"infantry": 3}}]
     view["treaties"] = [{"a": "p3", "b": "p1", "until_turn": 22}]
     view["events"] = [{"type": "treaty_broken", "by": "p2", "with": "p1", "turn": 19}]
+    view["treaty_cooldowns"] = [{"a": "p1", "b": "p2", "until_turn": 34}]
     for field, value in (("relic_streak", 4), ("economic_streak", 2), ("influence_streak", 1)):
         view["players"][1][field] = value
     view["you"]["resources"].update(food=1, gold=2)
@@ -34,6 +35,8 @@ def test_each_alert_and_completion_turn():
     assert lines == [
         "Your relic [5,5] has no units of yours.",
         "Treaty with p3 ends on turn 22.",
+        "Treaty slots full: 1 of 1 in use; no new treaty can be signed (renewals excepted).",
+        "Treaty cooldown with p2 until turn 34: no treaty with p2 can be signed before then.",
         "p2 stack [5,4] adjacent to your relic [5,5]; no treaty.",
         "p2 stack [3,2] adjacent to your city [2,2]; no treaty.",
         "Treaty p2–p1 broken on turn 19.",
@@ -50,6 +53,8 @@ def test_alert_exclusions_and_boundaries():
     view["armies"] += [{"x": 5, "y": 5, "owner": "p1", "units": {"infantry": 1}}]
     view["treaties"] = [{"a": "p1", "b": "p2", "until_turn": 23}]
     view["events"] = [{"type": "treaty_broken", "by": "p2", "with": "p3", "turn": 19}]
+    view["treaty_cooldowns"] = [{"a": "p2", "b": "p3", "until_turn": 34}, {"a": "p1", "b": "p3", "until_turn": 20}]
+    view["you"]["treaty"]["slots"] = 2
     for p in view["players"]:
         p.update(relic_streak=0, economic_streak=0, influence_streak=0)
     view["you"]["resources"].update(food=2, gold=3)
@@ -103,7 +108,8 @@ def test_compact_has_requested_fields_and_one_line_per_city_army_player():
     for field in ("score", "cities", "tiles", "military", "relics held", "guarded", "relic streak",
                   "wonder", "bank", "legacy", "economic streak", "influence streak"):
         assert field in row
-    assert "Your treaties: p3 ends t22" in text
+    assert "Your treaties (1/1 slots): p3 ends t22." in text
+    assert "Treaty cooldowns: p2 until t34." in text
     assert "Market (gold/unit): food" in text
     assert "Changes since your last turn:" in text and "Treaty p2–p1 broken" in text
     assert len(text) < len(summarize_view(view)) / 2
@@ -181,3 +187,39 @@ def test_market_sell_warning_ignores_later_income():
     assert any("exceeds current stock 5" in s and "before this turn's income (step 7)" in s for s in warnings)
     sell["qty"] = 5
     assert not any("exceeds current stock" in s for s in order_warnings(view, [sell]))
+
+
+def test_treaty_alerts_bonds_and_warnings_from_the_engine():
+    """Slots, bonds, cooldowns and break previews come from the engine view (rules §9)."""
+    from agentciv.engine import constants as C
+    g = new_game(5)
+    run_turn(g, {"p1": [{"type": "propose_treaty", "to": "p2", "turns": 20, "bond": 0}]})
+    g.player("p1").bank = 200
+    run_turn(g, {"p2": [{"type": "accept_treaty", "from": "p1"}]})
+    g.diplomacy("p1", [{"type": "propose", "to": "p3", "give": {"bond": 40}, "peace": 30}])
+    g.diplomacy("p3", [{"type": "accept", "deal": "d1"}])
+    view = g.player_view("p1")
+    assert view["you"]["treaty"]["slots"] == 2 and view["you"]["treaty"]["held"] == 2
+    assert "Treaty slots full: 2 of 2 in use; no new treaty can be signed (renewals excepted)." in view_alerts(view)
+    text = summarize_compact(view)
+    assert "Your treaties (2/2 slots): p2 ends t21; p3 ends t32, bonds you 40 / p3 0." in text
+    full = summarize_view(view)
+    assert "(2/2 slots used; unpledged bank 160, required bond 0)" in full
+    assert f"breaking it now: {C.TREATY_BREAK_COST} influence, legacy -0, 60 gold to p3" in full
+    w = order_warnings(view, [{"type": "propose_treaty", "to": "p4", "turns": 20},
+                              {"type": "release_treaty", "with": "p2"}])
+    assert any("propose_treaty with p4 will FAIL: you hold 2 of 2 treaty slots" in s for s in w)
+    assert any("only if p2 also orders release_treaty" in s for s in w)
+    # a break: cooldown alert for both, bond alert for the breaker without a bank
+    g.player("p1").resources["influence"] = 200
+    g.player("p1").bank = 0
+    run_turn(g, {"p1": [{"type": "break_treaty", "with": "p2"}]})
+    view = g.player_view("p1")
+    lines = view_alerts(view)
+    until = 2 + C.TREATY_RESIGN_COOLDOWN
+    assert f"Treaty cooldown with p2 until turn {until}: no treaty with p2 can be signed before then." in lines
+    assert (f"Required treaty bond {C.TREATY_BOND_PER_BETRAYAL} exceeds your unpledged bank 0: "
+            "no treaty can be signed or renewed.") in lines
+    assert f"Treaty cooldowns: p2 until t{until}." in summarize_compact(view)
+    assert any("will FAIL: no treaty with p2 can be signed before turn" in s
+               for s in order_warnings(view, [{"type": "propose_treaty", "to": "p2", "turns": 20}]))

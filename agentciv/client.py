@@ -246,7 +246,9 @@ class AgentCivClient:
         """Propose a deal to ``to``: you hand over ``give`` and receive ``get``.
         A bundle holds resources (``{"wood": 60}``), ``"tiles": [[x, y]]`` and/or
         a contract ``"per_turn": {"gold": 5}, "turns": 10``; ``peace`` = k
-        turns of peace on acceptance. Returns ``{"index","ok","deal"|"error","seq"}``."""
+        turns of peace on acceptance (or a renewal between partners), and then
+        ``"bond": n`` in a bundle is that side's pledge of banked gold on the
+        treaty (rules §9). Returns ``{"index","ok","deal"|"error","seq"}``."""
         return self._one(self._terms({"type": "propose", "to": to}, give, get, peace, message, expires_in))
 
     def counter(self, deal: str, give: dict | None = None, get: dict | None = None, peace: int | None = None,
@@ -772,6 +774,7 @@ def order_warnings(view: dict, orders: list) -> list[str]:
             warnings.append(f"spy/counterintel orders invest {spy_gold} gold but only about {left} gold is on hand "
                             "after the market and actions (income arrives before espionage in step 7½); orders "
                             "that cannot be paid fail")
+    warnings += _treaty_warnings(view, pid, orders)
     pending, ids = _pending_gives(view, pid)
     if pending:
         tight = [r for r, v in pending.items() if after.get(r, 0) - need.get(r, 0) - v < 0]
@@ -781,6 +784,42 @@ def order_warnings(view: dict, orders: list) -> list[str]:
                             + " the moment they are accepted, before these orders run; if that happens, "
                             "some of these orders will fail (withdraw an offer to keep the resources)")
     return warnings
+
+
+def _treaty_warnings(view: dict, pid: str, orders: list) -> list[str]:
+    """Treaty orders that the §9 limits visible in the view will make fail."""
+    ts = treaty_status(view, pid)
+    you = view.get("you") or {}
+    info = you.get("treaty") or {}
+    out = []
+    new = 0
+    pledged = 0
+    for o in orders:
+        t = o.get("type")
+        q = o.get("to") if t == "propose_treaty" else o.get("from") if t == "accept_treaty" else o.get("with")
+        if t in ("propose_treaty", "accept_treaty"):
+            if q in ts["cooldowns"]:
+                out.append(f"{t} with {q} will FAIL: no treaty with {q} can be signed before turn {ts['cooldowns'][q]}")
+                continue
+            # accepts resolve before new proposals; a proposal needs a free slot when made
+            used = ts["held"] + new + (1 if t == "accept_treaty" else 0)
+            if ts["slots"] is not None and (used > ts["slots"] if t == "accept_treaty" else used >= ts["slots"]):
+                out.append(f"{t} with {q} will FAIL: you hold {ts['held']} of {ts['slots']} treaty slots"
+                           + (f" and accept {new} more earlier in this list" if new else ""))
+            elif t == "accept_treaty":
+                new += 1
+            pledged += ts["bond_required"] + int(o.get("bond") or 0)
+            if ts["bond_free"] is not None and pledged > ts["bond_free"]:
+                out.append(f"{t} with {q}: bonds of {pledged} exceed your unpledged bank {ts['bond_free']}; "
+                           "it will FAIL")
+        elif t == "break_treaty" and info.get("break_cost") is not None:
+            infl = (you.get("resources") or {}).get("influence", 0)
+            if infl < info["break_cost"]:
+                out.append(f"break_treaty with {q} costs {info['break_cost']} influence but you hold {infl}: "
+                           "it will FAIL")
+        elif t == "release_treaty":
+            out.append(f"release_treaty with {q} ends the treaty only if {q} also orders release_treaty this turn")
+    return out
 
 
 def _power(units: dict, rules: dict | None = None) -> int:
@@ -854,6 +893,8 @@ def bundle_str(b: dict | None) -> str:
     if b.get("per_turn"):
         per = ", ".join(f"{v} {r}" for r, v in b["per_turn"].items())
         parts.append(f"{per}/turn for {b.get('turns')} turns")
+    if b.get("bond"):
+        parts.append(f"bond {b['bond']} (pledged)")
     return " + ".join(parts) or "nothing"
 
 
@@ -963,6 +1004,39 @@ def describe_event(ev: dict, pid: str | None = None) -> str:
     return f"{t}: {json.dumps(fields, separators=(',', ':'))[:200]}"
 
 
+def _partner(t: dict, pid: str) -> str:
+    return t["b"] if t["a"] == pid else t["a"]
+
+
+def treaty_status(view: dict, pid: str | None = None) -> dict:
+    """``pid``'s treaty facts from a view (rules §9): ``held`` and ``slots``,
+    ``treaties`` {partner: {until, mine, theirs}} (bonds), ``cooldowns``
+    {partner: first turn a treaty may be signed again}, ``bond_required``
+    and ``bond_free``. Older servers without slots give ``slots`` None."""
+    you = view.get("you") or {}
+    pid = pid or you.get("id")
+    info = you.get("treaty") or {}
+    mine = {}
+    for t in view.get("treaties", []):
+        if pid in (t.get("a"), t.get("b")):
+            q = _partner(t, pid)
+            bond = t.get("bond") or {}
+            mine[q] = {"until": t.get("until_turn"), "mine": bond.get(pid, 0), "theirs": bond.get(q, 0)}
+    turn = view.get("turn") or 0
+    cool = {}
+    for c in view.get("treaty_cooldowns") or []:
+        if pid in (c.get("a"), c.get("b")) and (c.get("until_turn") or 0) > turn:
+            cool[_partner(c, pid)] = c["until_turn"]
+    return {"held": len(mine), "slots": info.get("slots"), "treaties": mine, "cooldowns": cool,
+            "bond_required": info.get("bond_required", 0), "bond_free": info.get("bond_free"),
+            "break_preview": info.get("break_preview") or {}}
+
+
+def _treaty_line(q: str, t: dict) -> str:
+    bonds = f", bonds you {t['mine']} / {q} {t['theirs']}" if t["mine"] or t["theirs"] else ""
+    return f"{q} ends t{t['until']}{bonds}"
+
+
 def view_alerts(view: dict, pid: str | None = None) -> list[str]:
     """Facts from the player's current view; never consult remembered enemy armies."""
     you = view.get("you") or {}
@@ -986,6 +1060,15 @@ def view_alerts(view: dict, pid: str | None = None) -> list[str]:
         partners.add(partner)
         if 0 <= t["until_turn"] - turn <= 2:
             out.append(f"Treaty with {partner} ends on turn {t['until_turn']}.")
+    ts = treaty_status(view, pid)
+    if ts["slots"] is not None and ts["held"] >= ts["slots"]:
+        out.append(f"Treaty slots full: {ts['held']} of {ts['slots']} in use; no new treaty can be signed "
+                   "(renewals excepted).")
+    for q, until in sorted(ts["cooldowns"].items()):
+        out.append(f"Treaty cooldown with {q} until turn {until}: no treaty with {q} can be signed before then.")
+    if ts["bond_free"] is not None and ts["bond_required"] > ts["bond_free"]:
+        out.append(f"Required treaty bond {ts['bond_required']} exceeds your unpledged bank {ts['bond_free']}: "
+                   "no treaty can be signed or renewed.")
     for a in armies:
         if a.get("owner") == pid or a.get("owner") in partners:
             continue
@@ -1030,7 +1113,7 @@ def view_changes(view: dict, previous: dict | None = None) -> tuple[list[str], d
     Older turns' events cannot be recovered from a state view.
     """
     previous = previous or {}
-    kinds = {"city_captured", "treaty_signed", "treaty_broken", "treaty_expired", "eliminated",
+    kinds = {"city_captured", "treaty_signed", "treaty_broken", "treaty_expired", "treaty_released", "eliminated",
              "streak_started", "streak_ended"}
     events = [e for e in view.get("events", []) if e.get("type") in kinds
               or (e.get("type") == "tile_captured" and e.get("relic"))]
@@ -1050,12 +1133,21 @@ def view_changes(view: dict, previous: dict | None = None) -> tuple[list[str], d
             detail = f"Relic [{pos}] owner {ev.get('from') or 'none'} → {ev.get('to') or 'none'}"
         elif kind == "city_captured":
             detail = f"City {ev.get('city')} [{ev.get('x')},{ev.get('y')}] captured: {ev.get('from')} → {ev.get('to')}"
-        elif kind in ("treaty_signed", "treaty_expired"):
-            detail = f"Treaty {ev.get('a')}–{ev.get('b')} {'signed' if kind == 'treaty_signed' else 'expired'}"
+        elif kind in ("treaty_signed", "treaty_expired", "treaty_released"):
+            word = {"treaty_signed": "renewed" if ev.get("renewal") else "signed", "treaty_expired": "expired",
+                    "treaty_released": "released by both"}[kind]
+            detail = f"Treaty {ev.get('a')}–{ev.get('b')} {word}"
             if kind == "treaty_signed":
                 detail += f"; ends on turn {ev.get('until_turn')}"
+                bond = {k: v for k, v in (ev.get("bond") or {}).items() if v}
+                if bond:
+                    detail += "; bonds " + ", ".join(f"{k} {v}" for k, v in sorted(bond.items()))
         elif kind == "treaty_broken":
             detail = f"Treaty {ev.get('by')}–{ev.get('with')} broken by {ev.get('by')}"
+            if "cost" in ev:
+                detail += (f" ({ev['cost']} influence, legacy -{ev.get('legacy_lost', 0)}"
+                           + (f", {ev['paid']} gold paid to {ev.get('with')}" if ev.get("paid") is not None else "")
+                           + ")")
         elif kind == "eliminated":
             detail = f"{ev.get('player')} eliminated"
         elif kind in ("streak_started", "streak_ended"):
@@ -1112,9 +1204,12 @@ def summarize_compact(view: dict, pid: str | None = None, changes: list[str] | N
                 fields.append(f"{label} {p[key]}")
         out.append(f"  {p['id']} {p.get('name', '')}" + (" [eliminated]" if p.get("alive") is False else "")
                    + ": " + ", ".join(fields) + ".")
-    treaties = [f"{t['b'] if t['a'] == pid else t['a']} ends t{t['until_turn']}"
-                for t in view.get("treaties", []) if pid in (t.get("a"), t.get("b"))]
-    out.append("Your treaties: " + ("; ".join(treaties) or "none") + ".")
+    ts = treaty_status(view, pid)
+    slots = f" ({ts['held']}/{ts['slots']} slots)" if ts["slots"] is not None else ""
+    out.append(f"Your treaties{slots}: "
+               + ("; ".join(_treaty_line(q, t) for q, t in sorted(ts["treaties"].items())) or "none") + ".")
+    if ts["cooldowns"]:
+        out.append("Treaty cooldowns: " + "; ".join(f"{q} until t{u}" for q, u in sorted(ts["cooldowns"].items())) + ".")
     prices = (view.get("market") or {}).get("prices") or {}
     out.append("Market (gold/unit): " + (", ".join(f"{r} {p:.2f}" for r, p in prices.items()) or "none") + ".")
     out.append("Changes since your last turn:")
@@ -1244,26 +1339,40 @@ def summarize_view(view: dict, pid: str | None = None, max_events: int = 12, max
     treaties = view.get("treaties", [])
     if pid and me:
         turn = view.get("turn") or 0
-        mine = {(t["b"] if t["a"] == pid else t["a"]): t["until_turn"] for t in treaties if pid in (t["a"], t["b"])}
+        ts = treaty_status(view, pid)
+        mine = ts["treaties"]
         lines = []
         for q in sorted(players):
             if q == pid or not players[q].get("alive", True):
                 continue
             if q in mine:
-                left = mine[q] - turn
+                left = mine[q]["until"] - turn
                 soon = " — ENDS SOON" if left <= 5 else ""
-                lines.append(f"{q}: peace until turn {mine[q]} ({left} turn(s) left){soon}")
+                bonds = (f", bonds you {mine[q]['mine']} / {q} {mine[q]['theirs']}"
+                         if mine[q]["mine"] or mine[q]["theirs"] else "")
+                bp = ts["break_preview"].get(q)
+                brk = (f"; breaking it now: {bp['influence']} influence, legacy -{bp['legacy']}, "
+                       f"{bp['gold_to_partner']} gold to {q}" if bp else "")
+                lines.append(f"{q}: peace until turn {mine[q]['until']} ({left} turn(s) left){soon}{bonds}{brk}")
+            elif q in ts["cooldowns"]:
+                lines.append(f"{q}: NO treaty (either side may attack); cannot sign before turn {ts['cooldowns'][q]}")
             else:
                 lines.append(f"{q}: NO treaty (either side may attack)")
         if lines:
-            out.append("\nYour treaties: " + "; ".join(lines))
+            slots = (f" ({ts['held']}/{ts['slots']} slots used; unpledged bank {ts['bond_free']}, "
+                     f"required bond {ts['bond_required']})" if ts["slots"] is not None else "")
+            out.append(f"\nYour treaties{slots}: " + "; ".join(lines))
     others_t = [t for t in treaties if pid not in (t["a"], t["b"])]
     if others_t:
-        out.append(("Other treaties: " if pid and me else "\nTreaties: ")
-                   + "; ".join(f"{t['a']}–{t['b']} until turn {t['until_turn']}" for t in others_t))
+        def _other(t):
+            bond = {k: v for k, v in (t.get("bond") or {}).items() if v}
+            return (f"{t['a']}–{t['b']} until turn {t['until_turn']}"
+                    + (" (bonds " + ", ".join(f"{k} {v}" for k, v in sorted(bond.items())) + ")" if bond else ""))
+        out.append(("Other treaties: " if pid and me else "\nTreaties: ") + "; ".join(_other(t) for t in others_t))
     props = [p for p in view.get("treaty_proposals", []) if p.get("to") == pid]
     for p in props:
-        out.append(f"Treaty proposal from {p['from']} ({p['turns']} turns) — accept THIS turn with "
+        bond = f", bond {p['bond']}" if p.get("bond") else ""
+        out.append(f"Treaty proposal from {p['from']} ({p['turns']} turns{bond}) — accept THIS turn with "
                    f"{{\"type\":\"accept_treaty\",\"from\":\"{p['from']}\"}}")
     deals = view.get("deals")
     if deals is None:  # an older server: only resource-for-resource offers

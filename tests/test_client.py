@@ -153,10 +153,10 @@ def test_sdk_barter_helpers(server):
     a.join(gid, "A")
     b.join(gid, "B")
     a.wait(since_turn=-1, timeout=10)
-    r = a.propose(b.player_id, give={"wood": 5}, get={"gold": 4}, peace=10, message="deal?", expires_in=3)
+    r = a.propose(b.player_id, give={"wood": 5}, get={"gold": 4}, peace=20, message="deal?", expires_in=3)
     assert r["ok"] and r["deal"] == "d1" and r["seq"] >= 2
     d = b.state()["deals"]["open"][0]
-    assert d["peace"] == 10 and d["expires_turn"] == 3 and d["message"] == "deal?"
+    assert d["peace"] == 20 and d["expires_turn"] == 3 and d["message"] == "deal?"
     assert b.counter("d1", give={"gold": 3}, get={"wood": 5})["countered"] == "d1"
     assert a.reject("d2", "no")["ok"]
     assert a.propose(b.player_id, give={"wood": 1})["deal"] == "d3"
@@ -286,7 +286,8 @@ def test_summary_counts_down_treaties_and_shows_all_resources():
     g = new_game(3, seed=5)
     g.treaties[g._pair("p1", "p2")] = g.turn + 3
     text = summarize_view(g.player_view("p1"))
-    line = next(l for l in text.splitlines() if l.startswith("Your treaties:"))
+    line = next(l for l in text.splitlines() if l.startswith("Your treaties"))
+    assert line.startswith("Your treaties (1/1 slots used; unpledged bank 0, required bond 0): ")
     assert "p2: peace until turn" in line and "ENDS SOON" in line and "p3: NO treaty" in line
     p2 = next(l for l in text.splitlines() if l.startswith("  p2 P2: "))
     food = g.player("p2").resources["food"]

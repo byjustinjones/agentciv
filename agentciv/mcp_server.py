@@ -24,6 +24,7 @@ import sys
 import traceback
 from typing import Any
 
+from .engine import constants as C
 from .client import (AgentCivClient, ApiError, _deals_lines, ascii_map, describe_event, order_warnings,
                      summarize_view)
 
@@ -50,8 +51,10 @@ ORDER_HELP = (
     '{"type":"settle","at":[9,9]} | {"type":"disband","at":[3,4],"units":{"infantry":1}} | '
     '{"type":"market","side":"buy","resource":"stone","qty":40,"limit":2.5} | '
     '{"type":"propose","to":"p2","give":{"wood":50},"get":{"gold":40}} (or the propose_deal tool, '
-    'applied at once) | {"type":"accept","deal":"d7"} | {"type":"propose_treaty","to":"p3","turns":20} | '
-    '{"type":"accept_treaty","from":"p3"} | {"type":"break_treaty","with":"p3"} | '
+    'applied at once) | {"type":"accept","deal":"d7"} | '
+    '{"type":"propose_treaty","to":"p3","turns":20,"bond":0} (turns 20-40; bond optional, rules §9) | '
+    '{"type":"accept_treaty","from":"p3","bond":0} | {"type":"release_treaty","with":"p3"} (both must order it '
+    'the same turn) | {"type":"break_treaty","with":"p3"} (costs in you.treaty.break_preview) | '
     '{"type":"bank","gold":60} (gold into your bank, rules §5) | '
     '{"type":"say","to":"p2","text":"Truce?"} | '
     '{"type":"spy","target":"p3","mission":"treasury","invest":40} (fog games) | '
@@ -61,21 +64,25 @@ ORDER_HELP = (
 BUNDLE_SCHEMA = {
     "type": "object",
     "description": 'a bundle: resources {"food","wood","stone","gold"} (integers), "tiles": [[x,y],...] (your owned '
-                   'non-city tiles), and/or a contract "per_turn": {"gold": 5} with "turns": 1-30. {} = nothing',
+                   'non-city tiles), and/or a contract "per_turn": {"gold": 5} with "turns": 1-30; with peace, '
+                   '"bond": banked gold that side pledges on the treaty (rules §9). {} = nothing',
     "properties": {
         "food": {"type": "integer", "minimum": 0}, "wood": {"type": "integer", "minimum": 0},
         "stone": {"type": "integer", "minimum": 0}, "gold": {"type": "integer", "minimum": 0},
         "tiles": {"type": "array", "items": {"type": "array", "items": {"type": "integer"}}},
         "per_turn": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
         "turns": {"type": "integer", "minimum": 1, "maximum": 30},
+        "bond": {"type": "integer", "minimum": 0},
     },
     "additionalProperties": False,
 }
 DEAL_PROPS = {
     "give": {**BUNDLE_SCHEMA, "description": "what YOU hand over. " + BUNDLE_SCHEMA["description"]},
     "get": {**BUNDLE_SCHEMA, "description": "what YOU receive. " + BUNDLE_SCHEMA["description"]},
-    "peace": {"type": "integer", "minimum": 10, "maximum": 50,
-              "description": "optional: both sides bound by a peace treaty for this many turns on acceptance"},
+    "peace": {"type": "integer", "minimum": C.DEAL_PEACE_MIN_TURNS, "maximum": C.DEAL_PEACE_MAX_TURNS,
+              "description": "optional: both sides bound by a peace treaty for this many turns on acceptance, "
+                             "subject to treaty slots, cooldowns and bonds (rules §9); between partners it renews "
+                             "the treaty"},
     "message": {"type": "string", "description": "optional note shown with the deal (<= 300 chars)"},
     "expires_in": {"type": "integer", "minimum": 1, "maximum": 5, "description": "turns the deal stays open (2)"},
 }

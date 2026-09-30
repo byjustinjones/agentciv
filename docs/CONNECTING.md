@@ -76,20 +76,26 @@ from sequence zero. Inbox calls save the returned position.
 
 Both state summary modes put `ALERT:` lines first for unoccupied owned relics,
 visible stacks without a treaty adjacent to owned cities or relics (four-direction
-adjacency), recently broken or soon-ending treaties, active victory streaks,
+adjacency), recently broken or soon-ending treaties, full treaty slots, treaty
+cooldowns with other players (the first turn a treaty may be signed again), a
+required treaty bond larger than the unpledged bank, active victory streaks,
 contract instalments exceeding current holdings, and negative projected food at
 the next resolution. Streak completion turns assume the condition stays met.
 Food projections use current income and upkeep before any new orders or payments.
 Alerts use the player's view, including its fog restrictions.
 
 Compact mode lists the turn, season, deadline, own resources/income/upkeep, own
-cities and armies, other players' visible statistics, own treaties, market prices,
-and changes. It saves a small snapshot with the credentials. The changes block
+cities and armies, other players' visible statistics, own treaties (slots used and
+available, end turns and bonds) and treaty cooldowns, market prices, and changes.
+It saves a small snapshot with the credentials. The changes block
 uses the latest resolved turn's events and public relic ownership/streak changes
 since the last state summary; repeated summaries omit already-seen events. If
 several turns pass between summaries, intervening events are not available from
 the current view. `next` and `orders` print the elimination turn when the player
 can no longer act, plus the final result if the game has finished.
+The full summary also shows the treaty slots, the unpledged bank and the required
+bond, and per treaty the bonds and what breaking it would cost now
+(`you.treaty.break_preview`).
 
 `deal` checks the 300-character `message` limit for `propose`, `counter`, and
 `reject` before sending the batch. The `say`/`message` text limit is 500 characters.
@@ -261,7 +267,9 @@ Orders cheat sheet (coordinates are `[x, y]`, x = column, origin top-left):
 {"type":"market","side":"buy","resource":"stone","qty":40,"limit":2.5}
 {"type":"bank","gold":60}
 {"type":"propose_treaty","to":"p3","turns":20}
+{"type":"propose_treaty","to":"p4","turns":30,"bond":40}
 {"type":"accept_treaty","from":"p3"}
+{"type":"release_treaty","with":"p3"}
 {"type":"break_treaty","with":"p3"}
 {"type":"propose","to":"p2","give":{"wood":50},"get":{"gold":40}}
 {"type":"accept","deal":"d7"}

@@ -154,6 +154,18 @@
     relicInfluence() { return num(this.costs?.influence?.relic, 3); },
     wonderMax(th) { return num(th?.wonder_stage, num(this.costs?.buildings?.city?.wonder?.max, 5)); },
     hallFee() { return this.costs?.market?.market_hall_fee; },
+    diplo(k, d) { return num(this.costs?.diplomacy?.[k], d); },
+    /** Treaty slots of a player (rules §9): max(1, ceil(other living players / divisor)). */
+    treatySlots(alive) { return Math.max(1, Math.ceil(Math.max(0, alive - 1) / this.diplo('treaty_slot_divisor', 2))); },
+    /** Public part of what breaking a treaty costs player row p (rules §9); the deal refund is not included. */
+    breakCost(p, bond) {
+      const b = num(p?.betrayals);
+      const pct = this.costs?.diplomacy?.treaty_break_pct || [10, 40];
+      const pc = Math.min(num(pct[1], 40), num(pct[0], 10) * (1 + b));
+      return { influence: this.diplo('treaty_break_cost', 50) * (1 + b), pct: pc,
+               legacy: Math.floor(Math.max(0, num(p?.legacy)) * pc / 100),
+               gold: Math.floor(Math.max(0, num(p?.bank)) * pc / 100) + num(bond) };
+    },
   };
 
   /** Small inline SVG icon set (16x16, stroke = currentColor). */
@@ -2328,16 +2340,22 @@
           return { icon: 'treaty', color: '#86efac', html: `${P(e.from ?? who)} proposed peace to ${P(e.to)}${e.turns ? ` <span class="muted">(${esc(e.turns)} turns)</span>` : ''}` };
         case 'treaty_signed': {
           const [a, b] = Array.isArray(e.players) ? e.players : [e.a ?? e.from, e.b ?? e.to];
-          return { icon: 'treaty', color: '#4ade80', html: `${P(a)} and ${P(b)} signed a peace treaty${e.until_turn != null ? ` <span class="muted">until turn ${esc(e.until_turn)}</span>` : ''}${e.deal ? ` <span class="muted">(part of deal ${esc(e.deal)})</span>` : ''}` };
+          const bonds = Object.entries(e.bond || {}).filter(([, g]) => num(g) > 0).map(([q, g]) => `${esc(q)} ${fmt(g)}`).join(', ');
+          return { icon: 'treaty', color: '#4ade80', html: `${P(a)} and ${P(b)} ${e.renewal ? 'renewed their' : 'signed a'} peace treaty${e.until_turn != null ? ` <span class="muted">until turn ${esc(e.until_turn)}</span>` : ''}${bonds ? ` <span class="muted">(bonds ${bonds})</span>` : ''}${e.deal ? ` <span class="muted">(part of deal ${esc(e.deal)})</span>` : ''}` };
         }
         case 'treaty_expired': {
           const [a, b] = Array.isArray(e.players) ? e.players : [e.a ?? e.from, e.b ?? e.to];
           return { icon: 'treaty', color: '#94a3b8', html: `The treaty between ${P(a)} and ${P(b)} expired` };
         }
+        case 'treaty_released':
+          return { icon: 'treaty', color: '#94a3b8', html: `${P(e.a)} and ${P(e.b)} ended their treaty by mutual release` };
+        case 'contract_cancelled':
+          return { icon: 'contract', color: '#94a3b8', html: `Contract ${esc(e.contract ?? '')} (${P(e.payer)} → ${P(e.payee)}) cancelled by a treaty break` };
         case 'treaty_broken': {
           const breaker = e.by ?? e.player ?? e.breaker ?? e.a;
           const other = e.with ?? e.other ?? e.b ?? e.victim;
-          return { icon: 'broken', color: '#f87171', major: true, html: `${P(breaker)} <span class="betray">broke</span> their treaty with ${P(other)} <span class="muted">(betrayal)</span>` };
+          const cost = e.cost != null ? ` <span class="muted">(−${esc(e.cost)} influence, −${fmt(e.legacy_lost)} legacy${e.paid != null ? `, ${fmt(e.paid)} gold to ${esc(other)}` : num(e.bank_share) + num(e.bond) ? `, ≥${fmt(num(e.bank_share) + num(e.bond))} gold to ${esc(other)}` : ''})</span>` : ' <span class="muted">(betrayal)</span>';
+          return { icon: 'broken', color: '#f87171', major: true, html: `${P(breaker)} <span class="betray">broke</span> their treaty with ${P(other)}${cost}` };
         }
         case 'deal_proposed': {
           const d = e.deal && typeof e.deal === 'object' ? e.deal : e;
@@ -2408,7 +2426,7 @@
       if (!b || typeof b !== 'object') return '<span class="muted">nothing</span>';
       const parts = [];
       for (const [r, n] of Object.entries(b)) {
-        if (r === 'tiles' || r === 'per_turn' || r === 'turns' || !num(n)) continue;
+        if (r === 'tiles' || r === 'per_turn' || r === 'turns' || r === 'bond' || !num(n)) continue;
         parts.push(`<span class="rq"><i class="swatch" style="background:${RES_COLOR[r] || '#9ca3af'}"></i>${fmt(num(n))} ${esc(r)}</span>`);
       }
       const tiles = (Array.isArray(b.tiles) ? b.tiles : []).filter((tl) => Array.isArray(tl));
@@ -2419,6 +2437,7 @@
       if (b.per_turn && typeof b.per_turn === 'object' && bagText(b.per_turn)) {
         parts.push(`<span class="rq contract" title="contract: paid every turn">${esc(bagText(b.per_turn))}/turn × ${esc(b.turns ?? '?')}</span>`);
       }
+      if (num(b.bond)) parts.push(`<span class="rq peace" title="banked gold pledged on the treaty (rules §9)">bond ${fmt(num(b.bond))}</span>`);
       return parts.length ? parts.join(' <span class="muted">+</span> ') : '<span class="muted">nothing</span>';
     },
     /** "gives X for Y" (proposer's view), or with `named` "A gives X · B gives Y". */
@@ -2455,17 +2474,39 @@
       const treaties = (v.treaties || []).filter(inv);
       const proposals = (v.treaty_proposals || []).filter(inv);
       const betrayers = (v.players || []).filter((p) => num(p.betrayals) > 0 && (!f || p.id === f));
+      const rows = Object.fromEntries((v.players || []).map((p) => [p.id, p]));
+      const living = (v.players || []).filter((p) => p.alive !== false);
+      const slots = Rules.treatySlots(living.length);
+      const held = (id) => (v.treaties || []).filter((t) => t.a === id || t.b === id).length;
+      const cooldowns = (v.treaty_cooldowns || []).filter(inv).filter((c) => num(c.until_turn) > num(v.turn));
+      const own = v.you?.treaty?.break_preview || null;
+      const brk = (t, q) => {
+        const other = t.a === q ? t.b : t.a;
+        const pv = own && v.you?.id === q ? own[other] : null;
+        const c = pv ? { influence: pv.influence, legacy: pv.legacy, gold: pv.gold_to_partner } : Rules.breakCost(rows[q], t.bond?.[q]);
+        return `<span class="muted" title="cost for ${esc(q)} to break it now${pv ? '' : ' (bank share + bond; deal refunds not included)'}">${esc(q)} break: ${fmt(c.influence)} infl, −${fmt(c.legacy)} legacy, ${fmt(c.gold)} gold</span>`;
+      };
+      const bondTxt = (t) => {
+        const b = Object.entries(t.bond || {}).filter(([, g]) => num(g) > 0);
+        return b.length ? ` · bonds ${b.map(([q, g]) => `${esc(q)} ${fmt(g)}`).join(', ')}` : '';
+      };
       const msgs = this.collectMessages().filter((m) => !f || m.from === f || m.to === f);
       const hidden = v.status === 'running' && !Spectator.key
         ? '<div class="dsec small muted">Private messages and treaty proposals stay hidden while the game runs; the replay reveals them once it is over. Deals, contracts and negotiation threads are in the <a href="#" data-goto-tab="trade">Trade</a> tab.</div>' : '';
       $('#diplo').innerHTML = `${hidden}
         <div class="dsec"><h4>Active treaties (${treaties.length})</h4>
           ${treaties.length ? treaties.map((t) => `<div class="treaty">${icon('treaty', '#4ade80')} ${this.chip(t.a)} <span class="muted">⇄</span> ${this.chip(t.b)}
-            <span class="left">until turn ${esc(t.until_turn)}${t.until_turn != null ? ` · ${Math.max(0, t.until_turn - v.turn)} left` : ''}</span></div>`).join('')
+            <span class="left">until turn ${esc(t.until_turn)}${t.until_turn != null ? ` · ${Math.max(0, t.until_turn - v.turn)} left` : ''}${bondTxt(t)}</span>
+            <div class="small" style="flex-basis:100%">${brk(t, t.a)} · ${brk(t, t.b)}</div></div>`).join('')
             : '<div class="empty">No active treaties.</div>'}
         </div>
+        <div class="dsec"><h4>Treaty slots <span class="muted small">(max ${slots} each)</span></h4>
+          ${living.filter((p) => !f || p.id === f).map((p) => `<div class="treaty">${this.chip(p.id)} <span class="left">${held(p.id)}/${slots}${held(p.id) >= slots ? ' · full' : ''}${num(p.betrayals) ? ` · bond ${fmt(Rules.diplo('treaty_bond_per_betrayal', 50) * num(p.betrayals))} per treaty` : ''}</span></div>`).join('')}
+        </div>
+        ${cooldowns.length ? `<div class="dsec"><h4>Cooldowns after a break</h4>${cooldowns.map((c) =>
+          `<div class="treaty">${icon('broken', '#f87171')} ${this.chip(c.a)} <span class="muted">⇄</span> ${this.chip(c.b)} <span class="left">no treaty before turn ${esc(c.until_turn)}</span></div>`).join('')}</div>` : ''}
         ${proposals.length ? `<div class="dsec"><h4>Pending proposals</h4>${proposals.map((p) =>
-          `<div class="treaty">${this.chip(p.from)} <span class="muted">→</span> ${this.chip(p.to)} <span class="left">${esc(p.turns)} turns · proposed T${esc(p.turn)}</span></div>`).join('')}</div>` : ''}
+          `<div class="treaty">${this.chip(p.from)} <span class="muted">→</span> ${this.chip(p.to)} <span class="left">${esc(p.turns)} turns${num(p.bond) ? ` · bond ${fmt(p.bond)}` : ''} · proposed T${esc(p.turn)}</span></div>`).join('')}</div>` : ''}
         <div class="dsec"><h4>Betrayals</h4>${betrayers.length ? betrayers.map((p) =>
           `<div class="treaty">${icon('broken', '#f87171')} ${this.chip(p.id)} <span class="betray">broke ${p.betrayals} treat${p.betrayals === 1 ? 'y' : 'ies'}</span></div>`).join('')
           : '<div class="empty">Nobody has broken a treaty.</div>'}</div>
