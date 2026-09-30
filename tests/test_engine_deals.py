@@ -583,29 +583,32 @@ def test_peace_from_deal():
     ok(g, "p1", {"type": "propose", "to": "p2", "peace": 20})
     ok(g, "p2", {"type": "accept", "deal": "d1"})
     assert g.treaty("p1", "p2") and g.treaties[("p1", "p2")] == 20
-    assert g.player_view("p3")["treaties"] == [{"a": "p1", "b": "p2", "until_turn": 20}]
+    assert g.player_view("p3")["treaties"] == [{"a": "p1", "b": "p2", "until_turn": 20, "signed_turn": 0,
+                                                "bond": {"p1": 0, "p2": 0}}]
     # ... and is re-checked at resolution: peace now forbids it
     ev = run_turn(g)
     assert "treaty partner" in events_of(ev, "order_failed")[0]["reason"]
     assert g.owner[g.idx(7, 2)] == "p2"
     signed = events_of(ev, "treaty_signed")[0]
-    assert signed == {"turn": 0, "type": "treaty_signed", "a": "p1", "b": "p2", "until_turn": 20, "deal": "d1"}
+    assert signed == {"turn": 0, "type": "treaty_signed", "a": "p1", "b": "p2", "until_turn": 20, "deal": "d1",
+                      "bond": {"p1": 0, "p2": 0}}
 
 
 def test_peace_extends_existing_treaty_to_later_end():
     g = world()
     ok(g, "p1", {"type": "propose", "to": "p2", "peace": 30})
     ok(g, "p2", {"type": "accept", "deal": "d1"})
-    ok(g, "p1", {"type": "propose", "to": "p2", "peace": 10, "give": {"gold": 1}})
+    ok(g, "p1", {"type": "propose", "to": "p2", "peace": 20, "give": {"gold": 1}})
     ok(g, "p2", {"type": "accept", "deal": "d2"})
     assert g.treaties[("p1", "p2")] == 30              # shorter peace doesn't shorten it
     run_turn(g)
-    ok(g, "p2", {"type": "propose", "to": "p1", "peace": 50})
+    ok(g, "p2", {"type": "propose", "to": "p1", "peace": 40})
     ok(g, "p1", {"type": "accept", "deal": "d3"})
-    assert g.treaties[("p1", "p2")] == 1 + 50
+    assert g.treaties[("p1", "p2")] == 1 + 40
+    assert g.treaty_terms[("p1", "p2")]["deals"] == ["d1", "d2", "d3"]
     # treaty proposals are refused now (already at peace)
-    assert g.submit_orders("p3", [{"type": "propose_treaty", "to": "p1", "turns": 10}]) == []
-    assert g.submit_orders("p1", [{"type": "propose_treaty", "to": "p2", "turns": 10}])
+    assert g.submit_orders("p3", [{"type": "propose_treaty", "to": "p1", "turns": 20}]) == []
+    assert g.submit_orders("p1", [{"type": "propose_treaty", "to": "p2", "turns": 20}])
 
 
 # ====================================================================== land
@@ -651,7 +654,7 @@ def test_tile_with_foreign_units_cannot_be_transferred():
     g = world()
     border(g)
     g.place_units(3, 3, "p1", {"infantry": 2})         # p1's own army stays on the tile it sells
-    for peace in (None, 10):
+    for peace in (None, C.DEAL_PEACE_MIN_TURNS):
         ok(g, "p1", {"type": "propose", "to": "p2", "give": {"tiles": [[3, 3]]}, "get": {"gold": 10},
                      "peace": peace})
         did = f"d{g._deal_counter}"
@@ -840,7 +843,7 @@ def test_rules_json_exposes_deal_constants():
     assert r["contract_default_gold_per_influence"] == C.CONTRACT_DEFAULT_GOLD_PER_INFLUENCE == 2
     assert r["default_expires_in"] == C.DEAL_DEFAULT_EXPIRES_IN == 2
     assert r["actions_per_turn"] == 30 and r["say_per_turn"] == 10
-    assert r["contract_turns"] == [1, 30] and r["peace_turns"] == [10, 50] and r["max_tiles_per_bundle"] == 5
+    assert r["contract_turns"] == [1, 30] and r["peace_turns"] == [20, 40] and r["max_tiles_per_bundle"] == 5
     assert r["aliases"] == {"offer_trade": "propose", "accept_trade": "accept", "message": "say"}
 
 
@@ -941,7 +944,7 @@ def random_diplomacy(view, rng, n=4):
             a = {"type": "propose", "to": to, "give": random_bundle(rng, view, me, tiles_of, to),
                  "get": random_bundle(rng, view, to, tiles_of, me)}
             if rng.random() < 0.2:
-                a["peace"] = rng.randint(10, 20)
+                a["peace"] = rng.randint(C.DEAL_PEACE_MIN_TURNS, C.DEAL_PEACE_MIN_TURNS + 10)
             if rng.random() < 0.3:
                 a["expires_in"] = rng.randint(1, 5)
             if rng.random() < 0.2:

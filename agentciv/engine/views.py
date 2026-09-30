@@ -136,6 +136,11 @@ def build_view(g: "Game", viewer: str | None, full: bool = False) -> dict:
             "settle_cost": settle_cost(s["cities"]),
             "market_fee": C.MARKET_HALL_FEE if g.status != "lobby" and g.has_market_hall(p.id) else C.MARKET_FEE,
             "bank_limit": g.bank_limit(p.id),
+            "treaty": {"slots": g.treaty_slots(p.id), "held": g.treaties_held(p.id),
+                       "bond_required": g.bond_required(p.id), "bond_pledged": g.bond_pledged(p.id),
+                       "bond_free": g.bond_free(p.id), "break_cost": g.treaty_break_cost(p.id),
+                       "break_pct": g.treaty_break_pct(p.id), "break_preview": g.break_preview(p.id)}
+            if g.status != "lobby" else None,
             "capital": list(g.xy(p.capital)) if p.capital is not None else None,
             "submitted": g.has_submitted(p.id),
         }
@@ -196,7 +201,13 @@ def build_view(g: "Game", viewer: str | None, full: bool = False) -> dict:
             "pools": pools,
             "history": [{"turn": hst["turn"], "prices": dict(hst["prices"])} for hst in g.market_history],
         },
-        "treaties": [{"a": a, "b": b, "until_turn": u} for (a, b), u in sorted(g.treaties.items())],
+        "treaties": [{"a": a, "b": b, "until_turn": u,
+                      "signed_turn": (g.treaty_terms.get((a, b)) or {}).get("signed"),
+                      "bond": dict((g.treaty_terms.get((a, b)) or {}).get("bond", {}))}
+                     for (a, b), u in sorted(g.treaties.items())],
+        "treaty_cooldowns": [{"a": a, "b": b, "until_turn": bt + C.TREATY_RESIGN_COOLDOWN}
+                             for (a, b), bt in sorted(g.broken_pairs.items())
+                             if bt + C.TREATY_RESIGN_COOLDOWN > g.turn],
         "treaty_proposals": [dict(pr) for pr in g.treaty_proposals
                              if pr["turn"] == g.turn - 1 and involves(pr["from"], pr["to"])],
         "trade_offers": D.legacy_trade_offers(g, viewer, omniscient),

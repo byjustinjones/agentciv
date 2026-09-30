@@ -54,6 +54,8 @@ EVENT_POLICY = {
     "treaty_broken": "public",
     "treaty_signed": "public",
     "treaty_expired": "public",
+    "treaty_released": "public",
+    "contract_cancelled": "emitted",
     "eliminated": "public",
     "victory": "public",
     "build": "public",
@@ -79,6 +81,7 @@ REDACT = {
     "city_captured": (("from", "to"), ("plunder",)),
     "deal_executed": (("from", "to"), ("give", "get", "contracts")),
     "contract_default": (("payer", "payee"), ("per_turn", "penalty", "debt", "seized")),
+    "treaty_broken": (("by", "with"), ("refund", "paid", "debt", "cancelled")),
 }
 
 _HIDDEN_KEYS = ("_vis", "_fog")

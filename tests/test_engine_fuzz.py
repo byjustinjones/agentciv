@@ -92,7 +92,8 @@ def plausible_orders(view, rng, n=20):
                     out.append({"type": "accept_treaty", "from": pr["from"]})
         elif k == 10 and others:
             if rng.random() < 0.7:
-                out.append({"type": "propose_treaty", "to": rng.choice(others), "turns": rng.randint(10, 20)})
+                out.append({"type": "propose_treaty", "to": rng.choice(others),
+                            "turns": rng.randint(C.TREATY_MIN_TURNS, C.TREATY_MIN_TURNS + 10)})
             else:
                 for t in view["treaties"]:
                     if me in (t["a"], t["b"]):

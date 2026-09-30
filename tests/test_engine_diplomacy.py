@@ -11,7 +11,7 @@ def world():
     return g
 
 
-def sign(g, a="p1", b="p2", turns=10):
+def sign(g, a="p1", b="p2", turns=C.TREATY_MIN_TURNS):
     run_turn(g, {a: [{"type": "propose_treaty", "to": b, "turns": turns}]})
     ev = run_turn(g, {b: [{"type": "accept_treaty", "from": a}]})
     return ev
@@ -32,16 +32,19 @@ def test_treaty_proposal_visibility_and_accept_next_turn_only():
 
 def test_treaty_signed_and_expires():
     g = world()
-    ev = sign(g, turns=10)
+    k = C.TREATY_MIN_TURNS
+    ev = sign(g, turns=k)
     signed = events_of(ev, "treaty_signed")[0]
-    assert signed["until_turn"] == 1 + 10
+    assert signed["until_turn"] == 1 + k and signed["bond"] == {"p1": 0, "p2": 0}
     assert g.treaty("p1", "p2") and not g.hostile("p1", "p2")
-    assert g.spectator_view()["treaties"] == [{"a": "p1", "b": "p2", "until_turn": 11}]
-    while g.turn <= 11:
+    assert g.spectator_view()["treaties"] == [{"a": "p1", "b": "p2", "until_turn": 1 + k, "signed_turn": 1,
+                                               "bond": {"p1": 0, "p2": 0}}]
+    while g.turn <= 1 + k:
         assert g.treaty("p1", "p2")
         ev = run_turn(g)
     assert not g.treaty("p1", "p2")
-    assert events_of(ev, "treaty_expired")
+    assert events_of(ev, "treaty_expired")[0]["released"] == {"p1": 0, "p2": 0}
+    assert g.treaty_terms == {}
 
 
 def test_treaty_blocks_movement_and_combat():
@@ -65,7 +68,7 @@ def test_treaty_blocks_movement_and_combat():
     assert g.submit_orders("p1", [{"type": "move", "from": [8, 8], "to": [9, 8]}])
 
 
-def test_break_treaty_costs_influence_and_restrictions_lift_next_turn():
+def test_break_treaty_costs_influence_and_restrictions_lift_two_turns_later():
     g = world()
     sign(g)
     p1 = g.player("p1")
@@ -74,10 +77,18 @@ def test_break_treaty_costs_influence_and_restrictions_lift_next_turn():
     g.place_units(6, 2, "p1", {"infantry": 3})
     # break + move in the same turn: the move is still blocked this turn
     ev = run_turn(g, {"p1": [{"type": "break_treaty", "with": "p2"}]})
-    assert events_of(ev, "treaty_broken")[0] == {"turn": 2, "type": "treaty_broken", "by": "p1", "with": "p2"}
+    assert events_of(ev, "treaty_broken")[0] == {
+        "turn": 2, "type": "treaty_broken", "by": "p1", "with": "p2", "cost": C.TREATY_BREAK_COST,
+        "legacy_lost": 0, "bank_share": 0, "bond": 0, "refund": 0, "paid": 0, "debt": 0, "cancelled": [],
+        "betrayals": 1}
     assert p1.betrayals == 1 and not g.treaty("p1", "p2")
     assert p1.resources["influence"] == 60 - C.TREATY_BREAK_COST + g.stats()["p1"]["income"]["influence"]
     assert g.player_view("p3")["players"][0]["betrayals"] == 1
+    # the turn after the break the pair is still movement-restricted (notice)
+    errs = g.submit_orders("p1", [{"type": "move", "from": [6, 2], "to": [7, 2]}])
+    assert errs and "restrictions last through turn 3" in errs[0]["error"]
+    run_turn(g)
+    assert g.owner[g.idx(7, 2)] == "p2"
     ev = run_turn(g, {"p1": [{"type": "move", "from": [6, 2], "to": [7, 2]}]})
     assert g.owner[g.idx(7, 2)] == "p1"
 

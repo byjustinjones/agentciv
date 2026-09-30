@@ -53,11 +53,14 @@ A deal is proposed by `from` to `to` and has two **bundles**: `give` (what the p
 {{"wood": 60, "gold": 10,                  // immediate resources ({tradable}; influence is NOT tradable)
  "tiles": [[5, 6]],                        // tiles you own, not a city, not a relic (max {C.DEAL_MAX_TILES} per bundle),
                                            // each touching the receiver's land (see below)
- "per_turn": {{"gold": 5}}, "turns": 10}}  // a CONTRACT: paid every turn for `turns` turns ({C.DEAL_CONTRACT_MIN_TURNS}–{C.DEAL_CONTRACT_MAX_TURNS})
+ "per_turn": {{"gold": 5}}, "turns": 10,   // a CONTRACT: paid every turn for `turns` turns ({C.DEAL_CONTRACT_MIN_TURNS}–{C.DEAL_CONTRACT_MAX_TURNS})
+ "bond": 30}}                              // only with "peace": banked gold this side pledges on the treaty (§9)
 ```
 
 Deal options: `"peace": k` ({C.DEAL_PEACE_MIN_TURNS}–{C.DEAL_PEACE_MAX_TURNS}) — on acceptance both sides are bound by a peace treaty
-for k turns (an existing treaty is extended to the later end); `"message"`: free text ≤ {C.DEAL_MESSAGE_MAX_LENGTH} chars;
+for k turns, subject to the §9 limits (treaty slots, cooldown, bonds); between players already at peace it renews the treaty
+(it ends at the later of its current end and k turns from now) and needs no free slot. `give.bond` / `get.bond` (only with
+`peace`) are the proposer's / recipient's pledges (§9); on a renewal a side that offers no bond keeps its current one; `"message"`: free text ≤ {C.DEAL_MESSAGE_MAX_LENGTH} chars;
 `"expires_in"`: {C.DEAL_EXPIRES_MIN}–{C.DEAL_EXPIRES_MAX} turns (default {edef}: a deal made on turn t can be accepted until the end of turn t+{edef}).
 Quantities are whole numbers 0–{C.DEAL_MAX_QTY}; a deal needs at least one term. You may have at most
 {C.DEAL_MAX_OPEN_PER_PLAYER} of your own proposals open at a time.
@@ -83,7 +86,7 @@ You may also put them in your turn's orders; then they are applied in phase 1 of
 * `accept` — only the recipient may accept. Settlement is **atomic**: every resource and tile must be deliverable by its
   giver at that moment, otherwise the deal **fails** (status `failed`, both sides are told why) and nothing moves.
   On success resources and tiles change hands at once (a tile keeps its improvement and deposit; armies on it stay),
-  contracts start and peace is signed.
+  contracts start and peace is signed. A peace deal that the §9 limits no longer allow also fails.
 * **Land rules.** A traded tile must be 4-adjacent to the receiver's territory (not counting tiles the receiver hands over
   in the same deal) or to another tile it receives in the same bundle — land sales move a border, they cannot create
   enclaves. A tile cannot change hands while units of anyone but its new owner stand on it (the seller's army would
@@ -162,7 +165,7 @@ def _fog() -> str:
 
     sight = "and every player who had the tile (a border clash: either tile) in sight at the start or at the end of the turn"
     special = {"battle", "disband", "recruit", "market", "starvation", "city_captured", "deal_executed",
-               "contract_default", "spy_report", "spy_detected", "counterintel"}
+               "contract_default", "treaty_broken", "spy_report", "spy_detected", "counterintel"}
     public = sorted(t for t, p in EVENT_POLICY.items() if p == "public" and t not in special)
     parties = sorted(t for t, p in EVENT_POLICY.items() if p == "emitted" and t not in special)
     rows = [
@@ -174,6 +177,7 @@ def _fog() -> str:
         [names("city_captured"), "everyone; `plunder` only to `from` and `to`"],
         [names("deal_executed"), "everyone; `give`, `get` and `contracts` only to `from` and `to`"],
         [names("contract_default"), "everyone; `per_turn`, `penalty`, `debt` and `seized` only to `payer` and `payee`"],
+        [names("treaty_broken"), "everyone; `refund`, `paid`, `debt` and `cancelled` only to `by` and `with`"],
         [names(*public), "everyone"],
         [names(*parties), "as in standard games: the parties only (a `say` to `\"all\"`: everyone)"],
     ]
@@ -285,7 +289,8 @@ sightings of that player's stacks (with `turn` = `as_of_turn`).
   `influence_debt`; that an owner guards a relic (`guarded`, `relics_guarded`); that a capturer had units on a
   captured tile or city; that deals and contracts exist and when; contract defaults; changes in a player's public
   `bank`, which show `seized` of a contract default and `plunder.bank` of a capture (and, with `turns_left`, the value
-  of a defaulted contract); order failures on contact; a failed
+  of a defaulted contract); treaty bonds and the `cost`, `legacy_lost`, `bank_share` and `bond` of a treaty break;
+  order failures on contact; a failed
   `accept` (one bit: which side could not deliver); espionage outcomes (they bound the target's rating); `diplomacy_seq`.
   The seed determines only the map, relics and starting positions.
 """
@@ -331,7 +336,7 @@ an empty list counts as a submission). Max {C.MAX_ORDERS_PER_TURN} orders per tu
 ## 2. Resolution order (every turn)
 
 1. **Diplomacy** — deal actions and messages placed *inside your orders* (§10) are applied, players round-robin (every player's 1st diplomacy order, then every player's 2nd, …; the starting player rotates each turn). Actions sent through the diplomacy channel during the turn have already taken effect.
-2. **Treaties** — `break_treaty`; `accept_treaty` (for proposals made last turn); new `propose_treaty`.
+2. **Treaties** — `break_treaty`, `release_treaty`; `accept_treaty` (for proposals made last turn); new `propose_treaty`.
 3. **Market** — one batch auction per resource (§7).
 4. **Actions** — `build`, `claim`, `settle`, `recruit`, `disband`, `bank`, in the order you submitted them, paying costs when executed.
    Players' orders are interleaved round-robin (your 1st order, then the next player's 1st, …; the starting player rotates each turn).
@@ -391,10 +396,11 @@ Resources: food, wood, stone, gold (tradable) and influence (not tradable).
   (`you.bank_limit`; counted when the order executes; all `bank` orders of a turn share it). An order moves the smallest
   of the amount given, your gold and what remains of the limit, and fails only if that is 0. Banked gold cannot be
   spent, traded or withdrawn. In step 7 the bank pays floor(bank/{C.BANK_INTEREST_DIVISOR}) gold, included in
-  `income.gold`. Banked gold leaves the bank only when your original capital is captured (§8) or when you default on a
-  contract (§10).
+  `income.gold`. Banked gold leaves the bank only when your original capital is captured (§8), when you default on a
+  contract (§10) or when you break a treaty (§9). Treaty bonds (§9) are pledges on banked gold: pledged gold stays in
+  the bank, counts for it and earns interest.
 * **Legacy** (`players[].legacy`): in step 7 your influence income is added to your legacy. Spending influence does not
-  lower it.
+  lower it; breaking a treaty does (§9).
 * Your projected gross income for the current turn is `you.income` (season applied); `you.upkeep` is subtracted from food.
 
 ### Tile improvements (one per owned non-city tile)
@@ -468,7 +474,7 @@ Counter cycle: infantry → cavalry → archer → infantry. Archers defending t
 **Recruit** in a city you own (`recruit`, max {C.MAX_RECRUIT_PER_ORDER} per order); units appear at the end of the turn.
 
 **Move** units from a tile along a path of 1 step (2 steps if every moved unit is cavalry). You may not enter impassable tiles,
-tiles owned by a treaty partner or tiles holding a partner's army; the first step of a 2-step path may not hold a hostile army or a hostile city (its garrison blocks the way).
+tiles owned by a treaty partner or tiles holding a partner's army (or those of a player whose treaty with you was broken or released this turn, or broken last turn); the first step of a 2-step path may not hold a hostile army or a hostile city (its garrison blocks the way).
 A stack can be split with several move orders (the total per unit type can't exceed what is there). Moving onto unowned land does **not** claim it.
 
 **Combat power** of side X against side Y:
@@ -511,13 +517,35 @@ Units left on a relic keep it; a hostile army that beats them (or walks onto an 
 
 ## 9. Diplomacy
 
-* **Treaties**: `propose_treaty {{to, turns ({C.TREATY_MIN_TURNS}–{C.TREATY_MAX_TURNS})}}`; the target may `accept_treaty {{from}}` on the **next** turn only
+* **Treaties**: `propose_treaty {{to, turns ({C.TREATY_MIN_TURNS}–{C.TREATY_MAX_TURNS}), bond?}}`; the target may `accept_treaty {{from, bond?}}` on the **next** turn only
   (pending proposals to you are in `treaty_proposals`). A treaty signed on turn t with `turns` k lasts until the end of turn t+k (`until_turn`).
   While active the two players cannot move onto each other's tiles or armies and never fight.
-  `break_treaty {{with}}` is an orders-only action: a successful break submitted for turn T ends the treaty in phase 2 of turn T's resolution, costs {C.TREATY_BREAK_COST} influence and increments your public `betrayals` counter.
-  Movement onto the ex-partner's tiles or armies remains blocked for turn T. After turn T resolves, these moves can be submitted for turn T+1 and execute during turn T+1's resolution, provided no new treaty is signed.
+  A peace deal (§10) also signs a treaty, or renews one between players already at peace.
+* **Treaty slots**: a player may be party to at most max(1, ceil(L/{C.TREATY_SLOT_DIVISOR:g})) treaties at once, where L is the number of
+  other players still in the game (`you.treaty.slots`, `you.treaty.held`). Treaties signed before L fell are kept until they
+  end, and no new treaty can be signed while at or over the limit. Renewing a treaty needs no free slot.
+* **Bonds**: each party pledges banked gold to its partner on a treaty: the `bond` it offers plus
+  {C.TREATY_BOND_PER_BETRAYAL} × its `betrayals` (`you.treaty.bond_required`). A player's pledges on all its treaties together cannot
+  exceed its bank (`you.treaty.bond_free` is what is left); a treaty whose bonds cannot be covered is not signed. Pledged
+  gold stays in the bank (§5). Bonds are public (`treaties[].bond`).
+* **Ending a treaty at no cost**: expiry, `release_treaty {{with}}` ordered by both parties in the same turn, or the
+  elimination of a party. The bonds are released.
+* **Breaking a treaty**: `break_treaty {{with}}` ends it immediately. With b = your `betrayals` before the break and
+  p = min({C.TREATY_BREAK_MAX_PCT}, {C.TREATY_BREAK_PCT} × (1+b)) percent (`you.treaty.break_pct`):
+  * it costs {C.TREATY_BREAK_COST} × (1+b) influence (`you.treaty.break_cost`), which you must hold, or the order fails;
+  * p% of your legacy is removed;
+  * you pay the partner, as gold: p% of your bank; your bond on the treaty; and, for each deal that signed or renewed the
+    treaty, the start-price value (§10) of the resources the partner handed over in that deal, net of what you handed over
+    (tiles and contracts not counted), times the unexpired share of that deal's peace. This is paid from your bank, then
+    your gold; the rest becomes `influence_debt` (1 per {C.CONTRACT_DEFAULT_GOLD_PER_INFLUENCE} gold, §10);
+  * contracts from those deals that the partner pays to you end (`contract_cancelled`);
+  * your influence streak ends and this turn end does not count toward it (§11); your public `betrayals` increases by 1.
+  `you.treaty.break_preview` gives these amounts for each of your treaties as of now.
+  The two players cannot sign a treaty with each other for {C.TREATY_RESIGN_COOLDOWN} turns (`treaty_cooldowns`: the first turn they may).
+  `break_treaty` is an orders-only action: a successful break submitted for turn T ends the treaty in phase 2 of turn T's resolution.
+  Movement onto the ex-partner's tiles or armies remains blocked for turn T and turn T+1; these moves execute from turn T+2's resolution on.
   This timing also applies to treaties created by a live peace deal; `break_treaty` is not accepted by the live diplomacy channel.
-  If both partners order `break_treaty` in the same turn, both pay and both get a betrayal.
+  If both partners order `break_treaty` in the same turn, both pay in full, each is paid by the other, and both get a betrayal.
 * **Deals** (trading resources, land, peace and recurring payments) and **messages** (`say`) are described in §10.
   Messages are not binding; only treaties, executed deals and contracts are enforced by the engine.
   A peace treaty can also be part of a deal (`"peace": k`), which signs it at once.
@@ -545,7 +573,8 @@ requirement is not met sets the streak to 0. A contract default by you moves the
 from your bank to the payee (up to the whole bank) and sets your `economic_streak` to 0 (§10); the turn end of that
 turn does not count, so the streak is still 0 after it. Elimination sets all of a player's streaks to 0.
 `streak_started` and `streak_ended` events {{player, condition}} are shown to everyone (`streak_ended` also has
-`"reason": "contract_default"` after a default and `"reason": "eliminated"` on elimination).
+`"reason": "contract_default"` after a default, `"reason": "treaty_broken"` after you break a treaty and `"reason": "eliminated"` on
+elimination). Breaking a treaty sets your `influence_streak` to 0 and the turn end of that turn does not count toward it (§9).
 """)
     add(_table(["max_turns", "B (bank)", "L (legacy)"],
                [[t, bank_target(t), legacy_target(t)] for t in (60, 90, 120, ref)]))
@@ -580,8 +609,9 @@ Every order is a JSON object with `"type"`; coordinates are `[x, y]`.
 {{"type":"market","side":"buy","resource":"stone","qty":40,"limit":2.5}}
 {{"type":"propose","to":"p2","give":{{"wood":50}},"get":{{"gold":40}}}}   // deal actions (§10) also work as orders
 {{"type":"accept","deal":"d7"}}
-{{"type":"propose_treaty","to":"p3","turns":20}}
+{{"type":"propose_treaty","to":"p3","turns":30,"bond":20}}       // "bond" optional (§9)
 {{"type":"accept_treaty","from":"p3"}}
+{{"type":"release_treaty","with":"p3"}}                          // ends it only if p3 also orders it this turn
 {{"type":"break_treaty","with":"p3"}}
 {{"type":"bank","gold":60}}                                      // up to 60 gold into your bank (§5)
 {{"type":"say","to":"all","text":"hello"}}
@@ -595,12 +625,15 @@ and again when executed (e.g. resources are only checked then) — execution fai
 ## 13. The state view (what you see)
 
 * `turn`, `max_turns`, `status`, `deadline`, `season` {{name, turns_left, modifiers, next}}.
-* `you`: resources, caps, income, upkeep, claim_cost, settle_cost, market_fee, bank_limit, capital.
+* `you`: resources, caps, income, upkeep, claim_cost, settle_cost, market_fee, bank_limit, capital, and
+  `treaty` {{slots, held, bond_required, bond_pledged, bond_free, break_cost, break_pct, break_preview}} (§9;
+  `break_preview` = {{partner: {{influence, legacy, gold_to_partner, influence_debt, cancels}}}}).
 * `players[]`: stats of every player (resources, income, cities, tiles, units, military_power, wonder_stage, relics_held, relics_guarded, relic_streak, bank, legacy, economic_streak, influence_streak, betrayals, reputation, score, victory_progress, submitted); in fog games some fields of other players are `null` (§14).
 * `map`: width, height, terrain rows, owner grid, improvements, deposits, relics (`{{x, y, owner, guarded}}`).
 * `cities[]` (walls, warehouse, market_hall, wonder_stage, garrison), `armies[]` ({{x, y, owner, units}}).
 * `market`: fee, prices, pools, history (last {C.MARKET_HISTORY_TURNS} turns).
-* `treaties`, `treaty_proposals` (to/from you), `deals` {{open, recent, log}}, `contracts`, `diplomacy_seq` (§10), `messages` (public + yours, last {C.MESSAGES_IN_VIEW}), `events` (last turn).
+* `treaties` ({{a, b, until_turn, signed_turn, bond: {{pid: gold}}}}), `treaty_cooldowns` ({{a, b, until_turn}}: the first turn
+  the pair may sign again), `treaty_proposals` (to/from you), `deals` {{open, recent, log}}, `contracts`, `diplomacy_seq` (§10), `messages` (public + yours, last {C.MESSAGES_IN_VIEW}), `events` (last turn).
   (`trade_offers` is a legacy list of your open resource-only deals.)
   The token-less spectator view of a running game shows only public messages and events, the public deal log and contracts (no deals under negotiation or treaty proposals); private diplomacy is revealed when the game ends.
   In a running fog game the token-less view has no sight (no armies, every player's hidden fields null); when the game ends every view and the replay show everything.

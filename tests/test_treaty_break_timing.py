@@ -1,4 +1,5 @@
-"""Turn T breaks allow entry on T+1, including peace signed by live deals."""
+"""A break on turn T allows entry from turn T+2 (the break turn and the next
+keep the movement restriction, rules §9), including peace signed by live deals."""
 import pytest
 
 from agentciv.engine import constants as C
@@ -26,7 +27,7 @@ def treaty_world(path):
 
 
 @pytest.mark.parametrize("path", ["orders", "live_deal"])
-def test_break_on_turn_t_allows_entry_on_t_plus_one(path):
+def test_break_on_turn_t_allows_entry_on_t_plus_two(path):
     g = treaty_world(path)
     turn_t = g.turn
     move = {"type": "move", "from": [6, 2], "to": [7, 2]}
@@ -37,15 +38,20 @@ def test_break_on_turn_t_allows_entry_on_t_plus_one(path):
     assert g.treaty("p1", "p2")
 
     broken = run_turn(g)
-    assert events_of(broken, "treaty_broken") == [
-        {"turn": turn_t, "type": "treaty_broken", "by": "p1", "with": "p2"},
-    ]
+    [ev] = events_of(broken, "treaty_broken")
+    assert (ev["turn"], ev["by"], ev["with"], ev["cost"]) == (turn_t, "p1", "p2", C.TREATY_BREAK_COST)
     assert not g.treaty("p1", "p2")
     assert g.owner[g.idx(7, 2)] == "p2"
     assert g.armies[g.idx(6, 2)]["p1"] == {"infantry": 3}
 
     assert g.turn == turn_t + 1
-    # The first turn after the break accepts and executes the entry.
+    # The first turn after the break still rejects the entry (notice turn).
+    errors = g.submit_orders("p1", [move])
+    assert len(errors) == 1 and f"through turn {turn_t + 1}" in errors[0]["error"]
+    run_turn(g)
+    assert g.owner[g.idx(7, 2)] == "p2"
+    assert g.turn == turn_t + 2
+    # The second turn after the break accepts and executes the entry.
     assert g.submit_orders("p1", [move]) == []
     moved = run_turn(g)
     assert not events_of(moved, "order_failed")
@@ -53,7 +59,7 @@ def test_break_on_turn_t_allows_entry_on_t_plus_one(path):
     assert g.armies[g.idx(7, 2)]["p1"] == {"infantry": 3}
     assert g.idx(6, 2) not in g.armies
     captured = events_of(moved, "tile_captured")
-    assert any(e["turn"] == turn_t + 1 and (e["x"], e["y"]) == (7, 2) for e in captured)
+    assert any(e["turn"] == turn_t + 2 and (e["x"], e["y"]) == (7, 2) for e in captured)
 
 
 def test_live_diplomacy_cannot_break_a_peace_deal():

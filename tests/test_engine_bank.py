@@ -135,20 +135,24 @@ def test_legacy_adds_influence_income_including_relics():
     assert g.spectator_view()["players"][0]["legacy"] == 2 * inc
 
 
-def test_legacy_not_lowered_by_claims_treaty_breaks_or_default_debt():
+def test_legacy_not_lowered_by_claims_or_default_debt_but_lowered_by_a_treaty_break():
     g = world()
     p1 = g.player("p1")
     p1.resources["influence"] = 200
+    p1.legacy = 500
     inc = g.stats()["p1"]["income"]["influence"]
     g.treaties[("p1", "p2")] = 50
     res = g.diplomacy("p1", [{"type": "propose", "to": "p2", "give": {"per_turn": {"gold": 900}, "turns": 3}}])
     assert g.diplomacy("p2", [{"type": "accept", "deal": res[0]["deal"]}])[0]["ok"]
     ev = run_turn(g, {"p1": [{"type": "claim", "at": [4, 2]}, {"type": "break_treaty", "with": "p2"}]})
-    assert events_of(ev, "claim") and events_of(ev, "treaty_broken") and events_of(ev, "contract_default")
+    assert events_of(ev, "claim") and events_of(ev, "contract_default")
+    broken = events_of(ev, "treaty_broken")[0]
+    # a break removes TREATY_BREAK_PCT % of the legacy (§9); claims and the default fine do not
+    assert broken["legacy_lost"] == 500 * C.TREATY_BREAK_PCT // 100
     assert p1.influence_debt > 0 and p1.resources["influence"] == 0
-    assert p1.legacy == inc
+    assert p1.legacy == 500 - broken["legacy_lost"] + inc
     run_turn(g)                                    # the debt eats this turn's influence, not the legacy
-    assert p1.legacy == 2 * inc
+    assert p1.legacy == 500 - broken["legacy_lost"] + 2 * inc
 
 
 # ====================================================================== capture

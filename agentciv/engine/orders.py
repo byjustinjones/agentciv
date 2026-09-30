@@ -22,7 +22,7 @@ if TYPE_CHECKING:  # pragma: no cover
 ORDER_TYPES = (
     "move", "recruit", "build", "claim", "settle", "disband", "market",
     "offer_trade", "accept_trade", "propose_treaty", "accept_treaty",
-    "break_treaty", "message", "bank",
+    "break_treaty", "release_treaty", "message", "bank",
     # diplomacy actions (§13), processed in phase 1; the three legacy names
     # above (offer_trade, accept_trade, message) are aliases of these
     "propose", "counter", "accept", "reject", "withdraw", "say",
@@ -94,6 +94,7 @@ class _Ctx:
         self.treaty_targets: set = set()
         self.accepted_treaties: set = set()
         self.broken: set = set()
+        self.released: set = set()
         self.spies: set = set()         # (target, mission) of earlier spy orders
         self.counterintel = False
 
@@ -247,9 +248,15 @@ class Validator:
             owner = g.owner[step]
             if owner is not None and owner != self.pid and g.treaty(self.pid, owner):
                 raise OrderError(f"{self.xy(step)} belongs to treaty partner {owner}")
+            if owner is not None and owner != self.pid and g.break_notice(self.pid, owner):
+                raise OrderError(f"{self.xy(step)} belongs to {owner}; after a treaty break movement "
+                                 f"restrictions last through turn {g.break_notice(self.pid, owner)}")
             for other in self.armies_at(step):
                 if other != self.pid and g.treaty(self.pid, other):
                     raise OrderError(f"{self.xy(step)} holds an army of treaty partner {other}")
+                if other != self.pid and g.break_notice(self.pid, other):
+                    raise OrderError(f"{self.xy(step)} holds an army of {other}; after a treaty break movement "
+                                     f"restrictions last through turn {g.break_notice(self.pid, other)}")
             if len(path) == 2 and k == 0:
                 if any(other != self.pid and g.hostile(self.pid, other) for other in self.armies_at(step)):
                     raise OrderError(f"cannot move through {self.xy(step)}: hostile army there")
@@ -427,7 +434,8 @@ class Validator:
         if to in self.ctx.treaty_targets:
             raise OrderError(f"duplicate treaty proposal to {to}")
         self.ctx.treaty_targets.add(to)
-        return {"type": "propose_treaty", "to": to, "turns": turns}
+        out = {"type": "propose_treaty", "to": to, "turns": turns}
+        return self._bond(o, out)
 
     def v_accept_treaty(self, o: dict) -> dict:
         frm = self.other_player(o.get("from"), "from")
@@ -438,14 +446,35 @@ class Validator:
         if frm in self.ctx.accepted_treaties:
             raise OrderError("duplicate accept_treaty")
         self.ctx.accepted_treaties.add(frm)
-        return {"type": "accept_treaty", "from": frm}
+        out = {"type": "accept_treaty", "from": frm}
+        return self._bond(o, out)
+
+    @staticmethod
+    def _bond(o: dict, out: dict) -> dict:
+        """Optional ``bond``: extra banked gold pledged on the treaty (§9)."""
+        if o.get("bond") is not None:
+            b = as_int(o.get("bond"), "bond")
+            if not 0 <= b <= C.DEAL_MAX_QTY:
+                raise OrderError(f"bond must be 0..{C.DEAL_MAX_QTY}")
+            if b:
+                out["bond"] = b
+        return out
+
+    def v_release_treaty(self, o: dict) -> dict:
+        w = as_str(o.get("with"), "with")
+        if not self.g.treaty(self.pid, w):
+            raise OrderError(f"you have no treaty with {w!r}")
+        if w in self.ctx.released or w in self.ctx.broken:
+            raise OrderError(f"duplicate break_treaty/release_treaty with {w}")
+        self.ctx.released.add(w)
+        return {"type": "release_treaty", "with": w}
 
     def v_break_treaty(self, o: dict) -> dict:
         w = as_str(o.get("with"), "with")
         if not self.g.treaty(self.pid, w):
             raise OrderError(f"you have no treaty with {w!r}")
-        if w in self.ctx.broken:
-            raise OrderError("duplicate break_treaty")
+        if w in self.ctx.broken or w in self.ctx.released:
+            raise OrderError(f"duplicate break_treaty/release_treaty with {w}")
         self.ctx.broken.add(w)
         return {"type": "break_treaty", "with": w}
 

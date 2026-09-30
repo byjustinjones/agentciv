@@ -175,9 +175,15 @@ STARVATION_ORDER = ("siege", "cavalry", "archer", "infantry")
 # --------------------------------------------------------------------------
 # Diplomacy / orders
 # --------------------------------------------------------------------------
-TREATY_MIN_TURNS = 10
-TREATY_MAX_TURNS = 50
-TREATY_BREAK_COST = 50            # influence
+TREATY_MIN_TURNS = 20
+TREATY_MAX_TURNS = 40
+TREATY_BREAK_COST = 50            # influence x (1 + the breaker's earlier betrayals); must be held
+TREATY_SLOT_DIVISOR = 2           # treaty slots = max(1, ceil(other living players / divisor))
+TREATY_BREAK_PCT = 10             # legacy lost and bank share paid per break: pct x (1 + earlier betrayals) ...
+TREATY_BREAK_MAX_PCT = 40         # ... at most this
+TREATY_BOND_PER_BETRAYAL = 50     # bank gold pledged automatically per betrayal on every treaty signed or renewed
+TREATY_RESIGN_COOLDOWN = 15       # turns after a break before the same pair may sign again
+TREATY_BREAK_NOTICE = 1           # extra turns a broken pair stays movement-restricted
 MAX_ORDERS_PER_TURN = 100
 MAX_MESSAGE_LENGTH = 500          # `say` / `message` text
 MESSAGES_IN_VIEW = 50
@@ -253,3 +259,4 @@ CI_BASE = 10               # counter-intelligence rating = CI_BASE + CI_PER_CITY
 CI_PER_CITY = 5
 CI_MAX_INVEST = 500        # gold per counterintel order (one per turn)
 CI_DECAY = (3, 4)          # pool = pool * 3 // 4 at the end of every turn
+

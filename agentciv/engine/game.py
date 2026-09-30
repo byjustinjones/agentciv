@@ -106,6 +106,8 @@ class Game:
         # diplomacy
         self.treaties: dict[tuple, int] = {}
         self.treaty_proposals: list = []
+        self.treaty_terms: dict[tuple, dict] = {}   # pair -> {"signed", "deals", "bond": {pid: gold}}
+        self.broken_pairs: dict[tuple, int] = {}    # pair -> turn of its last break
         self.messages: list = []
         # barter & deals (§13, agentciv.engine.deals)
         self.deals: dict[str, dict] = {}        # every deal ever made, by id
@@ -132,6 +134,7 @@ class Game:
         self._events: list = []
         self._move_restricted: set = set()
         self.defaulted_this_turn: set = set()   # payers that defaulted in this turn's phase 7
+        self.betrayed_this_turn: set = set()    # players that broke a treaty this turn
         self.last_events: list = []
         self.result: dict | None = None
         self._stats: dict | None = None
@@ -303,6 +306,156 @@ class Game:
                 return pr
         return None
 
+    # -- treaty slots, bonds and break costs (RULES §9) ----------------------
+    def treaties_held(self, pid: str) -> int:
+        return sum(1 for k in self.treaties if pid in k)
+
+    def treaty_slots(self, pid: str) -> int:
+        """max(1, ceil(other living players / TREATY_SLOT_DIVISOR))."""
+        opp = sum(1 for q in self.players if q.alive and q.id != pid)
+        return max(1, math.ceil(opp / C.TREATY_SLOT_DIVISOR))
+
+    def treaty_break_cost(self, pid: str) -> int:
+        """Influence ``pid`` must hold (and pays) to break a treaty now."""
+        return C.TREATY_BREAK_COST * (1 + self._by_id[pid].betrayals)
+
+    def treaty_break_pct(self, pid: str) -> int:
+        """Percent of legacy lost and of bank paid to the partner on a break."""
+        return min(C.TREATY_BREAK_MAX_PCT, C.TREATY_BREAK_PCT * (1 + self._by_id[pid].betrayals))
+
+    def treaty_break_legacy(self, pid: str) -> int:
+        return max(0, self._by_id[pid].legacy) * self.treaty_break_pct(pid) // 100
+
+    def treaty_break_bank(self, pid: str) -> int:
+        return max(0, self._by_id[pid].bank) * self.treaty_break_pct(pid) // 100
+
+    def bond_required(self, pid: str) -> int:
+        """Bank gold ``pid`` must pledge on every treaty it signs or renews."""
+        return C.TREATY_BOND_PER_BETRAYAL * self._by_id[pid].betrayals
+
+    def bond_pledged(self, pid: str, skip: tuple | None = None) -> int:
+        return sum(t["bond"].get(pid, 0) for k, t in self.treaty_terms.items() if pid in k and k != skip)
+
+    def bond_free(self, pid: str, skip: tuple | None = None) -> int:
+        return max(0, self._by_id[pid].bank - self.bond_pledged(pid, skip))
+
+    def resign_turn(self, a: str, b: str) -> int | None:
+        """First turn ``a`` and ``b`` may sign again after a break (None = never broken)."""
+        t = self.broken_pairs.get(self._pair(a, b))
+        return None if t is None else t + C.TREATY_RESIGN_COOLDOWN
+
+    def break_notice(self, a: str, b: str) -> int | None:
+        """The last turn on which ``a`` and ``b`` stay movement-restricted
+        after a treaty break (None = not restricted by a break now)."""
+        t = self.broken_pairs.get(self._pair(a, b))
+        if t is None or self.turn - t > C.TREATY_BREAK_NOTICE:
+            return None
+        return t + C.TREATY_BREAK_NOTICE
+
+    def treaty_sign_problem(self, a: str, b: str, bonds: dict | None = None) -> str | None:
+        """Why ``a`` and ``b`` cannot sign (or renew) a treaty right now with
+        the offered ``bonds`` {pid: gold}; None = they can. Reads only public
+        facts (treaties, cooldowns, betrayals, bank), so it never leaks fog."""
+        key = self._pair(a, b)
+        renewal = key in self.treaties
+        until = self.resign_turn(a, b)
+        if until is not None and self.turn < until:
+            return f"{a} and {b} cannot sign a treaty before turn {until} (broken on turn {self.broken_pairs[key]})"
+        old = (self.treaty_terms.get(key) or {}).get("bond", {})
+        for pid in (a, b):
+            held, slots = self.treaties_held(pid), self.treaty_slots(pid)
+            if not renewal and held >= slots:
+                return f"{pid} already has {held} treaties (limit {slots})"
+            need = self._bond_after(pid, (bonds or {}).get(pid), old.get(pid, 0))
+            free = self.bond_free(pid, skip=key)
+            if need > free:
+                return f"{pid}'s bond ({need}) exceeds its unpledged bank ({free})"
+        return None
+
+    def _bond_after(self, pid: str, offered, old: int) -> int:
+        """``pid``'s bond once signed: the required bond plus any bond it
+        offers; with no offer a renewal keeps the old bond (at least the
+        required one)."""
+        req = self.bond_required(pid)
+        return max(req, old) if offered is None else req + int(offered)
+
+    def sign_treaty(self, a: str, b: str, turns: int, deal: str | None = None, bonds: dict | None = None) -> None:
+        """Sign (or renew) the a-b treaty for ``turns`` turns and record its
+        bonds; the caller has checked :meth:`treaty_sign_problem`."""
+        key = self._pair(a, b)
+        renewal = key in self.treaties
+        until = max(self.turn + turns, self.treaties.get(key, -1))
+        self.treaties[key] = until
+        terms = self.treaty_terms.get(key) if renewal else None
+        if terms is None:
+            terms = {"signed": self.turn, "deals": [], "bond": {}}
+        old = terms["bond"]
+        terms["bond"] = {pid: self._bond_after(pid, (bonds or {}).get(pid), old.get(pid, 0)) for pid in (a, b)}
+        if deal:
+            terms["deals"].append(deal)
+        self.treaty_terms[key] = terms
+        ev = {"a": a, "b": b, "until_turn": until, "bond": dict(terms["bond"])}
+        if deal:
+            ev["deal"] = deal
+        if renewal:
+            ev["renewal"] = True
+        self._emit("treaty_signed", **ev)
+
+    def break_preview(self, pid: str) -> dict:
+        """What breaking each of ``pid``'s treaties would cost right now."""
+        out = {}
+        p = self._by_id[pid]
+        cost, lost, share = self.treaty_break_cost(pid), self.treaty_break_legacy(pid), self.treaty_break_bank(pid)
+        for key in sorted(self.treaties):
+            if pid not in key:
+                continue
+            other = key[1] if key[0] == pid else key[0]
+            terms = self.treaty_terms.get(key) or {}
+            deals = set(terms.get("deals", ()))
+            refund = D.peace_refund(self, deals, other, pid)
+            bond = terms.get("bond", {}).get(pid, 0)
+            owed = share + bond + refund
+            covered = max(0, p.bank) + max(0, p.resources["gold"])
+            out[other] = {
+                "influence": cost, "legacy": lost, "gold_to_partner": owed,
+                "influence_debt": -(-max(0, owed - covered) // C.CONTRACT_DEFAULT_GOLD_PER_INFLUENCE),
+                "cancels": [c["id"] for c in self.contracts
+                            if c["deal"] in deals and c["payer"] == other and c["payee"] == pid],
+            }
+        return out
+
+    def _break_treaty(self, p, v, cost: int, terms: dict) -> None:
+        """Settle ``p`` breaking its treaty with ``v`` (already removed): §9."""
+        p.resources["influence"] -= cost
+        lost = self.treaty_break_legacy(p.id)
+        share = self.treaty_break_bank(p.id)
+        p.legacy -= lost
+        p.betrayals += 1
+        self.betrayed_this_turn.add(p.id)
+        deals = set(terms.get("deals", ()))
+        cancelled = [c["id"] for c in self.contracts
+                     if c["deal"] in deals and c["payer"] == v.id and c["payee"] == p.id]
+        if cancelled:
+            self.contracts = [c for c in self.contracts if c["id"] not in cancelled]
+            for cid in cancelled:
+                self._emit("contract_cancelled", vis=[p.id, v.id], contract=cid, payer=v.id, payee=p.id,
+                           reason="treaty_broken")
+        refund = D.peace_refund(self, deals, v.id, p.id)
+        bond = terms.get("bond", {}).get(p.id, 0)
+        owed = bond + refund + share
+        from_bank = min(max(0, p.bank), owed)
+        p.bank -= from_bank
+        from_gold = min(max(0, p.resources["gold"]), owed - from_bank)
+        p.resources["gold"] -= from_gold
+        paid = from_bank + from_gold
+        v.resources["gold"] += paid
+        debt = -(-(owed - paid) // C.CONTRACT_DEFAULT_GOLD_PER_INFLUENCE)
+        p.influence_debt += debt
+        self._end_streak(p, "influence", reason="treaty_broken")
+        self._emit("treaty_broken", by=p.id, cost=cost, legacy_lost=lost, bank_share=share, bond=bond,
+                   refund=refund, paid=paid, debt=debt, cancelled=cancelled, betrayals=p.betrayals,
+                   **{"with": v.id})
+
     def owned_cities(self, pid: str) -> list:
         return [c for c in self.cities.values() if c.owner == pid]
 
@@ -427,6 +580,7 @@ class Game:
         # through the channel during this turn (they belong to this turn)
         orders = {p.id: list(self._orders.get(p.id, [])) for p in self.players if p.alive}
         self.defaulted_this_turn = set()
+        self.betrayed_this_turn = set()
         fog = self.config.fog
         if fog:
             pre = F.vision_all(self)
@@ -478,24 +632,46 @@ class Game:
     def _phase_treaties(self, orders: dict) -> None:
         t = self.turn
         broken = set()
+        gone: dict = {}
         for p in self._alive_in_order():
             for o in orders[p.id]:
                 if o["type"] != "break_treaty":
                     continue
                 other = o["with"]
                 key = self._pair(p.id, other)
+                cost = self.treaty_break_cost(p.id)
                 # a treaty broken earlier in this phase by the partner still
                 # counts: both players who ordered the break pay (no seat bias)
                 if key not in self.treaties and key not in broken:
                     self._fail(p.id, o, f"no treaty with {other}")
-                elif p.resources["influence"] < C.TREATY_BREAK_COST:
-                    self._fail(p.id, o, f"breaking a treaty costs {C.TREATY_BREAK_COST} influence")
+                elif p.resources["influence"] < cost:
+                    self._fail(p.id, o, f"breaking this treaty costs {cost} influence")
                 else:
-                    p.resources["influence"] -= C.TREATY_BREAK_COST
-                    self.treaties.pop(key, None)
-                    p.betrayals += 1
+                    if key in self.treaties:
+                        self.treaties.pop(key)
+                        gone[key] = self.treaty_terms.pop(key, None) or {"signed": t, "deals": [], "bond": {}}
+                    self._break_treaty(p, self._by_id[other], cost, gone[key])
                     broken.add(key)
-                    self._emit("treaty_broken", by=p.id, **{"with": other})
+                    self.broken_pairs[key] = t
+        released = set()
+        asked: dict = {}
+        for p in self._alive_in_order():
+            for o in orders[p.id]:
+                if o["type"] == "release_treaty":
+                    asked.setdefault(self._pair(p.id, o["with"]), []).append((p, o))
+        for key in sorted(asked):
+            who = asked[key]
+            if key not in self.treaties:
+                for p, o in who:
+                    self._fail(p.id, o, f"no treaty with {o['with']}")
+            elif len({p.id for p, _ in who}) < 2:
+                for p, o in who:
+                    self._fail(p.id, o, f"{o['with']} did not order release_treaty this turn")
+            else:
+                del self.treaties[key]
+                self.treaty_terms.pop(key, None)
+                released.add(key)
+                self._emit("treaty_released", a=key[0], b=key[1])
         for p in self._alive_in_order():
             for o in orders[p.id]:
                 if o["type"] != "accept_treaty":
@@ -507,11 +683,11 @@ class Game:
                     self._fail(p.id, o, f"no valid treaty proposal from {frm}")
                 elif self.treaty(p.id, frm):
                     self._fail(p.id, o, f"already at peace with {frm}")
+                elif err := self.treaty_sign_problem(frm, p.id, {frm: prop.get("bond", 0), p.id: o.get("bond", 0)}):
+                    self._fail(p.id, o, err)
                 else:
-                    until = t + prop["turns"]
-                    self.treaties[self._pair(p.id, frm)] = until
                     self.treaty_proposals.remove(prop)
-                    self._emit("treaty_signed", a=frm, b=p.id, until_turn=until)
+                    self.sign_treaty(frm, p.id, prop["turns"], bonds={frm: prop.get("bond", 0), p.id: o.get("bond", 0)})
         for p in self._alive_in_order():
             for o in orders[p.id]:
                 if o["type"] != "propose_treaty":
@@ -522,10 +698,16 @@ class Game:
                     self._fail(p.id, o, f"{to} is not in the game")
                 elif self.treaty(p.id, to):
                     self._fail(p.id, o, f"already at peace with {to}")
+                elif err := self.treaty_sign_problem(p.id, to, {p.id: o.get("bond", 0)}):
+                    self._fail(p.id, o, err)
                 else:
-                    self.treaty_proposals.append({"from": p.id, "to": to, "turns": o["turns"], "turn": t})
-                    self._emit("treaty_proposed", vis=[p.id, to], **{"from": p.id, "to": to, "turns": o["turns"]})
-        self._move_restricted = set(self.treaties) | broken
+                    pr = {"from": p.id, "to": to, "turns": o["turns"], "turn": t}
+                    if o.get("bond"):
+                        pr["bond"] = o["bond"]
+                    self.treaty_proposals.append(pr)
+                    self._emit("treaty_proposed", vis=[p.id, to], **{k: v for k, v in pr.items() if k != "turn"})
+        notice = {k for k, bt in self.broken_pairs.items() if t - bt <= C.TREATY_BREAK_NOTICE}
+        self._move_restricted = set(self.treaties) | broken | released | notice
 
     # ---------------------------------------------------------------- 3
     def _phase_market(self, orders: dict) -> None:
@@ -1245,7 +1427,7 @@ class Game:
             home = p.id in home_of
             # a contract default this turn keeps the economic streak at 0 (§10)
             for condition, ok in (("economic", home and p.bank >= bt and p.id not in self.defaulted_this_turn),
-                                  ("influence", home and p.legacy >= lt)):
+                                  ("influence", home and p.legacy >= lt and p.id not in self.betrayed_this_turn)):
                 if ok:
                     attr = condition + "_streak"
                     setattr(p, attr, getattr(p, attr) + 1)
@@ -1259,7 +1441,8 @@ class Game:
         for key in sorted(self.treaties):
             if self.treaties[key] <= t:
                 del self.treaties[key]
-                self._emit("treaty_expired", a=key[0], b=key[1])
+                terms = self.treaty_terms.pop(key, None) or {}
+                self._emit("treaty_expired", a=key[0], b=key[1], released=dict(terms.get("bond", {})))
         self.treaty_proposals = [pr for pr in self.treaty_proposals if pr["turn"] >= t]
         D.expire_deals(self)
         self.market_history.append({"turn": t, "prices": self._prices()})
@@ -1283,6 +1466,9 @@ class Game:
                 self._set_owner(i, None)
         for key in [k for k in self.treaties if p.id in k]:
             del self.treaties[key]
+            self.treaty_terms.pop(key, None)
+        for key in [k for k in self.broken_pairs if p.id in k]:
+            del self.broken_pairs[key]
         self._end_streak(p, "economic", reason="eliminated")
         self._end_streak(p, "influence", reason="eliminated")
         p.relic_streak = 0

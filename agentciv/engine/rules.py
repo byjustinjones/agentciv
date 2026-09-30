@@ -212,6 +212,11 @@ def _build_rules() -> dict:
             "treaty_min_turns": C.TREATY_MIN_TURNS,
             "treaty_max_turns": C.TREATY_MAX_TURNS,
             "treaty_break_cost": C.TREATY_BREAK_COST,
+            "treaty_slot_divisor": C.TREATY_SLOT_DIVISOR,
+            "treaty_break_pct": [C.TREATY_BREAK_PCT, C.TREATY_BREAK_MAX_PCT],
+            "treaty_bond_per_betrayal": C.TREATY_BOND_PER_BETRAYAL,
+            "treaty_resign_cooldown": C.TREATY_RESIGN_COOLDOWN,
+            "treaty_break_notice": C.TREATY_BREAK_NOTICE,
             "trade_offer_ttl": C.TRADE_OFFER_TTL,
             "deals": {
                 "actions": ["propose", "counter", "accept", "reject", "withdraw", "say"],

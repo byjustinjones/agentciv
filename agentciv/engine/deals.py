@@ -42,7 +42,7 @@ STATUSES = ("open", "accepted", "countered", "rejected", "withdrawn", "expired",
 EVENT_TYPES = ("deal_proposed", "deal_countered", "deal_executed", "deal_rejected", "deal_withdrawn",
                "deal_expired", "deal_failed", "contract_paid", "contract_default", "contract_completed",
                "say")
-BUNDLE_KEYS = C.TRADABLE + ("tiles", "per_turn", "turns")
+BUNDLE_KEYS = C.TRADABLE + ("tiles", "per_turn", "turns", "bond")
 
 
 def jcopy(v):
@@ -138,7 +138,8 @@ def parse_bundle(raw, width: int | None = None, height: int | None = None,
                  resources_only: bool = False, what: str = "bundle") -> dict:
     """Normalise a bundle (raises :class:`DealError`). Zero quantities are
     dropped; the result has only the non-empty keys, resources in canonical
-    order, then ``tiles``, ``per_turn`` and ``turns``. ``{}`` = nothing."""
+    order, then ``tiles``, ``per_turn``, ``turns`` and ``bond`` (kept even
+    when 0). ``{}`` = nothing."""
     if raw is None:
         return {}
     if not isinstance(raw, dict):
@@ -170,6 +171,13 @@ def parse_bundle(raw, width: int | None = None, height: int | None = None,
             raise DealError(f"{what}.turns must be {C.DEAL_CONTRACT_MIN_TURNS}..{C.DEAL_CONTRACT_MAX_TURNS}")
         out["per_turn"] = per
         out["turns"] = turns
+    if raw.get("bond") is not None:
+        # a pledge of banked gold on the treaty the deal's peace signs (§9);
+        # 0 is kept so a renewal can lower a bond to the required minimum
+        b = _int(raw.get("bond"), f"{what}.bond")
+        if not 0 <= b <= C.DEAL_MAX_QTY:
+            raise DealError(f"{what}.bond must be 0..{C.DEAL_MAX_QTY}")
+        out["bond"] = b
     return out
 
 
@@ -235,6 +243,8 @@ def parse_action(raw, width: int | None = None, height: int | None = None) -> di
         get = parse_bundle(raw.get("want") if only else raw.get("get"), width, height, only,
                            "want" if only else "get")
         peace = None if only else _peace(raw.get("peace"))
+        if peace is None and ("bond" in give or "bond" in get):
+            raise DealError("bond is only valid in a deal with peace")
         if not give and not get and peace is None:
             if only:
                 raise DealError("trade must give or want something")
@@ -407,9 +417,46 @@ def view_delivery_problem(view: dict, pid: str, bundle, receiver: str | None = N
     return land_problem(receiver, b["tiles"], _view_owner_at(view), _view_units_at(view), leaving, received)
 
 
+def view_treaty_problem(view: dict, a: str, b: str, bonds: dict | None = None) -> str | None:
+    """:meth:`Game.treaty_sign_problem` computed from the JSON state ``view``
+    (treaties with bonds, ``treaty_cooldowns``, players' betrayals and bank;
+    all public). None = ``a`` and ``b`` could sign or renew a treaty now."""
+    turn = view.get("turn") or 0
+    pair = tuple(sorted((a, b)))
+    for c in view.get("treaty_cooldowns") or []:
+        if tuple(sorted((c["a"], c["b"]))) == pair and turn < c["until_turn"]:
+            return (f"{a} and {b} cannot sign a treaty before turn {c['until_turn']} "
+                    f"(broken on turn {c['until_turn'] - C.TREATY_RESIGN_COOLDOWN})")
+    rows = {p.get("id"): p for p in view.get("players", [])}
+    alive = sum(1 for p in rows.values() if p.get("alive", True))
+    treaties = view.get("treaties") or []
+    renewal = any(tuple(sorted((t["a"], t["b"]))) == pair for t in treaties)
+    old = next((t.get("bond") or {} for t in treaties if tuple(sorted((t["a"], t["b"]))) == pair), {})
+    for pid in (a, b):
+        row = rows.get(pid) or {}
+        held = sum(1 for t in treaties if pid in (t["a"], t["b"]))
+        slots = max(1, math.ceil((alive - 1) / C.TREATY_SLOT_DIVISOR))
+        if not renewal and held >= slots:
+            return f"{pid} already has {held} treaties (limit {slots})"
+        req = C.TREATY_BOND_PER_BETRAYAL * int(row.get("betrayals") or 0)
+        offered = (bonds or {}).get(pid)
+        need = max(req, int(old.get(pid, 0))) if offered is None else req + int(offered)
+        pledged = sum(int((t.get("bond") or {}).get(pid, 0)) for t in treaties
+                      if pid in (t["a"], t["b"]) and tuple(sorted((t["a"], t["b"]))) != pair)
+        free = max(0, int(row.get("bank") or 0) - pledged)
+        if need > free:
+            return f"{pid}'s bond ({need}) exceeds its unpledged bank ({free})"
+    return None
+
+
 def view_deal_problem(view: dict, deal: dict) -> str | None:
     """Would ``deal`` (from ``view['deals']['open']``) settle right now?"""
     give, get = deal.get("give") or {}, deal.get("get") or {}
+    if deal.get("peace"):
+        err = view_treaty_problem(view, deal["from"], deal["to"], {deal["from"]: give.get("bond"),
+                                                                   deal["to"]: get.get("bond")})
+        if err:
+            return err
     return (view_delivery_problem(view, deal["from"], give, deal["to"], get.get("tiles", ()))
             or view_delivery_problem(view, deal["to"], get, deal["from"], give.get("tiles", ())))
 
@@ -513,6 +560,10 @@ def _terms_error(g: "Game", frm: str, to: str, action: dict, extra_open: int = 0
                            leaving=action[other].get("tiles", ()))
         if err:
             return f"{side}: {err}"
+    if action.get("peace"):
+        err = g.treaty_sign_problem(frm, to, {frm: action["give"].get("bond"), to: action["get"].get("bond")})
+        if err:
+            return err
     opened = sum(1 for d in g.open_deals.values() if d["from"] == frm) + extra_open
     if opened >= C.DEAL_MAX_OPEN_PER_PLAYER:
         return f"you already have {C.DEAL_MAX_OPEN_PER_PLAYER} open proposals (withdraw one first)"
@@ -690,6 +741,10 @@ def _settle_detail(g: "Game", d: dict, viewer: str | None = None) -> tuple:
     fp, tp = g.player(d["from"]), g.player(d["to"])
     if fp is None or tp is None or not fp.alive or not tp.alive:
         return "a party is no longer in the game", None, False
+    if d.get("peace"):
+        err = g.treaty_sign_problem(fp.id, tp.id, {fp.id: d["give"].get("bond"), tp.id: d["get"].get("bond")})
+        if err:
+            return err, None, False
     info, owner_at, units_at = _tile_info(g), _owner_at(g), _units_at(g)
     if viewer is not None:
         sight = F.vision(g, viewer)
@@ -779,10 +834,8 @@ def _execute(g: "Game", d: dict) -> None:
     _emit(g, "deal_executed", None, by=d["to"], deal=d["id"], thread=d["thread"], give=d["give"],
           get=d["get"], peace=d["peace"], contracts=contracts, **{"from": d["from"], "to": d["to"]})
     if d["peace"]:
-        key = g._pair(d["from"], d["to"])
-        until = max(g.turn + d["peace"], g.treaties.get(key, -1))
-        g.treaties[key] = until
-        g._emit("treaty_signed", a=d["from"], b=d["to"], until_turn=until, deal=d["id"])
+        g.sign_treaty(d["from"], d["to"], d["peace"], deal=d["id"],
+                      bonds={d["from"]: d["give"].get("bond"), d["to"]: d["get"].get("bond")})
     g._invalidate()
 
 
@@ -956,3 +1009,32 @@ def inbox(g: "Game", pid: str, since: int = 0) -> dict:
             continue
         items.append({k: jcopy(v) for k, v in ev.items() if k not in ("_vis", "_fog")})
     return {"seq": g.diplomacy_seq, "items": items}
+
+
+def _lump_value(b: dict) -> float:
+    return sum(int(b.get(r, 0) or 0) * (1.0 if r == "gold" else REFERENCE_PRICES.get(r, 1.0)) for r in C.TRADABLE)
+
+
+def peace_refund(g: "Game", deals: set, victim: str, breaker: str) -> int:
+    """Gold owed back to ``victim`` when ``breaker`` breaks a treaty signed or
+    renewed by ``deals``: per deal, the net lump value (start prices; tiles
+    and contracts excluded) the victim handed over, times the share of that
+    deal's peace term still unexpired."""
+    total = 0.0
+    for e in g.deal_log:
+        if e["id"] not in deals or not e.get("peace"):
+            continue
+        k = e["peace"]
+        left = min(k, e["turn"] + k - g.turn)
+        if left <= 0:
+            continue
+        if e["from"] == victim:
+            out, back = e["give"], e["get"]
+        elif e["from"] == breaker:
+            out, back = e["get"], e["give"]
+        else:
+            continue
+        net = _lump_value(out) - _lump_value(back)
+        if net > 0:
+            total += net * left / k
+    return int(total)
