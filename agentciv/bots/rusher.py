@@ -58,7 +58,8 @@ class RusherBot(PlannerBot):
     COUNTER_LIMIT = 1
     CONCEDE = 0.25
     TRIBUTE_TURNS = 10
-    TRIBUTE_PEACE = 15
+    TREATY_PLEDGE = 0
+    TRIBUTE_PEACE = 20
     EXTORT_RATIO = 1.3          # our army near them / their defence
     BREAK_RATIO = 1.8           # break a peace only against a much weaker partner
 
@@ -104,7 +105,7 @@ class RusherBot(PlannerBot):
         stalled = self.memory.get("hard", {}).get(self.memory.get("target"), -1) > w.turn
         out = []
         for q in self.partners():
-            if q in w.treaties or (q == self.target_owner and not stalled):
+            if q in w.treaties or (q == self.target_owner and not stalled) or w.sign_problem(w.me, q):
                 continue
             t = v.threat(w.me, q)
             if t < 40 or t < self.EXTORT_RATIO * v.defense(q):
@@ -141,7 +142,8 @@ class RusherBot(PlannerBot):
         for e in w.events:
             if e.get("type") == "contract_default" and e.get("payee") == w.me:
                 cheat[e.get("payer")] = w.turn
-        if w.res.get("influence", 0) < C.TREATY_BREAK_COST + 10 or self.memory.get("broke", -99) > w.turn - 12:
+        from .common import break_cost
+        if w.res.get("influence", 0) < w.break_influence() + 10 or self.memory.get("broke", -99) > w.turn - 12:
             return
         paying = contract_income(w)
         v = DealValuer(w)
@@ -156,7 +158,8 @@ class RusherBot(PlannerBot):
             ratio = t / max(1.0, v.defense(q))
             if q in cheat and cheat[q] >= w.turn - 10:
                 ratio *= 1.5
-            if ratio >= self.BREAK_RATIO and (best is None or ratio > best[0]):
+            if ratio >= self.BREAK_RATIO and (best is None or ratio > best[0]) \
+                    and self.conquest_value(q) > break_cost(w, q)[1]:
                 best = (ratio, q)
         if best is not None:
             p.orders.append({"type": "break_treaty", "with": best[1]})
@@ -209,7 +212,7 @@ class RusherBot(PlannerBot):
     def diplomacy(self) -> None:
         for pr in treaty_proposals_to_me(self.w):
             if pr["from"] != self.target_owner:
-                self.p.accept_treaty(pr["from"])
+                self.p.accept_treaty(pr["from"], self.pledge())
 
     # -- economy tweaks -------------------------------------------------------
     def keep(self, r: str) -> int:

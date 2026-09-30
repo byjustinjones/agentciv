@@ -124,12 +124,13 @@ class TurtleBot(PlannerBot):
 
     def diplomacy(self) -> None:
         w, p = self.w, self.p
+        from .common import rivals_by_power
         for pr in self.proposals():
             if not self.relic_runner(pr["from"]):
-                p.accept_treaty(pr["from"])
-        for q in w.rivals:
+                p.accept_treaty(pr["from"], self.pledge())
+        for q in rivals_by_power(w):
             if q not in w.treaties and not self.relic_runner(q):
-                p.propose(q, self.TREATY_TURNS)
+                p.propose(q, self.TREATY_TURNS, self.pledge())
 
     def proposals(self):
         from .common import treaty_proposals_to_me

@@ -34,7 +34,7 @@ How they barter (details under each bot and in [Barter](#barter-13)):
 | `random` | now and then a random resource-for-gold swap at a random price | accepts 25% / rejects 25% of offers at random (the only bot that takes losing deals — within limits, see below) |
 | `economist` | its surplus at a fair price; **loans** (gold now, ~20% more back over 15 turns) to solvent players | accepts above a small margin, one fair counter |
 | `turtle` | gold for **peace** with armies that threaten it; the stone/wood its wonder stage lacks, in the build turn | accepts above a margin (values peace ×1.5), one fair counter |
-| `rusher` | **tribute** (gold per turn + a 15-turn peace) from weaker neighbours its army threatens | greedy counters; peace with its target costs the spoils of conquest; honours contracts and treaties only while that pays |
+| `rusher` | **tribute** (gold per turn + a 20-turn peace) from weaker neighbours its army threatens | greedy counters; peace with its target costs the spoils of conquest; honours contracts and treaties only while that pays |
 | `strategist` | exploits needs (sells overflow at a premium, buys what its race lacks), borrows to fund its race, buys peace from armies at its gates, probes for sloppy traders | haggles: anchors high, concedes step by step; refuses the leader and anything that feeds a rival's race |
 
 Every bot is deterministic for a given `seed` and sequence of views. None of
@@ -160,10 +160,11 @@ more than 1.5x the market value it receives.
   off costs real money. Counters are greedy (asks 65%, concedes 25%).
 * **Opportunist:** reserves gold for its contract instalments only while the
   payee's army is at least 70% of its own (otherwise the army gets the gold
-  and the contract may default). It breaks a peace treaty (50 influence)
-  when the partner defaulted on tribute to it, or when the partner no
-  longer pays and its army near the partner is ≥ 1.8× the partner's
-  defence.
+  and the contract may default). It breaks a peace treaty (50 × (1 +
+  betrayals) influence) when the partner defaulted on tribute to it, or when
+  the partner no longer pays, its army near the partner is ≥ 1.8× the
+  partner's defence and the spoils exceed `common.break_cost` (influence,
+  legacy, bank share, bond, cancelled tribute and dearer treaties later).
 
 ### turtle (`turtle.py`)
 * **Diplomacy:** proposes 30-turn treaties to everyone and accepts every
@@ -235,8 +236,9 @@ It uses the economist's economy, then adds these behaviours on top:
    own city count 40%. The threatened city raises walls first, then recruits
    the best counter (buying food/wood if needed) until the simulated assault
    fails with a 1.1 margin.
-5. **Diplomacy.** It proposes and accepts 50-turn treaties with militarily
-   stronger players (and far-away ones that are not hoarding gold), never
+5. **Diplomacy.** It proposes and accepts 40-turn treaties with militarily
+   stronger players (and far-away ones that are not hoarding gold), strongest
+   first since treaty slots are limited, never
    with a player close to winning, running a wonder or a relic streak, or
    with its raid target.
 6. **Market.** It sells surplus before it overflows the caps. Voluntary sales
@@ -363,6 +365,9 @@ Both modules are useful if you write your own in-process bot.
   * flat `terrain` and `owner` arrays, plus `cities`, `armies` and `players`
     looked up by tile or id;
   * relations: `at_peace`, `hostile`, `can_enter_fn(pid)`;
+  * treaty limits (rules §9): `treaties_held`, `treaty_slots`, `betrayals`,
+    `bond_required`, `bond_free`, `break_influence`, and `sign_problem(a, b)`
+    (cooldown, slots or bond, from public view data);
   * geometry: `cheb`, `manhattan`, `radius`, `nb` (4-neighbours);
   * `bfs(sources, can_enter, max_dist)` gives BFS distances, and
     `step_towards(src, dist)` gives the next step.
@@ -371,7 +376,8 @@ Both modules are useful if you write your own in-process bot.
   siege, terrain, archer city bonus and counters, and returns
   `(win, survivors, power_ratio)`.
   * `assume_war=True` treats treaty partners as enemies, to evaluate an
-    attack after breaking a treaty.
+    attack after breaking a treaty; `break_cost(world, q)` estimates the
+    influence and gold-equivalent cost of breaking the treaty with `q`.
   * `threat_to(world, tile, reach)` lists hostile units that can reach a tile
     within `reach` turns.
   * `best_counter(enemy_units)` picks the unit type to field against them.
@@ -383,7 +389,9 @@ Both modules are useful if you write your own in-process bot.
     for a volume.
 * `Plan(world)` is an order list with a resource budget.
   * `claim`, `improve`, `build_city`, `settle`, `recruit`, `move`, `sell`,
-    `buy`, `propose`, `accept_treaty`, `message`, …
+    `buy`, `propose`, `accept_treaty`, `message`, … (`propose` and
+    `accept_treaty` take an optional `bond` and skip partners the treaty
+    limits exclude).
   * Each method emits an order only if it passes the same checks as the
     engine's pre-validation and can be paid for. It also tracks what was
     already planned this turn: claimed tiles, moved units and the tile count
@@ -480,8 +488,9 @@ SDK (`agentciv/client.py`). A few tips from building these bots:
 * **Simulate battles exactly.** The rules are deterministic; use
   `agentciv.engine.combat` or copy the formulas.
 * **Treaty partners can't enter each other's land.** To stop a partner,
-  gather at the border first, then `break_treaty` (50 influence). You can
-  fight that turn but only walk in on the next.
+  gather at the border first, then `break_treaty` (see `you.treaty.break_preview`
+  for the influence, legacy and gold it costs). You can fight that turn but
+  only walk in two turns later.
 * **Barter beats the market** by the fee and the slippage on both sides —
   but only sell what you would otherwise sell anyway (the built-in bots
   learned that the hard way: a strategist selling its "surplus" stone and

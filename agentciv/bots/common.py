@@ -140,6 +140,14 @@ class World:
                 self.treaties[b] = t["until_turn"]
             elif b == self.me:
                 self.treaties[a] = t["until_turn"]
+        self.treaty_bonds = {}            # pair -> {pid: bond}
+        for t in view.get("treaties", []):
+            a, b = t["a"], t["b"]
+            self.treaty_bonds[(a, b) if a < b else (b, a)] = dict(t.get("bond") or {})
+        self.cooldowns = {}               # pair -> first turn the pair may sign again
+        for c in view.get("treaty_cooldowns", []) or []:
+            a, b = c["a"], c["b"]
+            self.cooldowns[(a, b) if a < b else (b, a)] = c["until_turn"]
         self.res = dict(you.get("resources", {}))
         self.caps = dict(you.get("caps", {r: C.STORAGE_BASE for r in CAPPED}))
         self.income = dict(you.get("income", {}))
@@ -196,6 +204,38 @@ class World:
 
     def hostile(self, a: str, b: str) -> bool:
         return a != b and not self.at_peace(a, b)
+
+    # -- treaty limits (RULES §9) ------------------------------------------
+    def treaties_held(self, q: str) -> int:
+        return sum(1 for k in self.treaty_pairs if q in k)
+
+    def treaty_slots(self, q: str) -> int:
+        return max(1, math.ceil((len(self.alive) - 1) / C.TREATY_SLOT_DIVISOR))
+
+    def betrayals(self, q: str) -> int:
+        return int((self.players.get(q) or {}).get("betrayals", 0) or 0)
+
+    def break_influence(self, q: str | None = None) -> int:
+        return C.TREATY_BREAK_COST * (1 + self.betrayals(q or self.me))
+
+    def bond_required(self, q: str) -> int:
+        return C.TREATY_BOND_PER_BETRAYAL * self.betrayals(q)
+
+    def bond_free(self, q: str) -> int:
+        bank = int((self.players.get(q) or {}).get("bank", 0) or 0)
+        return max(0, bank - sum(b.get(q, 0) for k, b in self.treaty_bonds.items() if q in k))
+
+    def sign_problem(self, a: str, b: str, extra: dict | None = None) -> str | None:
+        key = (a, b) if a < b else (b, a)
+        if self.cooldowns.get(key, -1) > self.turn:
+            return "cooldown"
+        renewal = key in self.treaty_pairs
+        for q in (a, b):
+            if not renewal and self.treaties_held(q) >= self.treaty_slots(q):
+                return "slots"
+            if self.bond_required(q) + (extra or {}).get(q, 0) > self.bond_free(q):
+                return "bond"
+        return None
 
     def hostile_units_on(self, pid: str, i: int) -> bool:
         return any(self.hostile(pid, q) for q in self.armies.get(i, {}))
@@ -562,6 +602,7 @@ class Plan:
         self.recruited: dict = {}           # tile -> units queued
         self.proposed: set = set()
         self.accepted: set = set()
+        self.pledged = 0                    # bank pledged on treaties ordered this turn
         self.messages = 0
         self.tiles = len(world.my_tiles)    # owned tiles incl. planned claims
         self.cities = len(world.my_cities)
@@ -806,7 +847,7 @@ class Plan:
         return qty
 
     # -- diplomacy ----------------------------------------------------------
-    def propose(self, to: str, turns: int) -> bool:
+    def propose(self, to: str, turns: int, bond: int = 0) -> bool:
         w = self.w
         if self.full() or to in self.proposed or to == w.me or to not in w.alive or to in w.treaties:
             return False
@@ -814,16 +855,33 @@ class Plan:
             # a proposal either way made last turn may be accepted right now
             if {pr.get("from"), pr.get("to")} == {w.me, to}:
                 return False
+        if w.sign_problem(w.me, to, {w.me: bond + self.pledged}):
+            return False
+        if w.treaties_held(w.me) + len(self.proposed) + len(self.accepted) >= w.treaty_slots(w.me):
+            return False
         turns = max(C.TREATY_MIN_TURNS, min(C.TREATY_MAX_TURNS, int(turns)))
         self.proposed.add(to)
-        self.orders.append({"type": "propose_treaty", "to": to, "turns": turns})
+        o = {"type": "propose_treaty", "to": to, "turns": turns}
+        if bond > 0:
+            o["bond"] = int(bond)
+            self.pledged += int(bond)
+        self.orders.append(o)
         return True
 
-    def accept_treaty(self, frm: str) -> bool:
-        if self.full() or frm in self.accepted or frm in self.w.treaties:
+    def accept_treaty(self, frm: str, bond: int = 0) -> bool:
+        w = self.w
+        if self.full() or frm in self.accepted or frm in w.treaties:
+            return False
+        if w.sign_problem(w.me, frm, {w.me: bond + self.pledged}):
+            return False
+        if w.treaties_held(w.me) + len(self.accepted) >= w.treaty_slots(w.me):
             return False
         self.accepted.add(frm)
-        self.orders.append({"type": "accept_treaty", "from": frm})
+        o = {"type": "accept_treaty", "from": frm}
+        if bond > 0:
+            o["bond"] = int(bond)
+            self.pledged += int(bond)
+        self.orders.append(o)
         return True
 
     def message(self, to: str, text: str) -> bool:
@@ -843,7 +901,41 @@ def wonder_city(world: World) -> int | None:
 
 
 def treaty_proposals_to_me(world: World) -> list:
-    return [p for p in world.view.get("treaty_proposals", []) if p.get("to") == world.me]
+    """Proposals to me, strongest proposer (then largest bond) first: with
+    few treaty slots the most dangerous neighbours get them."""
+    out = [p for p in world.view.get("treaty_proposals", []) if p.get("to") == world.me]
+    mp = lambda q: float((world.players.get(q) or {}).get("military_power", 0) or 0)
+    return sorted(out, key=lambda p: (-mp(p.get("from")), -int(p.get("bond", 0) or 0), str(p.get("from"))))
+
+
+def rivals_by_power(world: World) -> list:
+    mp = lambda q: float((world.players.get(q) or {}).get("military_power", 0) or 0)
+    return sorted(world.rivals, key=lambda q: (-mp(q), q))
+
+
+def break_cost(world: World, q: str) -> tuple:
+    """(influence needed, gold-equivalent cost) of breaking our treaty with
+    ``q``: the influence, the legacy loss (dear on the influence path), our
+    bond on the treaty, the tribute ``q`` still owes us under contracts that
+    the break cancels, and dearer treaties afterwards."""
+    w = world
+    me = w.players.get(w.me) or {}
+    b = w.betrayals(w.me)
+    infl = C.TREATY_BREAK_COST * (1 + b)
+    pct = min(C.TREATY_BREAK_MAX_PCT, C.TREATY_BREAK_PCT * (1 + b))
+    legacy = int(me.get("legacy", 0) or 0) * pct // 100
+    lw = 1.0 + 4.0 * float(w.progress(w.me).get("influence", 0) or 0)
+    key = (w.me, q) if w.me < q else (q, w.me)
+    bond = int((w.treaty_bonds.get(key) or {}).get(w.me, 0) or 0)
+    tribute = 0.0
+    for c in w.view.get("contracts", []) or []:
+        if c.get("payer") == q and c.get("payee") == w.me:
+            tribute += sum(v * (1.0 if r == "gold" else 0.8) for r, v in (c.get("per_turn") or {}).items()) \
+                * int(c.get("turns_left", 0) or 0)
+    later = 2 * C.TREATY_BOND_PER_BETRAYAL  # dearer treaties afterwards
+    bank = int(me.get("bank", 0) or 0) * pct // 100
+    bw = 1.0 + 2.0 * float(w.progress(w.me).get("economic", 0) or 0)
+    return infl, 2.0 * infl + lw * legacy + bw * bank + bond + tribute + later
 
 
 # ---------------------------------------------------------------------------
@@ -1245,6 +1337,10 @@ class DealValuer:
         t = self.threat(other, q)
         v = 5.0 + 0.03 * mp + 4.0 * max(0.0, t - 0.6 * self.defense(q))
         v = min(800.0, v) * min(1.0, turns / 20.0)
+        # a partner with betrayals is less likely to keep the peace; what it
+        # must pledge (§9) is paid to us if it breaks
+        rel = 0.85 ** w.betrayals(other)
+        v = v * rel + w.bond_required(other) * (1.0 - rel)
         if q == self.me:
             v = v * self.peace_scale + self.peace_bias.get(other, 0.0)
         return v

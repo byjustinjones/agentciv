@@ -211,7 +211,7 @@ def test_threatened_economist_pays_tribute_for_peace_only_when_threatened():
         return g
     for at, ok in (((6, 5), True), ((15, 14), False)):
         g = game(at)
-        d = propose(g, "p2", "p1", {}, {"per_turn": {"gold": 3}, "turns": 10}, peace=15, message="[tribute] pay")
+        d = propose(g, "p2", "p1", {}, {"per_turn": {"gold": 3}, "turns": 10}, peace=20, message="[tribute] pay")
         acts = answers(get_bot("economist", seed=1), g, "p1", d)
         assert accepted(acts) == ok, (at, acts)
 

@@ -526,7 +526,7 @@ class Trader:
         out = []
         mine = v.defense(w.me)
         for q in self.partners():
-            if q in w.treaties or getattr(self, "relic_runner", lambda _q: False)(q):
+            if q in w.treaties or getattr(self, "relic_runner", lambda _q: False)(q) or w.sign_problem(w.me, q):
                 continue
             t = v.threat(q, w.me)
             if t < min_ratio * mine or t < 30:

@@ -19,7 +19,7 @@ from .common import (CAPPED, Plan, SafeBot, World, add_units, bank_limit, base_p
                      best_counter, best_improvement, buy_price, food_projection,
                      raw_income, raw_strength, season_mods, simulate_attack,
                      threat_to, tile_yield, total_units,
-                     treaty_proposals_to_me, value_of)
+                     treaty_proposals_to_me, value_of, rivals_by_power)
 from .trading import Trader
 
 
@@ -31,6 +31,7 @@ class PlannerBot(Trader, SafeBot):
     # ---- knobs (override in subclasses) ---------------------------------
     INFLUENCE_WEIGHT = 3.0        # value of 1 influence in "gold" units
     INFLUENCE_RESERVE = 0         # influence never spent on claims
+    TREATY_PLEDGE = 30            # bank gold pledged on each treaty we sign (if free)
     ALLOW_TEMPLES = True
     TEMPLE_BIAS = 1.0             # multiplier on temple ROI
     MAX_CITIES = 8
@@ -230,19 +231,24 @@ class PlannerBot(Trader, SafeBot):
     # ------------------------------------------------------------------
     # diplomacy
     # ------------------------------------------------------------------
+    def pledge(self) -> int:
+        w = self.w
+        room = w.bond_free(w.me) - w.bond_required(w.me) - self.p.pledged
+        return max(0, min(self.TREATY_PLEDGE, room))
+
     def diplomacy(self) -> None:
         """Default: accept every treaty proposal."""
         for pr in treaty_proposals_to_me(self.w):
-            self.p.accept_treaty(pr["from"])
+            self.p.accept_treaty(pr["from"], self.pledge())
 
     def accept_all_and_propose(self, turns: int = 50, only_neighbors: bool = False) -> None:
         w, p = self.w, self.p
         for pr in treaty_proposals_to_me(w):
             if not self.relic_runner(pr["from"]):
-                p.accept_treaty(pr["from"])
-        for q in w.rivals:
+                p.accept_treaty(pr["from"], self.pledge())
+        for q in rivals_by_power(w):
             if q not in w.treaties and (w.turn + hash_pid(q)) % 3 == 0 and not self.relic_runner(q):
-                p.propose(q, turns)
+                p.propose(q, turns, self.pledge())
 
     def relic_runner(self, q: str) -> bool:
         """Is ``q`` holding (nearly) enough guarded relics for the relic

@@ -104,7 +104,7 @@ class StrategistBot(PlannerBot):
     INFLUENCE_GOAL_WEIGHT = 9.0   # value of influence while racing for it (temples)
     INFLUENCE_EARLY_COMMIT = 15   # commit this much earlier to influence (temples pay late)
     PREY_GOLD = 1200              # a rival with this much gold is worth plundering
-    TREATY_TURNS = 50             # length of the treaties we propose (long peace with strong armies)
+    TREATY_TURNS = 40             # length of the treaties we propose (long peace with strong armies)
     BLOCK_PATIENCE = 25           # give up a block after this many turns...
     BLOCK_COOLDOWN = 15           # ...for this many turns
 
@@ -708,13 +708,13 @@ class StrategistBot(PlannerBot):
         for pr in treaty_proposals_to_me(w):
             q = pr["from"]
             if not risky(q) and useful(q) and q != self.memory.get("prey_owner"):
-                p.accept_treaty(q)
+                p.accept_treaty(q, self.pledge())
         if w.turn % 5 == 1:
-            for q in w.rivals:
+            for q in sorted(w.rivals, key=lambda q: (-(w.players[q].get("military_power") or 0), q)):
                 if q in w.treaties or risky(q):
                     continue
                 if (far(q) and not rich(q)) or (w.players[q].get("military_power") or 0) > 1.5 * mine:
-                    p.propose(q, self.TREATY_TURNS)
+                    p.propose(q, self.TREATY_TURNS, self.pledge())
 
     def home(self):
         w = self.w
@@ -942,7 +942,7 @@ class StrategistBot(PlannerBot):
         self.reserve_for_force(tgt, plain=w.at_peace(w.me, rival))
         if w.at_peace(w.me, rival):
             # keep enough influence to break the treaty when ready
-            self.INFLUENCE_RESERVE = max(self.INFLUENCE_RESERVE, C.TREATY_BREAK_COST + 2)
+            self.INFLUENCE_RESERVE = max(self.INFLUENCE_RESERVE, w.break_influence() + 2)
 
     def block_feasible(self, tgt: int, rival: str, path: str) -> bool:
         """Can we assemble and deliver the strike force before ``rival``
@@ -1149,7 +1149,7 @@ class StrategistBot(PlannerBot):
         mem["force"] = force
         self.reserve_missing(tgt, force)
         if w.at_peace(w.me, owner):
-            self.INFLUENCE_RESERVE = max(self.INFLUENCE_RESERVE, C.TREATY_BREAK_COST + 2)
+            self.INFLUENCE_RESERVE = max(self.INFLUENCE_RESERVE, w.break_influence() + 2)
 
     def raid_value(self, tgt: int, owner: str) -> float:
         w = self.w
@@ -1189,9 +1189,12 @@ class StrategistBot(PlannerBot):
                 continue
             if c not in dist:
                 continue
-            if w.at_peace(w.me, owner) and w.res.get("influence", 0) < C.TREATY_BREAK_COST:
+            if w.at_peace(w.me, owner) and w.res.get("influence", 0) < w.break_influence():
                 continue
             value = self.raid_value(c, owner)
+            if w.at_peace(w.me, owner):
+                from .common import break_cost
+                value -= break_cost(w, owner)[1]
             force = self.raid_force(c, owner)
             if not force:
                 continue
@@ -1249,7 +1252,7 @@ class StrategistBot(PlannerBot):
             ready = self.raid_wins(tgt, owner, close)
             if ready:
                 if at_peace:
-                    if w.res.get("influence", 0) >= C.TREATY_BREAK_COST and self.memory.get("broke") != w.turn:
+                    if w.res.get("influence", 0) >= w.break_influence() and self.memory.get("broke") != w.turn:
                         p.orders.append({"type": "break_treaty", "with": owner})
                         self.memory["broke"] = w.turn
                     # hold position this turn; strike next turn
@@ -1524,7 +1527,7 @@ class StrategistBot(PlannerBot):
             if not moved and d <= 7:
                 # staged at the border: hold position
                 self.locked[i] = add_units(self.locked.get(i, {}), free)
-        if not near or w.res.get("influence", 0) < C.TREATY_BREAK_COST:
+        if not near or w.res.get("influence", 0) < w.break_influence():
             return
         win, _, ratio = simulate_attack(w, w.me, near, tgt, assume_war=True)
         if win and ratio >= 1.4 and self.memory.get("broke") != w.turn:
