@@ -202,6 +202,11 @@ class World:
             return True
         return ((a, b) if a < b else (b, a)) in self.treaty_pairs
 
+    def break_notice(self, a: str, b: str) -> bool:
+        """Still movement-restricted after a treaty break (rules §9)?"""
+        until = self.cooldowns.get((a, b) if a < b else (b, a))
+        return until is not None and self.turn - (until - C.TREATY_RESIGN_COOLDOWN) <= C.TREATY_BREAK_NOTICE
+
     def hostile(self, a: str, b: str) -> bool:
         return a != b and not self.at_peace(a, b)
 
@@ -259,7 +264,7 @@ class World:
     def can_enter_fn(self, pid: str):
         """Predicate: may ``pid`` move units onto tile i (ignoring combat)."""
         terrain, owner, armies = self.terrain, self.owner, self.armies
-        partners = {q for q in self.players if q != pid and self.at_peace(pid, q)}
+        partners = {q for q in self.players if q != pid and (self.at_peace(pid, q) or self.break_notice(pid, q))}
 
         def ok(i: int) -> bool:
             if terrain[i] not in PASSABLE:

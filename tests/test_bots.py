@@ -221,3 +221,27 @@ def test_contested_claim_backoff():
     bot.memory["last_orders"] = (g.turn - 1, [claim])
     bot.act(view)
     assert bot.backed_off(g.idx(8, 8))
+
+
+def test_world_follows_treaty_limits_and_the_break_notice():
+    g = sandbox(4)
+    for pid, xy in zip(("p1", "p2", "p3", "p4"), ((2, 2), (12, 2), (2, 12), (12, 12))):
+        g.add_city(*xy, pid, capital=True)
+    run_turn(g, {"p1": [{"type": "propose_treaty", "to": "p2", "turns": 20}]})
+    run_turn(g, {"p2": [{"type": "accept_treaty", "from": "p1"}]})
+    g.set_owner(7, 2, "p2")
+    w = World(g.player_view("p1"))
+    assert w.treaty_slots("p1") == 2 and w.treaties_held("p1") == 1 and w.sign_problem("p1", "p3") is None
+    assert not w.can_enter_fn("p1")(g.idx(7, 2))
+    g.player("p1").resources["influence"] = 100
+    run_turn(g, {"p1": [{"type": "break_treaty", "with": "p2"}]})
+    w = World(g.player_view("p1"))
+    # the turn after the break: still restricted, a cooldown, and a bond now required
+    assert w.break_notice("p1", "p2") and not w.can_enter_fn("p1")(g.idx(7, 2))
+    assert w.sign_problem("p1", "p2") == "cooldown" and w.sign_problem("p1", "p3") == "bond"
+    assert w.break_influence() == 2 * C.TREATY_BREAK_COST
+    run_turn(g)
+    w = World(g.player_view("p1"))
+    assert not w.break_notice("p1", "p2") and w.can_enter_fn("p1")(g.idx(7, 2))
+    p = Plan(w)
+    assert not p.propose("p2", 20) and not p.propose("p3", 20)     # cooldown; no bank for the bond
