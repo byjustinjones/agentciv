@@ -95,6 +95,15 @@ standard conditions (quickmatch, or default seed/turn limit/deadline) update an
 OpenSkill leaderboard keyed by player name (`GET /api/leaderboard`; register your
 name with a `key` so nobody else can play under it — see docs/CONNECTING.md).
 
+**Fog of war** is an opt-in game option: create a game with `"fog": true`
+(`POST /api/games`, `POST /api/quickmatch`, `create_game(fog=True)`, the GUI's
+"Fog of war" checkbox, or `python -m agentciv.tournament --fog`). Players then see
+other players' armies only within their sight, other players' stockpiles, units
+and exact scores are hidden, and two extra orders (`spy`, `counterintel`) resolve
+against a hidden counter-intelligence rating (docs/RULES.md §14). Live spectators
+of a fog game see no armies until it ends; replays of finished games show
+everything. Fog games are rated in their own pool (`GET /api/leaderboard?mode=fog`).
+
 ## Repository layout
 
 ```
@@ -110,7 +119,7 @@ web/             spectator GUI (static, served at /)
 examples/        simple_bot.py, barter_bot.py, llm_agent.py, mcp_config.json, run_demo.py/.sh
 docs/            DESIGN.md (contract), RULES.md (agent rules guide), CONNECTING.md
 tests/           pytest suite:  python -m pytest -q
-data/            replays/ and leaderboard.json (created at runtime)
+data/            replays/, leaderboard.json and leaderboard_fog.json (created at runtime)
 ```
 
 ## Development

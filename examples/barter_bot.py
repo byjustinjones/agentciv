@@ -86,10 +86,12 @@ class BarterBot:
             return None
         # ask the player holding the most of what we lack
         me = view["you"]["id"]
-        others = [p for p in view["players"] if p["id"] != me and p.get("alive", True)]
+        # fog games (rules §14): other players' stock is hidden (null); those rows are skipped
+        others = [p for p in view["players"] if p["id"] != me and p.get("alive", True)
+                  and p.get("resources") is not None]
         if not others:
             return None
-        partner = max(others, key=lambda p: p.get("resources", {}).get(poor, 0))
+        partner = max(others, key=lambda p: (p.get("resources") or {}).get(poor, 0))
         want = int(LOT * prices.get(rich, 1.0) / max(prices.get(poor, 1.0), 0.01) * 0.9)  # 10% below market
         if want <= 0:
             return None

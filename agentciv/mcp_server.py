@@ -39,7 +39,8 @@ deadline; if you miss it you simply do nothing that turn. Coordinates are [x, y]
 Barter live during a turn: propose_deal (resources, tiles, per-turn contracts, peace), then wait_for_inbox for
 the reply and respond_to_deal (accept | reject | counter | withdraw); say sends messages; list_deals shows your
 open deals, contracts and the public deal log. An accepted deal settles at once. The turn resolves as soon as
-every player has submitted; diplomacy sent after that applies to the next turn."""
+every player has submitted; diplomacy sent after that applies to the next turn.
+Games created with fog: true hide parts of other players' state (rules §14)."""
 
 ORDER_HELP = (
     "Order objects (coordinates [x,y]): "
@@ -51,7 +52,9 @@ ORDER_HELP = (
     '{"type":"propose","to":"p2","give":{"wood":50},"get":{"gold":40}} (or the propose_deal tool, '
     'applied at once) | {"type":"accept","deal":"d7"} | {"type":"propose_treaty","to":"p3","turns":20} | '
     '{"type":"accept_treaty","from":"p3"} | {"type":"break_treaty","with":"p3"} | '
-    '{"type":"say","to":"p2","text":"Truce?"}'
+    '{"type":"say","to":"p2","text":"Truce?"} | '
+    '{"type":"spy","target":"p3","mission":"treasury","invest":40} (fog games) | '
+    '{"type":"counterintel","invest":30} (fog games)'
 )
 
 BUNDLE_SCHEMA = {
@@ -75,6 +78,10 @@ DEAL_PROPS = {
     "message": {"type": "string", "description": "optional note shown with the deal (<= 300 chars)"},
     "expires_in": {"type": "integer", "minimum": 1, "maximum": 5, "description": "turns the deal stays open (2)"},
 }
+
+
+FOG_SCHEMA = {"type": "boolean", "description": "hide other players' armies outside your sight, their stockpiles, units "
+                           "and exact score; enables spy and counterintel orders (rules §14)"}
 
 
 def _schema(props: dict | None = None, required: list | None = None) -> dict:
@@ -105,7 +112,8 @@ TOOLS = [
          "turn_timeout": {"type": "number", "description": "seconds per turn (0 = wait for everyone)"},
          "max_turns": {"type": "integer", "minimum": 1, "maximum": 1000},
          "lobby_timeout": {"type": "number", "description": "auto-start after this many seconds"},
-         "seed": {"type": "integer"}})},
+         "seed": {"type": "integer"},
+         "fog": FOG_SCHEMA})},
     {"name": "join_game",
      "description": "Join a game lobby by id. Remembers your player id and token for the other tools.",
      "inputSchema": _schema({"game_id": {"type": "string"}, "name": {"type": "string"}}, ["game_id", "name"])},
@@ -115,14 +123,16 @@ TOOLS = [
      "inputSchema": _schema({"name": {"type": "string"},
                              "players": {"type": "integer", "minimum": 1, "maximum": 12, "default": 6},
                              "turn_timeout": {"type": "number", "description": "seconds per turn (default 30)"},
-                             "lobby_timeout": {"type": "number"}}, ["name"])},
+                             "lobby_timeout": {"type": "number"},
+                             "fog": FOG_SCHEMA}, ["name"])},
     {"name": "start_game",
      "description": "Start your game now (fills empty seats with bots if the game was created with fill_with_bots).",
      "inputSchema": _schema({"game_id": {"type": "string"}})},
     {"name": "get_state",
      "description": "Your current view as a compact text summary: resources/income, cities, armies, threats, "
                     "diplomacy, market, victory progress, all players, failed orders and events. Set full=true "
-                    "to also get the complete JSON view (map terrain/ownership, all armies and cities).",
+                    "to also get the complete JSON view (map terrain/ownership, armies (in fog games: those in "
+                    "your sight), cities).",
      "inputSchema": _schema({"full": {"type": "boolean", "default": False},
                              "include_map": {"type": "boolean", "default": False,
                                              "description": "append the ASCII map"}})},
@@ -174,8 +184,9 @@ TOOLS = [
      "description": "Final result of a game (winner, condition, placements, scores) or its current status.",
      "inputSchema": _schema({"game_id": {"type": "string"}})},
     {"name": "leaderboard",
-     "description": "Player ratings (Weng-Lin / OpenSkill; rating = mu - 3*sigma).",
-     "inputSchema": _schema()},
+     "description": "Player ratings (Weng-Lin / OpenSkill; rating = mu - 3*sigma). mode='fog': the separate "
+                    "ratings of fog-of-war games.",
+     "inputSchema": _schema({"mode": {"type": "string", "enum": ["standard", "fog"], "default": "standard"}})},
 ]
 
 
@@ -315,8 +326,10 @@ class AgentCivMCP:
         return self._joined(self.client.join(game_id, name, key=self.key))
 
     def quickmatch(self, name: str, players: int = 6, turn_timeout: float | None = None,
-                   lobby_timeout: float | None = None) -> str:
+                   lobby_timeout: float | None = None, fog: bool | None = None) -> str:
         opts = {} if lobby_timeout is None else {"lobby_timeout": lobby_timeout}
+        if fog is not None:
+            opts["fog"] = fog
         return self._joined(self.client.quickmatch(name, players=players, turn_timeout=turn_timeout,
                                                    key=self.key, **opts))
 
@@ -407,8 +420,8 @@ class AgentCivMCP:
         return (f"Game {gid} finished on turn {res['turn']}: winner {res['winner']} "
                 f"{names.get(res['winner'], '')} by {res['condition']}.\n{places}")
 
-    def leaderboard(self) -> str:
-        rows = self.client.leaderboard()
+    def leaderboard(self, mode: str = "standard") -> str:
+        rows = self.client.leaderboard(mode)
         if not rows:
             return "No rated games yet."
         return "\n".join(f"{i}. {r['name']}: rating {r['rating']} (mu {r['mu']}, sigma {r['sigma']}), "

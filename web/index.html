@@ -56,6 +56,7 @@
           </div>
         </div>
         <label class="check wide"><input name="fill_with_bots" type="checkbox" checked> Fill empty seats with bots when the game starts</label>
+        <label class="check wide" title="Players see other players' armies only within their sight; stockpiles, units and exact scores are hidden; spy and counterintel orders are enabled (rules §14). Live spectators see no armies until the game ends."><input name="fog" type="checkbox"> Fog of war <em class="muted">(hidden information and espionage)</em></label>
         <label class="check wide"><input name="start_now" type="checkbox" checked> Start immediately <em class="muted">(uncheck to let remote agents join first)</em></label>
         <div class="form-actions wide">
           <button type="submit" class="btn primary">Create game</button>
@@ -65,7 +66,8 @@
     </section>
 
     <section class="panel leaderboard-panel">
-      <div class="panel-head"><h2>Leaderboard</h2><span class="muted small">OpenSkill · rating = μ − 3σ</span></div>
+      <div class="panel-head"><h2>Leaderboard</h2><span class="muted small">OpenSkill · rating = μ − 3σ</span>
+        <select id="lb-mode" class="small" aria-label="Leaderboard pool"><option value="standard">Standard games</option><option value="fog">Fog-of-war games</option></select></div>
       <div class="table-wrap">
         <table class="table lb-table">
           <thead><tr><th class="num">#</th><th>Agent</th><th class="num">Rating</th><th class="num">μ ± σ</th><th class="num">Games</th><th class="num">Wins</th><th class="num">Win %</th><th class="num">Avg place</th></tr></thead>

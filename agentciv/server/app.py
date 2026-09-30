@@ -345,7 +345,10 @@ class Handler(BaseHTTPRequestHandler):
             limit = self._int_query(query, "limit", None)
             return self._json(mgr.list_games(None if limit is None else min(max(limit, 0), 10_000)))
         if p == "/api/leaderboard":
-            return self._json(mgr.leaderboard())
+            mode = (query.get("mode") or ["standard"])[-1]
+            if mode not in ("standard", "fog"):
+                raise ApiError(400, "mode must be 'standard' or 'fog'")
+            return self._json(mgr.leaderboard(mode))
         if p == "/api/bots":
             return self._json(available_bots())
         game_id, action = self._route(p)
@@ -452,7 +455,8 @@ class Handler(BaseHTTPRequestHandler):
             session = mgr.create_game(body)
             return self._json({"game_id": session.game_id, "status": session.status,
                                "creator_token": session.creator_token, "rated": session.opts["rated"],
-                               "unrated_reason": session.opts.get("unrated_reason")})
+                               "unrated_reason": session.opts.get("unrated_reason"),
+                               "fog": session.opts.get("fog", False)})
         if p == "/api/quickmatch":
             session, seat = mgr.quickmatch(body)
             return self._json({"game_id": session.game_id, "player_id": seat.pid, "token": seat.token,

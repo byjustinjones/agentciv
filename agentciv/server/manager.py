@@ -250,6 +250,7 @@ def parse_game_options(body: dict) -> dict:
         "lobby_timeout": float(lobby_timeout) if lobby_timeout else None,
         "turn_delay": None if turn_delay is None else float(turn_delay),
         "rated": _bool(body, "rated", True),
+        "fog": _bool(body, "fog", False),
         "quickmatch": False,
         "seed_given": seed_given,
     }
@@ -315,7 +316,8 @@ class GameSession:
         self.lock = threading.RLock()
         self.cond = threading.Condition(self.lock)
         self.game = Game(GameConfig(seed=opts["seed"], max_turns=opts["max_turns"], game_id=game_id,
-                                    name=self.name, max_players=opts["max_players"]))
+                                    name=self.name, max_players=opts["max_players"],
+                                    fog=bool(opts.get("fog", False))))
         self.seats: dict[str, Seat] = {}
         self.frames: FrameStore | None = FrameStore()  # zlib-compressed, freed once saved to disk
         self.saved = False
@@ -846,7 +848,8 @@ class GameSession:
             log.exception("game %s: could not save replay", self.game_id)
         if ranked:
             try:
-                self.manager.storage.record_result([n for n, _ in ranked], [r for _, r in ranked])
+                self.manager.storage.record_result([n for n, _ in ranked], [r for _, r in ranked],
+                                                   pool="fog" if self.opts.get("fog") else "standard")
             except OSError:
                 log.exception("game %s: could not update leaderboard", self.game_id)
 
@@ -949,6 +952,7 @@ class GameSession:
                 "quickmatch": self.opts["quickmatch"],
                 "rated": self.opts["rated"],
                 "unrated_reason": self.opts.get("unrated_reason"),
+                "fog": bool(self.opts.get("fog", False)),
                 "deadline": g.deadline,
                 "result": dict(g.result) if g.result else None,
                 "frames": len(self.frames) if self.frames is not None else g.turn + 1,
@@ -1276,10 +1280,11 @@ class GameManager:
         max_turns = _number(body, "max_turns", C.DEFAULT_MAX_TURNS, 1, 1000, integer=True)
         lobby_timeout = float(_number(body, "lobby_timeout", DEFAULT_QUICKMATCH_LOBBY, 0, MAX_TIMEOUT))
         fill = _bool(body, "fill_with_bots", True)
+        fog = _bool(body, "fog", False)
         self.check_name(name, key)  # a registered name with a wrong/missing key fails before any lobby is made
         # Lobbies are matched on every setting that changes how the game starts or plays, so a
         # caller asking for an odd lobby_timeout/fill can't trap the default matchmaking bucket.
-        match = (players, turn_timeout, max_turns, lobby_timeout, fill)
+        match = (players, turn_timeout, max_turns, lobby_timeout, fill, fog)
         with self._qm_lock:  # one lobby choice at a time; the manager lock stays free for other requests
             with self.lock:
                 candidates = [s for s in self.sessions.values()
@@ -1299,6 +1304,7 @@ class GameManager:
                 "name": f"Quickmatch #{n}",
                 "max_players": players, "min_players": min(2, players),
                 "turn_timeout": turn_timeout, "max_turns": max_turns, "fill_with_bots": fill,
+                "fog": fog,
             })
             # lobby_timeout 0 = start right away (with bots if fill_with_bots), not "never"
             opts["lobby_timeout"] = lobby_timeout
@@ -1345,8 +1351,9 @@ class GameManager:
             raise ApiError(500, "replay file is corrupt") from None
 
     # ------------------------------------------------------------ misc
-    def leaderboard(self) -> list[dict]:
-        rows = self.storage.leaderboard()
+    def leaderboard(self, mode: str = "standard") -> list[dict]:
+        """Ratings of the ``standard`` pool or of the ``fog`` pool (fog-of-war games)."""
+        rows = self.storage.leaderboard(mode)
         for r in rows:  # house bots' names are reserved, so their entries are authentic too
             r["verified"] = r["verified"] or r["name"] in BOT_REGISTRY
         return rows

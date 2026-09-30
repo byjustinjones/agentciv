@@ -44,7 +44,9 @@ Your goal is to win (finish 1st). The victory conditions are conquest, wonder, i
 score; the rules below describe what is allowed.
 
 Each turn you receive a state summary, an ASCII map, new diplomacy from your inbox and your notes from last
-turn. Use get_full_state if you need exact details (tile owners, armies, improvements, deals).
+turn. Use get_full_state if you need exact details (tile owners, armies, improvements, deals). In games created
+with fog: true, some fields of other players are null or rounded and armies are listed only within your sight
+(rules §14).
 
 Diplomacy is live: deals settle the moment they are accepted. Tools: propose_deal and respond_to_deal
 (accept | reject | counter | withdraw), say for messages, and wait_for_replies to wait a few seconds for answers.

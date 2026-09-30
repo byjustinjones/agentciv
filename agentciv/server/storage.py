@@ -47,12 +47,14 @@ class Storage:
         self.replay_dir = self.root / "replays"
         self.index_path = self.replay_dir / "index.json"
         self.leaderboard_path = self.root / "leaderboard.json"
+        self.fog_leaderboard_path = self.root / "leaderboard_fog.json"   # fog-of-war games (own pool)
         self.names_path = self.root / "names.json"
         self._lock = threading.Lock()
         self._write_lock = threading.Lock()  # serialises replay-file writes (outside the index lock)
         self.replay_dir.mkdir(parents=True, exist_ok=True)
         self.index: dict[str, dict] = self._load_index()
         self.table: dict[str, dict] = self._load_json(self.leaderboard_path, {})
+        self.fog_table: dict[str, dict] = self._load_json(self.fog_leaderboard_path, {})
         self.claims: dict[str, str] = self._load_json(self.names_path, {})
 
     # ------------------------------------------------------------ helpers
@@ -166,10 +168,20 @@ class Storage:
             return name.casefold() in self.claims
 
     # ------------------------------------------------------------ leaderboard
-    def record_result(self, placements: list[str], ranks: list[int] | None = None) -> None:
+    def _pool(self, pool: str) -> tuple[dict, Path]:
+        if pool == "standard":
+            return self.table, self.leaderboard_path
+        if pool == "fog":
+            return self.fog_table, self.fog_leaderboard_path
+        raise ValueError(f"unknown leaderboard pool {pool!r}")
+
+    def record_result(self, placements: list[str], ranks: list[int] | None = None,
+                      pool: str = "standard") -> None:
         """Update ratings from an ordered list of player names (winner first);
         ``ranks`` (optional, 1 = best, equal = tie). Duplicate names keep
-        their best placement; < 2 names is ignored."""
+        their best placement; < 2 names is ignored. ``pool``: ``standard``
+        (leaderboard.json) or ``fog`` (leaderboard_fog.json, fog-of-war games)."""
+        table, path = self._pool(pool)
         if ranks is None:
             ranks = list(range(1, len(placements) + 1))
         seen: list[str] = []
@@ -188,12 +200,13 @@ class Storage:
                 prev = r
             out.append(dense)
         with self._lock:
-            ratings.update(self.table, seen, out)
-            _atomic_write(self.leaderboard_path, json.dumps(self.table, indent=1, sort_keys=True).encode())
+            ratings.update(table, seen, out)
+            _atomic_write(path, json.dumps(table, indent=1, sort_keys=True).encode())
 
-    def leaderboard(self) -> list[dict]:
+    def leaderboard(self, pool: str = "standard") -> list[dict]:
+        table, _ = self._pool(pool)
         with self._lock:
-            rows = ratings.leaderboard(self.table)
+            rows = ratings.leaderboard(table)
             for r in rows:  # registered names can only be played with their key (see check_name)
                 r["verified"] = r["name"].casefold() in self.claims
             return rows

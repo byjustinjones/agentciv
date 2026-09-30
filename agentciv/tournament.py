@@ -146,14 +146,15 @@ def _count_events(g: Game, trade: dict, kinds: Counter, events: list) -> None:
 
 def run_game(bot_specs: list, seed: int, max_turns: int = C.DEFAULT_MAX_TURNS,
              game_id: str | None = None, record_views: bool = False,
-             rounds: int = NEGOTIATION_ROUNDS) -> dict:
+             rounds: int = NEGOTIATION_ROUNDS, fog: bool = False) -> dict:
     """Play one full game between built-in bots, in seat order.
 
     ``bot_specs`` is a list of bot names (labels are derived with
     :func:`label_bots`) or of ``(label, bot_name)`` pairs. Each turn starts
     with ``rounds`` negotiation rounds (see the module doc; 0 = none).
     Returns a result dict with the engine result translated to labels plus
-    diagnostics and trade statistics.
+    diagnostics and trade statistics. ``fog``: play a fog-of-war game (the
+    result then also has ``fog_events``: battle and espionage event counts).
     """
     if bot_specs and all(isinstance(b, str) for b in bot_specs):
         labels = label_bots([str(b) for b in bot_specs])
@@ -161,7 +162,7 @@ def run_game(bot_specs: list, seed: int, max_turns: int = C.DEFAULT_MAX_TURNS,
     else:
         specs = [_spec(b) for b in bot_specs]
     t_start = time.perf_counter()
-    g = Game(GameConfig(seed=seed, max_turns=max_turns, game_id=game_id or f"t{seed}"))
+    g = Game(GameConfig(seed=seed, max_turns=max_turns, game_id=game_id or f"t{seed}", fog=fog))
     pid_label = {}
     bots = {}
     for k, (label, name) in enumerate(specs):
@@ -180,6 +181,7 @@ def run_game(bot_specs: list, seed: int, max_turns: int = C.DEFAULT_MAX_TURNS,
     frames = []
     trade = {pid: dict.fromkeys(TRADE_KEYS, 0) for pid in bots}
     kinds: Counter = Counter()
+    fog_events: Counter = Counter()
     while not g.finished:
         alive = g.alive_players()
         for rnd in range(max(0, int(rounds))):
@@ -216,7 +218,11 @@ def run_game(bot_specs: list, seed: int, max_turns: int = C.DEFAULT_MAX_TURNS,
             errs = g.submit_orders(pid, orders)
             errors[lab] += len(errs)
             orders_n[lab] += len(orders) if isinstance(orders, list) else 0
-        _count_events(g, trade, kinds, g.step())
+        step_events = g.step()
+        _count_events(g, trade, kinds, step_events)
+        if fog:
+            fog_events.update(e["type"] for e in step_events
+                              if e["type"] in ("battle", "spy_report", "spy_incident", "counterintel"))
         if record_views:
             frames.append(g.spectator_view(full=True))  # offline: omniscient
     res = g.result or {}
@@ -251,6 +257,9 @@ def run_game(bot_specs: list, seed: int, max_turns: int = C.DEFAULT_MAX_TURNS,
     }
     if record_views:
         out["frames"] = frames
+    if fog:
+        out["fog"] = True
+        out["fog_events"] = dict(fog_events)
     return out
 
 
@@ -263,7 +272,8 @@ def start_slots(g: Game) -> dict:
 def _run_one(args: tuple) -> dict:
     specs, seed, max_turns, index = args[:4]
     rounds = args[4] if len(args) > 4 else NEGOTIATION_ROUNDS
-    r = run_game(specs, seed, max_turns, game_id=f"tour{index}", rounds=rounds)
+    fog = bool(args[5]) if len(args) > 5 else False
+    r = run_game(specs, seed, max_turns, game_id=f"tour{index}", rounds=rounds, fog=fog)
     r["index"] = index
     return r
 
@@ -289,11 +299,11 @@ def schedule(bots: list, games: int, players: int, seed: int) -> list:
 
 def run_tournament(bots: list, games: int = 40, players: int | None = None, seed: int = 1,
                    max_turns: int = C.DEFAULT_MAX_TURNS, jobs: int = 1, progress=None,
-                   rounds: int = NEGOTIATION_ROUNDS) -> dict:
+                   rounds: int = NEGOTIATION_ROUNDS, fog: bool = False) -> dict:
     """Run a tournament and return the summary dict (see module doc)."""
     players = players or len(bots)
     plan = schedule(bots, games, players, seed)
-    tasks = [(specs, gseed, max_turns, gi, rounds) for gi, (specs, gseed) in enumerate(plan)]
+    tasks = [(specs, gseed, max_turns, gi, rounds, fog) for gi, (specs, gseed) in enumerate(plan)]
     results = []
     t0 = time.perf_counter()
     if jobs and jobs > 1:
@@ -402,7 +412,14 @@ def summarize(results: list, wall_seconds: float = 0.0) -> dict:
                  "win_rate": round(v[1] / v[0], 3) if v[0] else 0.0,
                  "avg_place": round(v[2] / v[0], 2) if v[0] else None}
                 for k, v in sorted(tab.items(), key=lambda kv: key_fn(kv[0]))]
+    fog_total: Counter = Counter()
+    for r in results:
+        fog_total.update(r.get("fog_events") or {})
+    extra = {}
+    if any(r.get("fog") for r in results):
+        extra["fog_events_per_game"] = {k: round(v / n, 2) for k, v in sorted(fog_total.items())}
     return {
+        **extra,
         "games": n,
         "bots": bots,
         "conditions": {c: conds.get(c, 0) for c in CONDITIONS if conds.get(c)},
@@ -457,6 +474,9 @@ def format_summary(s: dict) -> str:
                          f"{t.get('contracts_payer', 0):>7.2f}{t.get('contracts_payee', 0):>7.2f}"
                          f"{t.get('defaults', 0):>6.2f}{t.get('gold_paid', 0):>9.0f}{t.get('gold_received', 0):>9.0f}"
                          f"{t.get('net_value', 0):>9.0f}{b.get('negotiate_ms_per_call', 0):>8.2f}")
+    if "fog_events_per_game" in s:
+        lines.append("fog games; per game: " + (", ".join(f"{k} {v}" for k, v in s["fog_events_per_game"].items())
+                                                or "no battles or espionage"))
     exc = [b["bot"] for b in s["bots"] if b["exceptions"]]
     if exc:
         lines.append("bots that raised: " + ", ".join(exc))
@@ -474,6 +494,7 @@ def main(argv=None) -> int:
     ap.add_argument("--jobs", type=int, default=1, help="parallel worker processes")
     ap.add_argument("--rounds", type=int, default=NEGOTIATION_ROUNDS,
                     help="negotiation rounds per turn before the bots act (0 = no barter)")
+    ap.add_argument("--fog", action="store_true", help="fog-of-war games (rules §14)")
     ap.add_argument("--json", default=None, help="write the full summary (incl. per-game results) here")
     ap.add_argument("--quiet", action="store_true")
     a = ap.parse_args(argv)
@@ -487,7 +508,7 @@ def main(argv=None) -> int:
             print(f"game {r['index'] + 1:>3}: {r['winner']:<14} by {r['condition']:<9} turn {r['turns']:>3}"
                   f"  ({r['seconds']:.1f}s)  order: {' > '.join(r['placements'])}", file=sys.stderr)
 
-    s = run_tournament(bots, a.games, players, a.seed, a.max_turns, a.jobs, progress, rounds=a.rounds)
+    s = run_tournament(bots, a.games, players, a.seed, a.max_turns, a.jobs, progress, rounds=a.rounds, fog=a.fog)
     print(format_summary(s))
     if a.json:
         with open(a.json, "w") as f:

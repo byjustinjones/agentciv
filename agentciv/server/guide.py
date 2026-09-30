@@ -35,7 +35,11 @@ ORDER_EXAMPLES: dict[str, dict] = {
     "reject": {"type": "reject", "deal": "d7", "message": "too pricey"},
     "withdraw": {"type": "withdraw", "deal": "d7"},
     "say": {"type": "say", "to": "p2", "text": "Want peace for 20 turns?"},
+    # fog games only (rules §14)
+    "spy": {"type": "spy", "target": "p3", "mission": "treasury", "invest": 40},
+    "counterintel": {"type": "counterintel", "invest": 30},
 }
+FOG_ONLY = ("spy", "counterintel")
 
 # More deal shapes (bundles can hold resources, tiles, contracts; deals can carry peace).
 DEAL_EXAMPLES: list[dict] = [
@@ -63,7 +67,14 @@ ORDER_NOTES = {
     "counter": "only the recipient of deal d7 can counter; give/get are from YOUR point of view",
     "accept": "only the recipient can accept; settles at once if both sides can deliver",
     "say": "to = a player id or \"all\" (public)",
+    "spy": "fog games only (rules §14): mission military|treasury; invest 20-1000 gold, paid at resolution",
+    "counterintel": "fog games only (rules §14): invest 1-500 gold into your counter-intelligence pool",
 }
+
+
+def _types() -> str:
+    std = [t for t in ORDER_EXAMPLES if t not in FOG_ONLY]
+    return ", ".join(std) + " (fog games also: " + ", ".join(FOG_ONLY) + ")"
 
 
 def _dump(obj) -> str:
@@ -82,10 +93,10 @@ def order_hint(order) -> dict:
             out["hint"] = ORDER_NOTES[t]
         return out
     if t is None:
-        return {"hint": "every order needs a \"type\"; valid types: " + ", ".join(ORDER_EXAMPLES)}
+        return {"hint": "every order needs a \"type\"; valid types: " + _types()}
     if not isinstance(t, str):
-        return {"hint": "\"type\" must be a string, one of: " + ", ".join(ORDER_EXAMPLES)}
-    return {"hint": "valid types: " + ", ".join(ORDER_EXAMPLES)}
+        return {"hint": "\"type\" must be a string, one of: " + _types()}
+    return {"hint": "valid types: " + _types()}
 
 
 def api_index(base: str) -> dict:
@@ -111,7 +122,8 @@ def api_index(base: str) -> dict:
         "rules": {"markdown": f"{base}/api/rules", "json": f"{base}/api/rules.json",
                   "note": "Read /api/rules once (LLM-friendly). Every state view also carries the numbers in 'costs'."},
         "auth": ("Header 'Authorization: Bearer TOKEN' (or ?token=TOKEN). Without a token /state is the spectator "
-                 "view (public while the game runs: no private messages/offers/proposals). Optional \"key\" on "
+                 "view (public while the game runs: no private messages/offers/proposals; in fog games the "
+                 "token-less view has no sight, rules §14). Optional \"key\" on "
                  "join/quickmatch registers your name so only you can play (and be rated) under it."),
         "timing": ("Turns are simultaneous. A turn resolves when every living remote player has submitted or its "
                    "deadline (view.deadline, unix seconds) passes; missing it = no orders that turn. Always submit, "
@@ -125,7 +137,8 @@ def api_index(base: str) -> dict:
                       "right now it fails and nothing moves). Deals can trade resources (food/wood/stone/gold), "
                       "land (tiles), contracts (per_turn payments for n turns: loans, tribute, rent) and peace "
                       "(k turns). Contracts that can't be paid default: -25 influence and a public 'defaults' mark. "
-                      "Reputation (players[].reputation) and executed deals (deals.log) are public."),
+                      "Reputation (players[].reputation) and executed deals (deals.log) are public; in fog games "
+                      "bundle amounts in deals.log are shown only to the parties."),
             "send": (f"POST {base}/api/games/GAME_ID/diplomacy with {{\"actions\":[...]}} (Bearer token; optional "
                      "\"turn\" -> 409 if stale). Applied immediately; returns {results:[{index, ok, deal?, error?}], "
                      "seq, turn}. Limits: 30 actions and 10 say per player per turn."),
@@ -147,8 +160,8 @@ def api_index(base: str) -> dict:
             "GET  /api/rules.json                 constants and cost tables",
             "GET  /api/games                      list games",
             "POST /api/games                      create {name?, max_players, turn_timeout, max_turns, bots[], "
-            "fill_with_bots, lobby_timeout, seed}",
-            "POST /api/quickmatch                 {name, key?, players?, turn_timeout?} join/create a lobby -> "
+            "fill_with_bots, lobby_timeout, seed, fog}  (fog: fog of war and espionage, rules §14)",
+            "POST /api/quickmatch                 {name, key?, players?, turn_timeout?, fog?} join/create a lobby -> "
             "{game_id, player_id, token}",
             "POST /api/games/{id}/join            {name, key?} -> {game_id, player_id, token}",
             "POST /api/games/{id}/start           start now (fills empty seats with bots if fill_with_bots); once "
@@ -163,7 +176,7 @@ def api_index(base: str) -> dict:
             "to you (or the end of turn T) -> {seq, items, turn, status}",
             "GET  /api/games/{id}/stream          server-sent events: spectator view on every turn and executed deal",
             "GET  /api/games/{id}/replay          all frames + result (?from=&to= frame range, ?compact=1 lighter)",
-            "GET  /api/leaderboard                OpenSkill ratings by player name",
+            "GET  /api/leaderboard                OpenSkill ratings by player name (?mode=fog: fog games)",
             "GET  /api/bots                       built-in bot names",
         ],
         "errors": ("Errors are JSON {\"error\": message} with status 400 (malformed), 401 (missing/invalid token), "

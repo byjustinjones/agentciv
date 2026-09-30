@@ -137,7 +137,8 @@ class AgentCivClient:
     def create_game(self, **options) -> str:
         """Create a game and return its id. Options (all optional):
         ``name, max_players, min_players, turn_timeout, max_turns, seed, bots,
-        fill_with_bots, lobby_timeout, turn_delay, rated``. The returned
+        fill_with_bots, lobby_timeout, turn_delay, rated, fog`` (``fog``: fog of
+        war and espionage, rules §14). The returned
         ``creator_token`` is remembered: :meth:`start` uses it."""
         res = self._request("POST", "/api/games", options)
         if res.get("creator_token"):
@@ -165,7 +166,8 @@ class AgentCivClient:
                    key: str | None = None, **options) -> dict:
         """Join the open quickmatch lobby for ``players`` seats (creating one if
         needed). The lobby fills with house bots after ``lobby_timeout``
-        seconds (default 30). ``key``: see :meth:`join`."""
+        seconds (default 30). ``key``: see :meth:`join`. ``fog=True`` joins a
+        fog-of-war lobby (never mixed with standard ones)."""
         body = {"name": name, "players": players, **options}
         if turn_timeout is not None:
             body["turn_timeout"] = turn_timeout
@@ -298,8 +300,9 @@ class AgentCivClient:
     def rules_json(self) -> dict:
         return self._request("GET", "/api/rules.json")
 
-    def leaderboard(self) -> list[dict]:
-        return self._request("GET", "/api/leaderboard")
+    def leaderboard(self, mode: str = "standard") -> list[dict]:
+        """Ratings; ``mode="fog"``: the separate pool of fog-of-war games."""
+        return self._request("GET", "/api/leaderboard", query={"mode": mode} if mode != "standard" else None)
 
     def bots(self) -> list[str]:
         return self._request("GET", "/api/bots")
@@ -546,8 +549,18 @@ def _reputation_str(p: dict) -> str:
     rep = p.get("reputation")
     if not isinstance(rep, dict):
         return f" | betrayals {p['betrayals']}" if p.get("betrayals") else ""
+    spy = f", spy incidents {rep['spy_incidents']}" if "spy_incidents" in rep else ""
     return (f" | deals {rep.get('deals', 0)}, honoured {rep.get('contracts_honoured', 0)}, "
-            f"defaults {rep.get('defaults', 0)}, betrayals {rep.get('betrayals', 0)}")
+            f"defaults {rep.get('defaults', 0)}, betrayals {rep.get('betrayals', 0)}{spy}")
+
+
+def _fog_active(view: dict) -> bool:
+    return bool((view.get("fog") or {}).get("active"))
+
+
+def _num(v) -> str:
+    """A number, or ``?`` for a field hidden by the fog of war."""
+    return "?" if v is None else str(v)
 
 
 def _units_str(units: dict) -> str:
@@ -612,11 +625,12 @@ def _my_last_turn_problems(view: dict, pid: str, max_events: int) -> list[str]:
 def _progress_str(p: dict, thr: dict) -> str:
     vp = p.get("victory_progress") or {}
     rt = thr.get("relic_turns") or 16
+    pre = "≥" if p.get("fogged") else ""   # fog: rounded down to a multiple of 0.1
     return (f"capitals {p.get('capitals_held', 0)}/{thr.get('conquest_capitals', '?')}, "
             f"wonder {p.get('wonder_stage', 0)}/{thr.get('wonder_stage', 5)}, "
             f"relics {p.get('relics_held', 0)} held {p.get('relics_guarded', 0)} guarded "
             f"(need {thr.get('relics_needed', '?')}) streak {p.get('relic_streak', 0)}/{rt}, "
-            f"influence {vp.get('influence', 0) * 100:.0f}%, economic {vp.get('economic', 0) * 100:.0f}%")
+            f"influence {pre}{vp.get('influence', 0) * 100:.0f}%, economic {pre}{vp.get('economic', 0) * 100:.0f}%")
 
 
 def _relic_lines(view: dict, players: dict, rules: dict) -> list[str]:
@@ -626,7 +640,8 @@ def _relic_lines(view: dict, players: dict, rules: dict) -> list[str]:
     on_tile: dict = {}
     for a in view.get("armies", []):
         on_tile.setdefault((a["x"], a["y"]), []).append(a)
-    out = ["Relics (units standing on each tile are public):"]
+    out = ["Relics (units are listed on tiles in your sight):" if _fog_active(view)
+           else "Relics (units standing on each tile are public):"]
     for r in relics:
         stacks = on_tile.get((r["x"], r["y"]), [])
         units = "; ".join(f"{a['owner']} {_units_str(a['units'])} (power {_power(a['units'], rules)})"
@@ -743,6 +758,14 @@ def order_warnings(view: dict, orders: list) -> list[str]:
     elif extra_upkeep or after.get("food", 0) < res.get("food", 0):
         warnings += _food_outlook(view, pid, after.get("food", 0) - need.get("food", 0),
                                   you.get("upkeep", 0), extra_upkeep)[1:]
+    spy_gold = sum(int(o.get("invest") or 0) for o in orders
+                   if o.get("type") in ("spy", "counterintel") and isinstance(o.get("invest"), int))
+    if spy_gold:
+        left = after.get("gold", 0) - need.get("gold", 0)
+        if spy_gold > left:
+            warnings.append(f"spy/counterintel orders invest {spy_gold} gold but only about {left} gold is on hand "
+                            "after the market and actions (income arrives before espionage in step 7½); orders "
+                            "that cannot be paid fail")
     pending, ids = _pending_gives(view, pid)
     if pending:
         tight = [r for r, v in pending.items() if after.get(r, 0) - need.get(r, 0) - v < 0]
@@ -770,7 +793,9 @@ def ascii_map(view: dict, pid: str | None = None) -> str:
     ``m`` mountain, ``~`` water), replaced by ``@`` original capital,
     ``C`` other city, ``*`` relic; UPPERCASE terrain letter (``P F H G``)
     = units present (see the army list). 2nd char: owner (``1``–``9``,
-    ``a``–``c`` for p1–p12) or blank if unowned.
+    ``a``–``c`` for p1–p12) or blank if unowned. In a running fog game each
+    tile has a 3rd char: ``?`` for tiles not in your sight (units there are
+    not shown), blank otherwise.
     """
     m = view.get("map") or {}
     w, h = m.get("width", 0), m.get("height", 0)
@@ -782,8 +807,10 @@ def ascii_map(view: dict, pid: str | None = None) -> str:
     relics = {(r["x"], r["y"]) for r in m.get("relics", [])}
     armies = {(a["x"], a["y"]) for a in view.get("armies", []) if any(a["units"].values())}
     upper = {".": "P", "f": "F", "h": "H", "g": "G"}
-    lines = ["    " + "".join(f"{x // 10 if x >= 10 else ' '} " for x in range(w)),
-             "    " + "".join(f"{x % 10} " for x in range(w))]
+    visible = m.get("visible") if _fog_active(view) else None
+    pad = "  " if visible else " "
+    lines = ["    " + "".join(f"{x // 10 if x >= 10 else ' '}{pad}" for x in range(w)),
+             "    " + "".join(f"{x % 10}{pad}" for x in range(w))]
     for y in range(h):
         row = []
         for x in range(w):
@@ -796,7 +823,10 @@ def ascii_map(view: dict, pid: str | None = None) -> str:
                 ch = upper.get(t, t.upper())
             else:
                 ch = t
-            row.append(ch + _owner_symbol(owner[y][x]))
+            cell = ch + _owner_symbol(owner[y][x])
+            if visible:
+                cell += " " if visible[y][x] == "1" else "?"
+            row.append(cell)
         lines.append(f"{y:>3} " + "".join(row))
     names = {p["id"]: p["name"] for p in view.get("players", [])}
     you = pid or (view.get("you") or {}).get("id")
@@ -804,7 +834,8 @@ def ascii_map(view: dict, pid: str | None = None) -> str:
     lines.append("")
     lines.append("Legend: . plains  f forest  h hills  g gold  m mountain  ~ water  @ capital  C city  "
                  "* relic  UPPERCASE = units present (@, C and * tiles may also hold units: see the city and relic "
-                 "lists in the state summary). 2nd char = owner: " + legend)
+                 "lists in the state summary). 2nd char = owner: " + legend
+                 + (". 3rd char: ? = not in your sight (units there are not shown)" if visible else ""))
     return "\n".join(lines)
 
 
@@ -821,6 +852,9 @@ def bundle_str(b: dict | None) -> str:
 
 
 def _deal_terms(d: dict) -> str:
+    if "give" not in d and "get" not in d:   # fog games: terms shown only to the parties
+        txt = f"{d['from']} and {d['to']} traded (terms shown only to the parties)"
+        return txt + (f"; peace {d['peace']} turns" if d.get("peace") else "")
     txt = f"{d['from']} gives {bundle_str(d.get('give'))}; {d['to']} gives {bundle_str(d.get('get'))}"
     if d.get("peace"):
         txt += f"; peace {d['peace']} turns"
@@ -857,8 +891,11 @@ def _deals_lines(deals: dict, contracts: list, pid: str | None, max_deals: int) 
                    "influence):")
         for k in (mine + others)[:max_deals]:
             tag = " <- you pay" if k.get("payer") == pid else (" <- you receive" if k.get("payee") == pid else "")
-            per = ", ".join(f"{v} {r}" for r, v in (k.get("per_turn") or {}).items())
-            out.append(f"  {k['id']}: {k['payer']} pays {k['payee']} {per}/turn, {k.get('turns_left')} turns left{tag}")
+            if "per_turn" in k:
+                per = ", ".join(f"{v} {r}" for r, v in (k.get("per_turn") or {}).items()) + "/turn"
+            else:   # fog games: amounts shown only to the parties
+                per = "(amount shown only to the parties)"
+            out.append(f"  {k['id']}: {k['payer']} pays {k['payee']} {per}, {k.get('turns_left')} turns left{tag}")
     log = (deals.get("log") or [])[-max(3, max_deals // 2):]
     if log:
         out.append("Recent public deals: " + "; ".join(
@@ -899,8 +936,19 @@ def describe_event(ev: dict, pid: str | None = None) -> str:
     if t == "contract_completed":
         return f"contract {ev.get('contract')} completed ({who(ev.get('payer'))} → {who(ev.get('payee'))})"
     if t == "contract_default":
+        pen = f" (penalty {ev.get('penalty')} influence)" if "penalty" in ev else ""
         return (f"contract {ev.get('contract')} DEFAULTED: {who(ev.get('payer'))} could not pay "
-                f"{who(ev.get('payee'))} (penalty {ev.get('penalty')} influence)")
+                f"{who(ev.get('payee'))}{pen}")
+    if t == "spy_report":
+        return (f"your {ev.get('mission')} mission against {ev.get('target')} ({ev.get('invest')} gold): "
+                f"{ev.get('outcome')}")
+    if t == "spy_detected":
+        return (f"{who(ev.get('spy'))} ran a {ev.get('mission')} mission against you: {ev.get('outcome')} "
+                f"({'no report' if ev.get('outcome') == 'failed' else 'a report was obtained'})")
+    if t == "spy_incident":
+        return f"{who(ev.get('spy'))}'s spy mission against {who(ev.get('target'))} failed (public incident)"
+    if t == "counterintel":
+        return f"counter-intelligence +{ev.get('invest')} gold (pool {ev.get('pool')})"
     if t == "say":
         to = "everyone" if ev.get("to") == "all" else who(ev.get("to"))
         return f"{who(ev.get('from'))} → {to}: {ev.get('text')}"
@@ -928,6 +976,21 @@ def summarize_view(view: dict, pid: str | None = None, max_events: int = 12, max
                f"{season.get('turns_left')} turn(s) left, next {season.get('next')}).")
     if view.get("deadline"):
         out.append(f"Turn deadline in {max(0.0, view['deadline'] - time.time()):.0f}s.")
+    fog = _fog_active(view)
+    visible = (view.get("map") or {}).get("visible") if fog else None
+    if fog:
+        n = (view.get("fog") or {}).get("visible_tiles")
+        out.append("Fog of war: other players' resources, units, military_power, upkeep and score are hidden; "
+                   "economic and influence progress are rounded down to steps of 0.1; armies are listed on the "
+                   f"{n if n is not None else '?'} tiles in your sight.")
+
+    def in_sight(x: int, y: int) -> bool:
+        if not fog:
+            return True
+        try:
+            return bool(visible) and visible[y][x] == "1"
+        except (IndexError, TypeError):
+            return False
 
     if pid and me:
         res = you.get("resources") or me.get("resources", {})
@@ -989,7 +1052,8 @@ def summarize_view(view: dict, pid: str | None = None, max_events: int = 12, max
                 tag = " (treaty partner)" if a["owner"] in partners else ""
                 nearby.append(f"  {a['owner']}{tag} at [{a['x']},{a['y']}]: {_units_str(a['units'])} "
                                f"(power {_power(a['units'], rules)}), {d} tile(s) from {c['name']}")
-        out.append("Other players' armies within 3 tiles of your cities: " + ("\n" + "\n".join(nearby) if nearby else "none"))
+        out.append("Other players' armies within 3 tiles of your cities" + (" (in your sight)" if fog else "") + ": "
+                   + ("\n" + "\n".join(nearby) if nearby else "none"))
 
         # every other player's city: walls and the units standing in it (all public)
         on_tile = {(a["x"], a["y"], a["owner"]): a["units"] for a in view.get("armies", [])}
@@ -999,7 +1063,7 @@ def summarize_view(view: dict, pid: str | None = None, max_events: int = 12, max
             b = c.get("buildings", {})
             units = on_tile.get((c["x"], c["y"], c["owner"])) or {}
             inside = (f"{_units_str(units)} (unit power {_power(units, rules)})"
-                      if any(units.values()) else "no units")
+                      if any(units.values()) else "no units" if in_sight(c["x"], c["y"]) else "units not in sight")
             lines.append(f"  {c['owner']} {c['name']} at [{c['x']},{c['y']}]"
                          f"{' (original capital)' if c.get('capital') else ''}: walls {b.get('walls', 0)}, "
                          f"garrison {c.get('garrison', 0)}, {inside}, wonder stage {c.get('wonder_stage', 0)}")
@@ -1053,14 +1117,17 @@ def summarize_view(view: dict, pid: str | None = None, max_events: int = 12, max
                    f"economic {thr.get('economic_gold')} gold, else best score at turn {thr.get('max_turns')}.")
     out.append("Players (score | cities tiles | power | food wood stone gold infl | victory progress toward every "
                "condition | reputation):")
-    for p in sorted(players.values(), key=lambda p: -p.get("score", 0)):
+    for p in sorted(players.values(), key=lambda p: (p.get("score") is None, -(p.get("score") or 0))):
         flag = "" if p.get("alive", True) else " [eliminated]"
         me_tag = " <- you" if p["id"] == pid else ""
-        r = p.get("resources", {})
-        out.append(f"  {p['id']} {p['name']}{flag}{me_tag}: {p.get('score')} | {p.get('cities')} {p.get('tiles')} | "
-                   f"{p.get('military_power')} | "
-                   + " ".join(str(r.get(k, 0)) for k in RESOURCES) + f" | {_progress_str(p, thr)}" + _reputation_str(p))
+        r = p.get("resources")
+        stock = " ".join(str(r.get(k, 0)) for k in RESOURCES) if r is not None else " ".join("?" for _ in RESOURCES)
+        out.append(f"  {p['id']} {p['name']}{flag}{me_tag}: {_num(p.get('score'))} | {p.get('cities')} "
+                   f"{p.get('tiles')} | {_num(p.get('military_power'))} | "
+                   + stock + f" | {_progress_str(p, thr)}" + _reputation_str(p))
     out += _relic_lines(view, players, rules)
+    if "fog" in view:
+        out += _fog_lines(view, pid)
 
     events = view.get("events", [])
     if events:
@@ -1082,6 +1149,35 @@ def summarize_view(view: dict, pid: str | None = None, max_events: int = 12, max
         out.append(f"\nGAME OVER: winner {res.get('winner')} by {res.get('condition')} on turn {res.get('turn')}; "
                    f"placements {res.get('placements')}")
     return "\n".join(out)
+
+
+def _fog_lines(view: dict, pid: str | None) -> list[str]:
+    """Fog games: remembered stacks, espionage reports, own counter-intelligence."""
+    out: list[str] = []
+    turn = view.get("turn") or 0
+    seen = view.get("sightings") or []
+    if seen:
+        out.append("Armies last seen (not in sight now):")
+        out += [f"  {s['owner']} at [{s['x']},{s['y']}]: {_units_str(s.get('units') or {})} (turn {s.get('turn')}, "
+                f"{turn - (s.get('turn') or 0)} turn(s) ago)" for s in seen]
+    reports = view.get("intel") or []
+    if reports:
+        out.append("Intel reports:")
+        for r in reports:
+            d = r.get("data") or {}
+            if r.get("mission") == "military":
+                facts = (f"units {_units_str(d.get('units') or {})}, military power {d.get('military_power')}, "
+                         f"upkeep {d.get('upkeep')}, {len(d.get('armies') or [])} stack(s)")
+            else:
+                res = d.get("resources") or {}
+                facts = ("resources " + ", ".join(f"{k} {res.get(k, 0)}" for k in RESOURCES)
+                         + f", score {d.get('score')}")
+            out.append(f"  {r.get('target')} {r.get('mission')} ({r.get('outcome')}, as of turn "
+                       f"{r.get('as_of_turn')}): {facts}")
+    ci = (view.get("you") or {}).get("counterintel")
+    if pid and ci:
+        out.append(f"Your counter-intelligence: pool {ci.get('pool')}, rating {ci.get('rating')}.")
+    return out
 
 
 # ====================================================================== CLI

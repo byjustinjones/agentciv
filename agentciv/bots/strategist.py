@@ -128,7 +128,41 @@ class StrategistBot(PlannerBot):
     def pipeline(self):
         return [self.observe, self.diplomacy, self.food_safety, self.plan_site, self.defend,
                 self.plan_goal_spending, self.relic_ops, self.plan_military, self.sell, self.goal_spending,
-                self.field_army, self.expand, self.develop, self.garrison_moves]
+                self.field_army, self.expand, self.develop, self.garrison_moves, self.espionage]
+
+    ESPIONAGE_LEAD = 0.5          # fog games: rival progress (banded) that triggers a treasury spy
+    COUNTERINTEL_PER_TURN = 50    # fog games: gold into counter-intelligence while our own lead is >= that
+    ESPIONAGE_RESERVE = 100       # gold kept back
+
+    def espionage(self) -> None:
+        """Fog games only (rules §14): pay counter-intelligence while close to
+        an economic/influence win; spy on the treasury of the rival closest to
+        one (no fresh report), investing twice its base rating."""
+        w, p = self.w, self.p
+        if not (w.view.get("fog") or {}).get("active"):
+            return
+        keep = {"gold": self.ESPIONAGE_RESERVE}
+
+        def lead(row: dict) -> float:
+            vp = row.get("victory_progress") or {}
+            return max(float(vp.get("economic") or 0), float(vp.get("influence") or 0))
+
+        if lead(w.players.get(w.me) or {}) >= self.ESPIONAGE_LEAD:
+            cost = {"gold": self.COUNTERINTEL_PER_TURN}
+            if p.can(cost, keep):
+                p.orders.append({"type": "counterintel", "invest": self.COUNTERINTEL_PER_TURN})
+                p.pay(cost)
+        known = {r.get("target") for r in w.view.get("intel") or () if r.get("mission") == "treasury"}
+        cands = sorted((-lead(w.players[q]), q) for q in w.rivals
+                       if q in w.players and q not in known and lead(w.players[q]) >= self.ESPIONAGE_LEAD)
+        if not cands:
+            return
+        q = cands[0][1]
+        cities = int(w.players[q].get("cities") or 0)
+        invest = min(C.SPY_MAX_INVEST, max(C.SPY_MIN_INVEST, 2 * (C.CI_BASE + C.CI_PER_CITY * cities)))
+        if p.can({"gold": invest}, keep):
+            p.orders.append({"type": "spy", "target": q, "mission": "treasury", "invest": invest})
+            p.pay({"gold": invest})
 
     def plan_military(self) -> None:
         self.raid = None

@@ -260,6 +260,7 @@
       if (path === 'api/games') return this.file('games');
       if (path === 'api/bots') return this.file('bots');
       if (path === 'api/leaderboard') return this.file('leaderboard');
+      if (path === 'api/leaderboard?mode=fog') return [];
       let m = path.match(/^api\/games\/([^/?]+)\/replay(\?.*)?$/);
       if (m) {
         const { frames } = await this.framesFor(decodeURIComponent(m[1]));
@@ -410,7 +411,7 @@
           ? `<button class="btn ghost small" data-joincmd="${esc(g.game_id)}" title="Copy a curl command that joins this game">Join cmd</button>` : '';
         return `<tr>
           <td><span class="game-name">${esc(g.name || g.game_id)}</span><span class="game-id">${esc(g.game_id)}</span></td>
-          <td><span class="badge ${esc(g.status)}">${esc(g.status)}</span></td>
+          <td><span class="badge ${esc(g.status)}">${esc(g.status)}</span>${g.fog ? ' <span class="badge fog" title="fog of war (rules §14)">fog</span>' : ''}</td>
           <td class="num">${g.status === 'lobby' ? '–' : fmt(num(g.turn))}</td>
           <td><div class="plist">${pills}${openPill}</div></td>
           <td class="row-actions">${join}<a class="btn small" href="#/game/${encodeURIComponent(g.game_id)}">Watch</a></td>
@@ -424,7 +425,13 @@
 
     async refreshLeaderboard() {
       try {
-        const rows = await api.get('api/leaderboard');
+        const sel = $('#lb-mode');
+        if (sel && !sel.dataset.bound) {
+          sel.dataset.bound = '1';
+          sel.addEventListener('change', () => this.refreshLeaderboard());
+        }
+        const mode = sel ? sel.value : 'standard';
+        const rows = await api.get(mode === 'fog' ? 'api/leaderboard?mode=fog' : 'api/leaderboard');
         const body = $('#lb-body');
         if (!rows || !rows.length) {
           body.innerHTML = '<tr><td colspan="8" class="muted">No rated games yet.</td></tr>';
@@ -521,6 +528,7 @@
         bots,
         fill_with_bots: f.fill_with_bots.checked,
       };
+      if (f.fog && f.fog.checked) body.fog = true;
       if (f.name.value.trim()) body.name = f.name.value.trim();
       if (f.seed.value !== '') body.seed = parseInt(f.seed.value, 10);
       if (f.lobby_timeout.value !== '' && parseFloat(f.lobby_timeout.value) > 0) body.lobby_timeout = parseFloat(f.lobby_timeout.value);
@@ -2015,7 +2023,7 @@
         const inc = p.income?.[r];
         const incHtml = typeof inc === 'number' && p.alive !== false
           ? `<span class="inc${inc < 0 ? ' neg' : ''}">${inc >= 0 ? '+' : ''}${fmt(inc)}</span>` : '';
-        return `<td class="num">${fmt(val)}${incHtml}</td>`;
+        return `<td class="num">${val === null ? '?' : fmt(val)}${incHtml}</td>`;
       };
       $('#players-table').innerHTML = `<thead><tr><th>Player</th>
           <th class="num" title="Cities">City</th><th class="num" title="Tiles owned">Tiles</th>${resHead}
@@ -2031,8 +2039,8 @@
               ${num(p.betrayals) ? `<span class="betray" title="betrayals">⚑${p.betrayals}</span>` : ''}${num(p.reputation?.defaults) ? `<span class="betray" title="contract defaults">⚠${p.reputation.defaults}</span>` : ''}</div></td>
             <td class="num">${fmt(p.cities)}</td><td class="num">${fmt(p.tiles)}</td>
             ${RESOURCES.map((r) => cell(p, r)).join('')}
-            <td class="num" title="${esc(units)}">${fmt(p.military_power)}</td>
-            <td class="num score">${fmt(p.score)}</td></tr>`;
+            <td class="num" title="${esc(units)}">${p.military_power === null ? '?' : fmt(p.military_power)}</td>
+            <td class="num score">${p.score === null ? '?' : fmt(p.score)}</td></tr>`;
         }).join('')}</tbody>`;
     },
 
