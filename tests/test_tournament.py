@@ -100,3 +100,24 @@ def test_count_events_includes_seized_bank_gold():
          "turns_left": 5, "seized": 250}])
     assert trade["p1"]["defaults"] == 1 and trade["p1"]["gold_paid"] == 250 and trade["p1"]["net_value"] == -250
     assert trade["p2"]["gold_received"] == 250 and trade["p2"]["net_value"] == 250
+
+
+def test_treaty_counters_per_game_and_in_the_summary():
+    from collections import Counter
+
+    from agentciv.engine.testing import new_game, run_turn
+    g = new_game(4)
+    tally = Counter()
+    run_turn(g, {"p1": [{"type": "propose_treaty", "to": "p2", "turns": 20}]})
+    ev = run_turn(g, {"p2": [{"type": "accept_treaty", "from": "p1"}]})
+    T._count_treaties(g, tally, ev)
+    g.player("p1").resources["influence"] = 100
+    g.player("p1").legacy = 100
+    ev = run_turn(g, {"p1": [{"type": "break_treaty", "with": "p2"}]})
+    T._count_treaties(g, tally, ev)
+    tot = T._treaty_totals(tally)
+    assert (tot["signed"], tot["broken"], tot["break_influence"], tot["legacy_lost"]) == (1, 1, 50, 10)
+    assert tot["avg_live"] == 0.25 and tot["peak_live"] == 0.5 and tot["peak_max"] == 1
+    s = T.run_tournament(["rusher", "turtle", "economist"], games=2, players=3, seed=2, max_turns=25)
+    assert set(T.TREATY_KEYS) <= set(s["treaties_per_game"]) and "treaties per game: signed" in T.format_summary(s)
+    assert all("treaties" in r for r in s["results"])

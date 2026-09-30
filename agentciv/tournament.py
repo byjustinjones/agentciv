@@ -76,6 +76,11 @@ TRADE_KEYS = ("proposed", "countered", "accepted", "rejected", "withdrawn", "fai
 # base market prices (gold per unit) used to value what changes hands in deals
 BASE_PRICE = {r: g / a for r, (a, g) in C.MARKET_POOLS_PER_PLAYER.items()}
 BASE_PRICE["gold"] = 1.0
+# per-game treaty and war counters (rules §9): event counts, gold moved by
+# breaks, and live treaties per living player (average over turns and peak)
+TREATY_KEYS = ("signed", "renewals", "broken", "expired", "released", "bonds_posted",
+               "break_influence", "legacy_lost", "bank_share", "bond_paid", "refunds", "break_paid",
+               "break_debt", "contracts_cancelled", "battles", "cities_captured")
 
 
 def _bundle_now_value(b: dict) -> float:
@@ -150,6 +155,42 @@ def _count_events(g: Game, trade: dict, kinds: Counter, events: list) -> None:
                 trade[payee]["net_value"] += seized
 
 
+def _count_treaties(g: Game, tally: dict, events: list) -> None:
+    """Add one turn's treaty, battle and capture events to ``tally``, then
+    sample the live treaties per living player."""
+    for e in events:
+        t = e.get("type")
+        if t == "treaty_signed":
+            tally["renewals" if e.get("renewal") else "signed"] += 1
+            tally["bonds_posted"] += sum((e.get("bond") or {}).values())
+        elif t == "treaty_broken":
+            tally["broken"] += 1
+            for key, field in (("break_influence", "cost"), ("legacy_lost", "legacy_lost"),
+                               ("bank_share", "bank_share"), ("bond_paid", "bond"), ("refunds", "refund"),
+                               ("break_paid", "paid"), ("break_debt", "debt")):
+                tally[key] += int(e.get(field, 0) or 0)
+            tally["contracts_cancelled"] += len(e.get("cancelled") or ())
+        elif t in ("treaty_expired", "treaty_released"):
+            tally[t.split("_")[1]] += 1
+        elif t == "battle":
+            tally["battles"] += 1
+        elif t == "city_captured":
+            tally["cities_captured"] += 1
+    for p in g.players:
+        if p.alive:
+            n = g.treaties_held(p.id)
+            tally["_live_sum"] += n
+            tally["_live_n"] += 1
+            tally[("_peak", p.id)] = max(tally[("_peak", p.id)], n)
+
+
+def _treaty_totals(tally: Counter) -> dict:
+    peaks = [v for k, v in tally.items() if isinstance(k, tuple)]
+    return dict({k: tally.get(k, 0) for k in TREATY_KEYS},
+                avg_live=round(tally["_live_sum"] / max(1, tally["_live_n"]), 3),
+                peak_live=round(sum(peaks) / max(1, len(peaks)), 3), peak_max=max(peaks, default=0))
+
+
 def run_game(bot_specs: list, seed: int, max_turns: int = C.DEFAULT_MAX_TURNS,
              game_id: str | None = None, record_views: bool = False,
              rounds: int = NEGOTIATION_ROUNDS, fog: bool = False) -> dict:
@@ -188,6 +229,7 @@ def run_game(bot_specs: list, seed: int, max_turns: int = C.DEFAULT_MAX_TURNS,
     trade = {pid: dict.fromkeys(TRADE_KEYS, 0) for pid in bots}
     kinds: Counter = Counter()
     fog_events: Counter = Counter()
+    tally: Counter = Counter()
     while not g.finished:
         alive = g.alive_players()
         for rnd in range(max(0, int(rounds))):
@@ -226,6 +268,7 @@ def run_game(bot_specs: list, seed: int, max_turns: int = C.DEFAULT_MAX_TURNS,
             orders_n[lab] += len(orders) if isinstance(orders, list) else 0
         step_events = g.step()
         _count_events(g, trade, kinds, step_events)
+        _count_treaties(g, tally, step_events)
         if fog:
             fog_events.update(e["type"] for e in step_events
                               if e["type"] in ("battle", "spy_report", "spy_incident", "counterintel"))
@@ -256,6 +299,7 @@ def run_game(bot_specs: list, seed: int, max_turns: int = C.DEFAULT_MAX_TURNS,
                                  contracts_honoured=g.player(pid).contracts_honoured)
                   for pid, t in trade.items()},
         "deal_kinds": dict(kinds),
+        "treaties": _treaty_totals(tally),
         "deals_executed": len(g.deal_log),
         "bot_exceptions": bot_errors,
         "last_errors": {lab[pid]: b.last_error for pid, b in bots.items() if getattr(b, "last_error", None)},
@@ -419,8 +463,10 @@ def summarize(results: list, wall_seconds: float = 0.0) -> dict:
                  "avg_place": round(v[2] / v[0], 2) if v[0] else None}
                 for k, v in sorted(tab.items(), key=lambda kv: key_fn(kv[0]))]
     fog_total: Counter = Counter()
+    treaty_total: Counter = Counter()
     for r in results:
         fog_total.update(r.get("fog_events") or {})
+        treaty_total.update(r.get("treaties") or {})
     extra = {}
     if any(r.get("fog") for r in results):
         extra["fog_events_per_game"] = {k: round(v / n, 2) for k, v in sorted(fog_total.items())}
@@ -440,6 +486,8 @@ def summarize(results: list, wall_seconds: float = 0.0) -> dict:
         "wall_seconds": round(wall_seconds, 2),
         "deals_per_game": round(deals_total / n, 2) if n else 0,
         "deal_kinds_per_game": {k: round(v / n, 2) for k, v in sorted(kinds.items(), key=lambda kv: -kv[1])} if n else {},
+        "treaties_per_game": {k: round(treaty_total.get(k, 0) / n, 2)
+                              for k in TREATY_KEYS + ("avg_live", "peak_live", "peak_max")} if n else {},
         "results": [{k: v for k, v in r.items() if k != "frames"} for r in results],
     }
 
@@ -480,6 +528,16 @@ def format_summary(s: dict) -> str:
                          f"{t.get('contracts_payer', 0):>7.2f}{t.get('contracts_payee', 0):>7.2f}"
                          f"{t.get('defaults', 0):>6.2f}{t.get('gold_paid', 0):>9.0f}{t.get('gold_received', 0):>9.0f}"
                          f"{t.get('net_value', 0):>9.0f}{b.get('negotiate_ms_per_call', 0):>8.2f}")
+    tp = s.get("treaties_per_game") or {}
+    if tp:
+        lines.append("treaties per game: " + ", ".join(f"{k} {tp[k]}" for k in ("signed", "renewals", "broken",
+                                                                               "expired", "released"))
+                     + f"; live per player avg {tp['avg_live']}, peak {tp['peak_live']} (max {tp['peak_max']})"
+                     + f"; battles {tp['battles']}, cities captured {tp['cities_captured']}")
+        if tp.get("broken"):
+            lines.append("treaty breaks per game: " + ", ".join(
+                f"{k} {tp[k]}" for k in ("break_influence", "legacy_lost", "bank_share", "bond_paid", "refunds",
+                                         "break_paid", "break_debt", "contracts_cancelled")))
     if "fog_events_per_game" in s:
         lines.append("fog games; per game: " + (", ".join(f"{k} {v}" for k, v in s["fog_events_per_game"].items())
                                                 or "no battles or espionage"))
