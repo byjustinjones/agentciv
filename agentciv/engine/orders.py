@@ -449,7 +449,6 @@ class Validator:
         self.ctx.broken.add(w)
         return {"type": "break_treaty", "with": w}
 
-
     # ------------------------------------------------------ fog games (§14)
     def v_spy(self, o: dict) -> dict:
         target = self.other_player(o.get("target"), "target")

@@ -11,7 +11,7 @@ from agentciv.bots import get_bot
 from agentciv.engine import constants as C
 from agentciv.engine import fog as F
 from agentciv.engine.orders import prevalidate
-from agentciv.engine.testing import events_of, new_game, run_turn, sandbox
+from agentciv.engine.testing import new_game, run_turn, sandbox
 
 from test_engine_views import PLAYER_KEYS
 

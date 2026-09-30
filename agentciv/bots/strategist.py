@@ -152,6 +152,15 @@ class StrategistBot(PlannerBot):
             if p.can(cost, keep):
                 p.orders.append({"type": "counterintel", "invest": self.COUNTERINTEL_PER_TURN})
                 p.pay(cost)
+        # a failed mission doubles the next investment against that target;
+        # a report resets it (last turn's spy_report events, counted once per turn)
+        fails = self.memory.setdefault("spy_fails", {})
+        if self.memory.get("spy_seen_turn") != w.turn:
+            self.memory["spy_seen_turn"] = w.turn
+            for e in w.view.get("events") or ():
+                if e.get("type") == "spy_report" and e.get("player") == w.me:
+                    t = e.get("target")
+                    fails[t] = fails.get(t, 0) + 1 if e.get("outcome") == "failed" else 0
         known = {r.get("target") for r in w.view.get("intel") or () if r.get("mission") == "treasury"}
         cands = sorted((-lead(w.players[q]), q) for q in w.rivals
                        if q in w.players and q not in known and lead(w.players[q]) >= self.ESPIONAGE_LEAD)
@@ -159,7 +168,8 @@ class StrategistBot(PlannerBot):
             return
         q = cands[0][1]
         cities = int(w.players[q].get("cities") or 0)
-        invest = min(C.SPY_MAX_INVEST, max(C.SPY_MIN_INVEST, 2 * (C.CI_BASE + C.CI_PER_CITY * cities)))
+        base = 2 * (C.CI_BASE + C.CI_PER_CITY * cities) * 2 ** min(5, fails.get(q, 0))
+        invest = min(C.SPY_MAX_INVEST, max(C.SPY_MIN_INVEST, base))
         if p.can({"gold": invest}, keep):
             p.orders.append({"type": "spy", "target": q, "mission": "treasury", "invest": invest})
             p.pay({"gold": invest})
