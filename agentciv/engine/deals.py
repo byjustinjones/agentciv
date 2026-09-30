@@ -696,23 +696,33 @@ def _settle_detail(g: "Game", d: dict, viewer: str | None = None) -> tuple:
 
         def units_at(x, y):
             return full_units(x, y) if g.idx(x, y) in sight else ()
-    for giver, receiver, bundle, back in ((fp, tp, d["give"], d["get"]), (tp, fp, d["get"], d["give"])):
-        tiles_only = {k: v for k, v in bundle.items() if k not in C.TRADABLE}
-        if viewer is None or giver.id == viewer:
-            err = delivery_problem(giver.id, giver.resources, bundle, info)
-            if err:
-                return err, giver.id, delivery_problem(giver.id, giver.resources, tiles_only, info) is None
+
+    def side(giver, receiver, bundle, back, public_only: bool) -> str | None:
+        if public_only or not (viewer is None or giver.id == viewer):
+            # the other side's stock is never looked at by a viewer
+            err = delivery_problem(giver.id, {}, {k: v for k, v in bundle.items() if k not in C.TRADABLE}, info)
         else:
-            err = delivery_problem(giver.id, {}, tiles_only, info)
+            err = delivery_problem(giver.id, giver.resources, bundle, info)
+        if err or not bundle.get("tiles"):
+            return err
+        received = tiles_received(g.deal_log, g.turn, receiver.id)
+        return land_problem(receiver.id, bundle["tiles"], owner_at, None if public_only else units_at,
+                            back.get("tiles", ()), received)
+
+    sides = ((fp, tp, d["give"], d["get"]), (tp, fp, d["get"], d["give"]))
+    if g.fog:
+        # fog games: every public check (tile owners, cities, relics,
+        # adjacency, the per-turn cap) on both sides runs before any check
+        # on hidden state (stock, units on a tile), so a deal that fails on
+        # public grounds is always reported by its public reason
+        for giver, receiver, bundle, back in sides:
+            err = side(giver, receiver, bundle, back, True)
             if err:
                 return err, giver.id, False
-        if bundle.get("tiles"):
-            back_tiles = back.get("tiles", ())
-            received = tiles_received(g.deal_log, g.turn, receiver.id)
-            err = land_problem(receiver.id, bundle["tiles"], owner_at, units_at, back_tiles, received)
-            if err:
-                hidden = land_problem(receiver.id, bundle["tiles"], owner_at, None, back_tiles, received) is None
-                return err, giver.id, hidden
+    for giver, receiver, bundle, back in sides:
+        err = side(giver, receiver, bundle, back, False)
+        if err:
+            return err, giver.id, g.fog
     return None, None, False
 
 

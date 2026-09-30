@@ -2023,7 +2023,7 @@
         const inc = p.income?.[r];
         const incHtml = typeof inc === 'number' && p.alive !== false
           ? `<span class="inc${inc < 0 ? ' neg' : ''}">${inc >= 0 ? '+' : ''}${fmt(inc)}</span>` : '';
-        return `<td class="num">${val === null ? '?' : fmt(val)}${incHtml}</td>`;
+        return `<td class="num">${val === null || p.resources === null ? '?' : fmt(val)}${incHtml}</td>`;
       };
       $('#players-table').innerHTML = `<thead><tr><th>Player</th>
           <th class="num" title="Cities">City</th><th class="num" title="Tiles owned">Tiles</th>${resHead}
@@ -2090,7 +2090,8 @@
             return `<div class="bar${isLead ? ' lead' : ''}${val === 0 ? ' zero' : ''}" title="${esc(p.name)} — ${esc(detail(p, c))}"><i style="width:${(val * 100).toFixed(1)}%;background:${esc(col)}"></i><b>${pct(val)}</b></div>`;
           }).join('');
       }).join('');
-      const scoreLeader = rows.find((p) => p.alive !== false);
+      // fog games: other players' scores are hidden, so no leader is named
+      const scoreLeader = v.fog?.active ? null : rows.find((p) => p.alive !== false && p.score != null);
       const maxT = num(th.max_turns, num(v.max_turns, 150));
       $('#race').innerHTML = `${chips ? `<div class="race-summary">${chips}</div>` : ''}
         <div class="race">${header}${body}</div>

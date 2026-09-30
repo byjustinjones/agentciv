@@ -186,6 +186,24 @@ def test_sighting_cleared_when_tile_seen_empty():
     assert 9 * 18 + 9 not in g.sightings["p1"]          # seen empty at the start of a turn: forgotten
 
 
+def test_military_report_keeps_other_owners_on_tile():
+    g = world()
+    g.place_units(8, 8, "p1", {"cavalry": 1})
+    g.place_units(9, 9, "p2", {"infantry": 3})
+    g.place_units(10, 9, "p3", {"infantry": 2})
+    run_turn(g, {"p1": [{"type": "move", "from": [8, 8], "path": [[7, 8], [6, 8]]}]})
+    assert {(s["x"], s["y"], s["owner"]) for s in g.player_view("p1")["sightings"]} == \
+        {(9, 9, "p2"), (10, 9, "p3")}
+    # a report places p2's stack on (10, 9), where p1 remembers p3's older stack
+    F._remember_report(g, "p1", "p2", [{"x": 10, "y": 9, "units": {"infantry": 3}}], g.turn)
+    seen = sorted((s["x"], s["y"], s["owner"], s["turn"]) for s in g.player_view("p1")["sightings"])
+    assert seen == [(10, 9, "p2", g.turn), (10, 9, "p3", 0)]
+    # each owner's stack expires on its own turn stamp
+    for _ in range(C.FOG_SIGHTING_TURNS):
+        run_turn(g)
+    assert [(s["owner"], s["turn"]) for s in g.player_view("p1")["sightings"]] == [("p2", 1)]
+
+
 # ============================================================ events
 def test_out_of_sight_recruit_is_hidden():
     g = world()
@@ -338,12 +356,29 @@ def test_open_deal_view_independent_of_counterparty_stock():
 
 def test_open_deal_units_checked_only_in_sight():
     g = world()
-    g.set_owner(13, 5, "p2")                   # p2's tile far from p1
     g.set_owner(5, 2, "p1")
     g.set_owner(6, 2, "p2")                    # p2's tile next to p1's land, in sight
     g.place_units(6, 2, "p3", {"infantry": 1})
     g.diplomacy("p1", [{"type": "propose", "to": "p2", "give": {"wood": 5}, "get": {"tiles": [[6, 2]]}}])
     assert "holds units of p3" in g.player_view("p1")["deals"]["open"][0]["problem"]
+
+
+def test_open_deal_units_out_of_sight_not_checked():
+    g = world()
+    g.set_owner(5, 2, "p1")
+    g.set_owner(6, 2, "p2")
+    g.set_owner(7, 2, "p2")                    # chained tile: out of p1's sight (p1 sees x <= 6)
+    assert g.idx(7, 2) not in F.vision(g, "p1") and g.idx(7, 2) in F.vision(g, "p2")
+    g.place_units(7, 2, "p3", {"infantry": 1})
+    res = g.diplomacy("p1", [{"type": "propose", "to": "p2", "give": {"wood": 5},
+                              "get": {"tiles": [[6, 2], [7, 2]]}}])
+    mine = g.player_view("p1")["deals"]["open"][0]
+    assert mine["problem"] is None and mine["deliverable"] is True
+    assert "holds units of p3" in g.player_view("p2")["deals"]["open"][0]["problem"]   # p2 sees its tile
+    out = g.diplomacy("p2", [{"type": "accept", "deal": res[0]["deal"]}])[0]
+    assert not out["ok"] and "holds units of p3" in out["error"]      # the giver itself: exact
+    rec = g.player_view("p1")["deals"]["recent"][0]
+    assert rec["status"] == "failed" and rec["reason"] == "p2 cannot deliver the agreed terms"
 
 
 def test_accept_failure_reason_is_generic_for_hidden_causes():
@@ -372,6 +407,75 @@ def test_accept_failure_public_cause_is_exact():
     out = g.diplomacy("p2", [{"type": "accept", "deal": res[0]["deal"]}])[0]
     assert "not owned by p2" in out["error"]
     assert "not owned by p2" in g.player_view("p1")["deals"]["recent"][0]["reason"]
+
+
+def test_accept_failure_public_cause_beats_hidden_shortfall():
+    # the proposer is short (hidden) and its offered tile changed hands (public)
+    g = world()
+    g.set_owner(5, 2, "p1")
+    g.set_owner(6, 2, "p2")
+    g.player("p1").resources["gold"] = 1000
+    res = g.diplomacy("p1", [{"type": "propose", "to": "p2", "give": {"gold": 500, "tiles": [[5, 2]]},
+                              "get": {"wood": 10}}])
+    g.player("p1").resources["gold"] = 123
+    g.set_owner(5, 2, "p2")
+    assert g.player_view("p2")["deals"]["open"][0]["problem"] == "tile [5, 2] is not owned by p1"
+    out = g.diplomacy("p2", [{"type": "accept", "deal": res[0]["deal"]}])[0]
+    assert out["error"].endswith("tile [5, 2] is not owned by p1") and "short" not in out["error"]
+    assert g.player_view("p2")["deals"]["recent"][0]["reason"] == "tile [5, 2] is not owned by p1"
+    assert [e["reason"] for e in g.inbox("p1")["items"] if e["type"] == "deal_failed"] == \
+        ["tile [5, 2] is not owned by p1"]
+    # the accepter is short (hidden) and offers a tile it no longer owns: the
+    # proposer learns only the public reason
+    g = world()
+    g.set_owner(5, 2, "p1")
+    g.set_owner(6, 2, "p2")
+    res = g.diplomacy("p1", [{"type": "propose", "to": "p2", "give": {"wood": 5},
+                              "get": {"gold": 999, "tiles": [[6, 2]]}}])
+    g.set_owner(6, 2, "p3")
+    out = g.diplomacy("p2", [{"type": "accept", "deal": res[0]["deal"]}])[0]
+    assert g.player_view("p1")["deals"]["recent"][0]["reason"] == "tile [6, 2] is not owned by p2"
+    # one side short (hidden), the other side's tile invalid (public): public reason
+    g = world()
+    g.set_owner(5, 2, "p1")
+    g.set_owner(6, 2, "p2")
+    res = g.diplomacy("p1", [{"type": "propose", "to": "p2", "give": {"wood": 5}, "get": {"tiles": [[6, 2]]}}])
+    g.player("p1").resources["wood"] = 0
+    g.set_owner(6, 2, "p3")
+    out = g.diplomacy("p2", [{"type": "accept", "deal": res[0]["deal"]}])[0]
+    assert out["error"].endswith("tile [6, 2] is not owned by p2")
+    assert g.player_view("p1")["deals"]["recent"][0]["reason"] == "tile [6, 2] is not owned by p2"
+
+
+TRADING_BOTS = ("strategist", "strategist_lite", "economist", "rusher", "turtle", "random")
+
+
+def _bot_rejection_texts(name, stock):
+    g = new_game(2, seed=3, max_turns=60, fog=True)
+    bot = get_bot(name, seed=1)
+    for _ in range(3):
+        g.submit_orders("p2", bot.act(g.player_view("p2")))
+        g.step()
+    g.player("p2").resources.update({r: stock for r in C.TRADABLE})
+    ask = {r: 1000 for r in C.TRADABLE}
+    res = g.diplomacy("p1", [{"type": "propose", "to": "p2", "give": {"wood": 1}, "get": ask}])
+    assert res[0]["ok"], res
+    g.diplomacy("p2", bot.negotiate(g.player_view("p2")))
+    v = g.player_view("p1")
+    return ([(e["type"], e.get("message"), e.get("reason")) for e in g.inbox("p1")["items"]],
+            [(d["status"], d.get("reason"), d.get("message")) for d in v["deals"]["recent"]])
+
+
+@pytest.mark.parametrize("name", TRADING_BOTS)
+def test_bot_rejection_never_reveals_stock(name):
+    low, high = _bot_rejection_texts(name, 37), _bot_rejection_texts(name, 613)
+    assert low == high
+    for part in low:
+        for item in part:
+            assert not any(str(n) in json.dumps(item) for n in (963, 387, 37, 613)), item
+    rejected = [m for t, m, _ in low[0] if t == "deal_rejected"]
+    if name != "random":
+        assert rejected == ["no deal"]
 
 
 # ============================================================ order validation

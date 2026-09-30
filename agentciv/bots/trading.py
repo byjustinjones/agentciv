@@ -121,6 +121,8 @@ class Trader:
         """Refuse to deal with ``q`` (``deal``: the deal in question, if any)."""
         return False
 
+    FOG_REJECT = "no deal"       # the one rejection text used in fog games
+
     WAR_SUPPLY_VETO = True       # no food/wood for a hostile army that could reach us...
     WARMONGER = 1.5              # ...nor for an army this many times the average size
 
@@ -187,6 +189,10 @@ class Trader:
         mine = [d for d in open_ if d.get("from") == w.me]
         actions: list = []
         best = None
+        # fog games: every rejection carries one fixed text, so a rejection
+        # never describes the bot's hidden stock or what it sees (a deal it
+        # cannot settle and one it declines read the same)
+        fog = bool((view.get("fog") or {}).get("active"))
         for d in incoming:
             try:
                 verdict, payload = self.respond(d)
@@ -198,7 +204,7 @@ class Trader:
             elif verdict == "counter":
                 actions.append(payload)
             elif verdict == "reject":
-                actions.append({"type": "reject", "deal": d["id"], "message": payload})
+                actions.append({"type": "reject", "deal": d["id"], "message": self.FOG_REJECT if fog else payload})
         if best is not None:
             actions.insert(0, {"type": "accept", "deal": best[1]["id"]})
             mem["accepted"] = mem.get("accepted", 0) + 1

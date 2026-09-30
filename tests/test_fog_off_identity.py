@@ -2,9 +2,11 @@
 
 ``tests/data/nofog_golden.json`` was recorded at the base commit (before fog
 existed) by ``tests/data/make_nofog_golden.py``: the orders five bots
-submitted over 12 turns on two seeds, and a digest of every player view, the
-public and full spectator views and every ``step()`` result. Replaying the
-orders must reproduce every digest (``costs.fog`` is the only allowed
+submitted over 12 turns on two seeds (each turn preceded by rounds of live
+diplomacy through ``Game.diplomacy``), and a digest of every player view, the
+public and full spectator views, every diplomacy result, every inbox after
+the diplomacy and every ``step()`` result. Replaying the actions and orders
+must reproduce every digest (``costs.fog`` is the only allowed
 difference: the rules JSON is shared by all games).
 """
 import importlib.util
@@ -36,6 +38,9 @@ def test_views_identical_to_base_commit(game):
     turns = game["turns"]
     assert GEN.snapshot(g) == turns[0]["digests"]
     for k, turn in enumerate(turns[1:], start=1):
+        for n, (pid, acts, res) in enumerate(turn["diplomacy"]):
+            assert GEN.digest(g.diplomacy(pid, acts)) == res, f"turn {k}: diplomacy call {n} differs"
+        assert GEN.snapshot(g, inbox=True) == turn["after_diplomacy"], f"turn {k}: views after diplomacy differ"
         for pid, orders in turn["orders"].items():
             g.submit_orders(pid, orders)
         ev = g.step()

@@ -127,7 +127,7 @@ class Game:
         self.result: dict | None = None
         self._stats: dict | None = None
         # fog of war (config.fog only; agentciv.engine.fog)
-        self.sightings: dict[str, dict[int, dict]] = {}   # pid -> {tile: {"turn", "armies": {owner: units}}}
+        self.sightings: dict[str, dict[int, dict]] = {}   # pid -> {tile: {owner: {"turn", "units"}}}
         self.intel_reports: dict[str, list] = {}           # pid -> espionage reports
         self._pending_intel: list = []                     # (spy, target, mission, outcome) this turn
 

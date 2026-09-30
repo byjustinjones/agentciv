@@ -135,33 +135,35 @@ def ci_rating(g: "Game", pid: str) -> int:
 # ==========================================================================
 def record_sightings(g: "Game", pre: dict) -> None:
     """Remember the rival stacks every player sees at the start of the turn;
-    forget remembered stacks on tiles now in sight without rival units."""
+    forget remembered stacks on tiles now in sight without rival units.
+    Memory: ``g.sightings[pid][tile] = {owner: {"turn", "units"}}`` (each
+    owner's stack keeps its own turn stamp)."""
     for pid, sight in pre.items():
         mem = g.sightings.setdefault(pid, {})
         for i in sight:
             per = g.armies.get(i)
-            rivals = {q: dict(u) for q, u in per.items() if q != pid and any(u.values())} if per else None
+            rivals = {q: {"turn": g.turn, "units": dict(u)} for q, u in per.items()
+                      if q != pid and any(u.values())} if per else None
             if rivals:
-                mem[i] = {"turn": g.turn, "armies": rivals}
+                mem[i] = rivals
             else:
                 mem.pop(i, None)
 
 
 def _remember_report(g: "Game", spy: str, target: str, armies: list, turn: int) -> None:
-    """A military report replaces what ``spy`` remembers of ``target``'s stacks."""
+    """A military report replaces what ``spy`` remembers of ``target``'s
+    stacks (older memories only); other owners' stacks are kept."""
     mem = g.sightings.setdefault(spy, {})
     for i in list(mem):
         e = mem[i]
-        if target in e["armies"] and e["turn"] <= turn:
-            e["armies"] = {q: u for q, u in e["armies"].items() if q != target}
-            if not e["armies"]:
+        if target in e and e[target]["turn"] <= turn:
+            del e[target]
+            if not e:
                 del mem[i]
     for a in armies:
-        i = g.idx(a["x"], a["y"])
-        e = mem.get(i)
-        if e is None or e["turn"] < turn:
-            e = mem[i] = {"turn": turn, "armies": {}}
-        e["armies"][target] = dict(a["units"])
+        e = mem.setdefault(g.idx(a["x"], a["y"]), {})
+        if target not in e or e[target]["turn"] <= turn:
+            e[target] = {"turn": turn, "units": dict(a["units"])}
 
 
 def sightings_view(g: "Game", viewer: str, sight: frozenset) -> list:
@@ -171,8 +173,8 @@ def sightings_view(g: "Game", viewer: str, sight: frozenset) -> list:
     for i, e in sorted(g.sightings.get(viewer, {}).items()):
         if i in sight:
             continue
-        for q in sorted(e["armies"]):
-            out.append({"x": i % w, "y": i // w, "owner": q, "units": dict(e["armies"][q]), "turn": e["turn"]})
+        for q in sorted(e):
+            out.append({"x": i % w, "y": i // w, "owner": q, "units": dict(e[q]["units"]), "turn": e[q]["turn"]})
     return out
 
 
@@ -289,7 +291,11 @@ def after_step(g: "Game", pre: dict) -> None:
             _remember_report(g, spy, target, data["armies"], t)
     g._pending_intel = []
     for pid, mem in g.sightings.items():
-        for i in [i for i, e in mem.items() if t - e["turn"] > C.FOG_SIGHTING_TURNS]:
-            del mem[i]
+        for i in list(mem):
+            e = mem[i]
+            for q in [q for q, s in e.items() if t - s["turn"] > C.FOG_SIGHTING_TURNS]:
+                del e[q]
+            if not e:
+                del mem[i]
     for pid, reps in g.intel_reports.items():
         reps[:] = [r for r in reps if t - r["as_of_turn"] <= C.SPY_REPORT_TURNS]
