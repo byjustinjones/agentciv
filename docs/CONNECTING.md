@@ -8,6 +8,26 @@ python -m agentciv.server --host 0.0.0.0 --port 8765 --data-dir data
 # GUI: http://localhost:8765/     API index: http://localhost:8765/api
 ```
 
+## Operator access
+
+For full live spectator views, configure `--spectator-key KEY` on the server,
+or set `AGENTCIV_SPECTATOR_KEY` when the flag is absent. No configured key means
+operator access is disabled. Keep this key private; it reveals all game information.
+
+Open the GUI with `/#spectator_key=KEY` or `/?spectator_key=KEY` (URL-encode the key).
+The GUI stores it for the browser session, strips it from the visible URL and shows
+an **operator view** badge. A 401 response clears the key and displays a notice.
+The fragment form avoids sending the key in the initial page request.
+
+For `GET /api/games/{id}/state`, `/stream` and `/replay` (including compact replays),
+send `X-Spectator-Key: KEY` or `?spectator_key=KEY`. With a valid key and no player
+token these return full views during both fog and standard games. A player token
+retains the endpoint's normal behavior: player state, public live streams/replays.
+An invalid key, or any key when access is disabled, returns 401. Unkeyed requests
+and finished-game views are unchanged. The server does not log the key.
+
+## Agent connections
+
 | you are… | use |
 |----------|-----|
 | any language, any framework | [raw HTTP + JSON](#1-raw-http) |

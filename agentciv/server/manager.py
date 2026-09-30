@@ -893,28 +893,29 @@ class GameSession:
             self._spec_cache = (self.version, full, public)
         return self._spec_cache[1], self._spec_cache[2]
 
-    def _spectator_bytes(self) -> bytes:
-        """What a spectator may see right now (the public view while running)."""
-        return self._spectator_pair()[1]
+    def _spectator_bytes(self, full: bool = False) -> bytes:
+        """Public view by default; operators may select the full cached view."""
+        return self._spectator_pair()[0 if full else 1]
 
-    def state_bytes(self, pid: str | None = None) -> bytes:
+    def state_bytes(self, pid: str | None = None, *, full: bool = False) -> bytes:
         with self.cond:
             if pid is None:
-                return self._spectator_bytes()
+                return self._spectator_bytes(full=full)
             cached = self._player_cache.get(pid)
             if cached is None or cached[0] != self.version:
                 cached = (self.version, _dumps(self.game.player_view(pid)))
                 self._player_cache[pid] = cached
             return cached[1]
 
-    def replay_bytes(self, compact: bool = False, lo: int | None = None, hi: int | None = None) -> bytes:
+    def replay_bytes(self, compact: bool = False, lo: int | None = None, hi: int | None = None,
+                     *, full: bool = False) -> bytes:
         """The replay (docs/DESIGN.md §12); ``lo``/``hi`` select an inclusive
         frame range, ``compact`` the lighter format of :mod:`.replay`."""
         with self.cond:
             fs = self.frames
             if fs is not None:
                 summary, result = self.summary(), self.game.result
-                public = self.status != "finished"  # private diplomacy is revealed once the game is over
+                public = not full and self.status != "finished"
                 if compact:
                     return envelope(self.game_id, summary, result, fs.compact(lo, hi, public=public),
                                     compact=True, static=fs.static, total=len(fs), lo=max(0, lo or 0))
@@ -1035,7 +1036,7 @@ class GameSession:
                      if not s.is_bot and self.game.status == "running" and self.game.has_submitted(pid))
         return (self.game.status, self.game.turn, len(self.seats), subs, self._public_dip)
 
-    def next_frame(self, last_key, timeout: float):
+    def next_frame(self, last_key, timeout: float, *, full: bool = False):
         """Block until the spectator-visible state changes (turn, status,
         lobby seats, a remote submission or public diplomacy such as an
         executed deal). Returns ``(key, bytes | None, finished)``; bytes is None
@@ -1047,7 +1048,7 @@ class GameSession:
                 if remaining <= 0:
                     return last_key, None, self.status == "finished"
                 self.cond.wait(remaining)
-            return self._stream_key(), self._spectator_bytes(), self.status == "finished"
+            return self._stream_key(), self._spectator_bytes(full=full), self.status == "finished"
 
     def notify(self) -> None:
         with self.cond:
@@ -1070,16 +1071,17 @@ class ArchivedGame:
     def summary(self) -> dict:
         return dict(self._summary)
 
-    def replay_bytes(self, compact: bool = False, lo: int | None = None, hi: int | None = None) -> bytes:
+    def replay_bytes(self, compact: bool = False, lo: int | None = None, hi: int | None = None,
+                     *, full: bool = False) -> bytes:
         return self.manager.archived_replay_bytes(self.game_id, compact, lo, hi)
 
-    def state_bytes(self, pid: str | None = None) -> bytes:
+    def state_bytes(self, pid: str | None = None, *, full: bool = False) -> bytes:
         return self.manager.archive(self.game_id).last_frame or _dumps(self._summary)
 
     def wait(self, since_turn, timeout) -> dict:
         return {"turn": self._summary.get("turn", 0), "status": "finished", "deadline": None, "timed_out": False}
 
-    def next_frame(self, last_key, timeout):
+    def next_frame(self, last_key, timeout, *, full: bool = False):
         return ("finished",), self.state_bytes(), True
 
     def join(self, name, key=None):

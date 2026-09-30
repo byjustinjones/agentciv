@@ -9,6 +9,7 @@ proper status code. Nothing a client sends can crash the server thread.
 from __future__ import annotations
 
 import gzip
+import hmac
 import json
 import logging
 import mimetypes
@@ -96,8 +97,9 @@ class AgentCivServer(ThreadingHTTPServer):
     request_queue_size = 256  # listen backlog: bursts of spectators/agents connecting at once
 
     def __init__(self, address, manager: GameManager, web_dir: str | Path | None = None,
-                 max_connections: int = MAX_CONNECTIONS):
+                 max_connections: int = MAX_CONNECTIONS, spectator_key: str | None = None):
         self.manager = manager
+        self.spectator_key = spectator_key
         self.gzip_cache = _GzipCache()
         self.web_dir = Path(web_dir).resolve() if web_dir else DEFAULT_WEB_DIR
         self._thread: threading.Thread | None = None
@@ -160,10 +162,12 @@ class AgentCivServer(ThreadingHTTPServer):
 
 
 def create_server(host: str = "127.0.0.1", port: int = 8765, data_dir: str = "data",
-                  web_dir: str | Path | None = None, open_ratings: bool = False) -> AgentCivServer:
+                  web_dir: str | Path | None = None, open_ratings: bool = False,
+                  spectator_key: str | None = None) -> AgentCivServer:
     """Create (but don't start) a server. ``port=0`` picks a free port.
     ``open_ratings`` rates every ``rated`` game (see GameManager)."""
-    return AgentCivServer((host, port), GameManager(data_dir, open_ratings=open_ratings), web_dir)
+    return AgentCivServer((host, port), GameManager(data_dir, open_ratings=open_ratings), web_dir,
+                         spectator_key=spectator_key)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -184,12 +188,14 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
     def log_message(self, fmt, *args):  # route http.server logs to logging
-        log.debug("%s - %s", self.address_string(), fmt % args)
+        # http.server includes raw request lines (even malformed ones) in these messages.
+        # They may contain credentials, so never log request text or headers.
+        log.debug("%s - HTTP request", self.address_string())
 
     def _cors(self) -> None:
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Spectator-Key")
         self.send_header("Access-Control-Max-Age", "86400")
         self.send_header("Access-Control-Expose-Headers", "X-Server-Time")
 
@@ -265,6 +271,18 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError(403, f"this token belongs to game {found[0]}, not {game_id}")
         return found[1]
 
+    def _spectator(self, query: dict) -> bool:
+        """Validate every supplied operator credential, including empty values."""
+        keys = self.headers.get_all("X-Spectator-Key", []) + query.get("spectator_key", [])
+        if not keys:
+            return False
+        configured = self.server.spectator_key
+        if not configured:
+            raise ApiError(401, "spectator key access is not configured on this server")
+        if not all(hmac.compare_digest(key.encode(), configured.encode()) for key in keys):
+            raise ApiError(401, "invalid spectator key")
+        return True
+
     # ------------------------------------------------------------ dispatch
     def _discard_body(self) -> None:
         """A GET/HEAD/OPTIONS request with a body: its bytes must not be parsed
@@ -296,6 +314,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             url = urlsplit(self.path)
             query = parse_qs(url.query)
+            self.full_spectator = self._spectator(parse_qs(url.query, keep_blank_values=True))
             path = url.path
             if path == "/api" or path.startswith("/api/"):
                 if method == "POST":
@@ -314,7 +333,7 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, TimeoutError):
             self.close_connection = True  # client gone, or too slow to send its body
         except Exception as e:  # never let a request kill the server
-            log.exception("error handling %s %s", method, self.path)
+            log.exception("error handling %s request", method)
             try:
                 self._error(500, f"internal error: {type(e).__name__}")
             except Exception:
@@ -359,7 +378,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(game.summary())
         if action == "state":
             pid = self._player(game_id, query, required=False)
-            return self._send(200, game.state_bytes(pid))
+            return self._send(200, game.state_bytes(pid, full=self.full_spectator and pid is None))
         if action == "wait":
             since = self._int_query(query, "since_turn", None)
             timeout = self._float_query(query, "timeout", 30.0)
@@ -379,9 +398,10 @@ class Handler(BaseHTTPRequestHandler):
             compact = (query.get("compact") or ["0"])[0].lower() in ("1", "true", "yes")
             lo = self._int_query(query, "from", None)
             hi = self._int_query(query, "to", None)
-            return self._send(200, game.replay_bytes(compact=compact, lo=lo, hi=hi))
+            return self._send(200, game.replay_bytes(compact=compact, lo=lo, hi=hi,
+                              full=self.full_spectator and self._token(query) is None))
         if action == "stream":
-            return self._stream(game)
+            return self._stream(game, full=self.full_spectator and self._token(query) is None)
         raise ApiError(404, f"no such endpoint: GET {path} (GET /api lists the endpoints)")
 
     def _base_url(self) -> str:
@@ -412,7 +432,7 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError(400, f"{key} must be a number")
         return v
 
-    def _stream(self, game) -> None:
+    def _stream(self, game, full: bool = False) -> None:
         """Server-sent events: ``event: state`` with the spectator view on
         connect, after every turn and on public diplomacy (an executed deal,
         a public message); ``: keep-alive`` comments in between.
@@ -432,7 +452,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self.wfile.write(b"retry: 2000\n\n")
             while not mgr.stopping:
-                key, data, finished = game.next_frame(key, SSE_KEEPALIVE)
+                key, data, finished = game.next_frame(key, SSE_KEEPALIVE, full=full)
                 if data is None:
                     self.wfile.write(b": keep-alive\n\n")
                 else:
@@ -517,9 +537,10 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def serve(host: str = "127.0.0.1", port: int = 8765, data_dir: str = "data",
-          web_dir: str | Path | None = None, open_ratings: bool = False) -> None:
+          web_dir: str | Path | None = None, open_ratings: bool = False,
+          spectator_key: str | None = None) -> None:
     """Run the server in the foreground until Ctrl-C."""
-    srv = create_server(host, port, data_dir, web_dir, open_ratings=open_ratings)
+    srv = create_server(host, port, data_dir, web_dir, open_ratings=open_ratings, spectator_key=spectator_key)
     log.info("AgentCiv server on %s (data: %s, web: %s)", srv.url, data_dir, srv.web_dir)
     print(f"AgentCiv server listening on http://{host}:{srv.server_address[1]}  "
           f"(GUI: {srv.url}/ , API index: {srv.url}/api)", flush=True)

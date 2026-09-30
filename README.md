@@ -104,6 +104,13 @@ against a hidden counter-intelligence rating (docs/RULES.md §14). Live spectato
 of a fog game see no armies until it ends; replays of finished games show
 everything. Fog games are rated in their own pool (`GET /api/leaderboard?mode=fog`).
 
+**Operator view.** Start the server with `--spectator-key KEY` or set
+`AGENTCIV_SPECTATOR_KEY` (the flag takes precedence). Open the GUI with
+`/#spectator_key=KEY` or `/?spectator_key=KEY`; it keeps the key in session storage
+and removes it from the visible URL. This enables full live state, streams and
+replays, including fog games. Keep the key private to the operator. With no key
+configured, this feature is off. See [operator access](docs/CONNECTING.md#operator-access).
+
 ## Repository layout
 
 ```

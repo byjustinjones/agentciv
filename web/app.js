@@ -21,6 +21,43 @@
   // ================================================================ 1. utils
   const $ = (sel, root = document) => root.querySelector(sel);
   const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
+  const Spectator = {
+    storageKey: 'agentciv.spectatorKey',
+    key: '',
+    init() {
+      try { this.key = sessionStorage.getItem(this.storageKey) || ''; } catch (_) { /* storage blocked */ }
+      const url = new URL(location.href);
+      const hash = url.hash.slice(1);
+      const split = hash.indexOf('?');
+      const fragment = new URLSearchParams(split < 0 ? hash : hash.slice(split + 1));
+      if (url.searchParams.has('spectator_key') || fragment.has('spectator_key')) {
+        this.key = url.searchParams.get('spectator_key') ?? fragment.get('spectator_key') ?? '';
+        try {
+          if (this.key) sessionStorage.setItem(this.storageKey, this.key);
+          else sessionStorage.removeItem(this.storageKey);
+        } catch (_) { /* keep the key in memory when storage is blocked */ }
+        url.searchParams.delete('spectator_key');
+        if (fragment.has('spectator_key')) {
+          fragment.delete('spectator_key');
+          const rest = fragment.toString();
+          url.hash = split < 0 ? rest : hash.slice(0, split) + (rest ? '?' + rest : '');
+        }
+        history.replaceState(history.state, '', url);
+      }
+    },
+    rejected(key) {
+      if (!key || this.key !== key) return;
+      this.key = '';
+      try { sessionStorage.removeItem(this.storageKey); } catch (_) { /* storage blocked */ }
+      $('#operator-view').hidden = true;
+      toast('Operator key rejected. Switched to public view.', true, 5000);
+      // Discard frames loaded with the old credential and reconnect without it.
+      if (current === GameView) queueMicrotask(() => {
+        if (current === GameView) GameView.open(GameView.id);
+      });
+    },
+  };
+  Spectator.init();
   const params = new URLSearchParams(location.search);
 
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({
@@ -198,6 +235,9 @@
 
   async function http(method, path, body, token) {
     const opts = { method, headers: {} };
+    const spectatorKey = method === 'GET' && /^api\/games\/[^/?]+\/(state|replay|stream)(\?|$)/.test(path)
+      ? Spectator.key : '';
+    if (spectatorKey) opts.headers['X-Spectator-Key'] = spectatorKey;
     if (token) opts.headers.Authorization = 'Bearer ' + token;
     if (body !== undefined) {
       opts.headers['Content-Type'] = 'application/json';
@@ -211,6 +251,7 @@
     let data = null;
     try { data = text ? JSON.parse(text) : null; } catch (_) { /* non-JSON */ }
     if (!res.ok) {
+      if (res.status === 401) Spectator.rejected(spectatorKey);
       const msg = (data && (data.error || data.detail || data.message)) || text.slice(0, 200) || res.statusText;
       throw new HttpError(res.status, `${res.status}: ${msg}`);
     }
@@ -287,6 +328,7 @@
   function enableMock(reason) {
     if (App.mock) return;
     App.mock = true;
+    $('#operator-view').hidden = true;
     App.mockReason = reason;
     toast('Server API unreachable — showing bundled mock data.', false, 5000);
   }
@@ -792,7 +834,8 @@
     openStream(session) {
       if (session !== this.session || this.finished) return;
       clearTimeout(this.reconnectTimer);
-      const es = new EventSource(`api/games/${encodeURIComponent(this.id)}/stream`);
+      const query = Spectator.key ? '?' + new URLSearchParams({ spectator_key: Spectator.key }) : '';
+      const es = new EventSource(`api/games/${encodeURIComponent(this.id)}/stream${query}`);
       this.es = es;
       const onState = (e) => {
         try { this.onLiveFrame(JSON.parse(e.data)); } catch (_) { /* ignore bad frame */ }
@@ -816,6 +859,8 @@
         setConn('warn', `reconnecting (${Math.round(delay / 1000)}s)…`);
         this.startPolling(session, 3000); // keep the view fresh meanwhile
         this.reconnectTimer = setTimeout(() => this.openStream(session), delay);
+        // EventSource hides HTTP status; fetch detects a rejected operator key immediately.
+        if (Spectator.key) api.get(`api/games/${encodeURIComponent(this.id)}/state`).catch(() => {});
       };
     },
 
@@ -2399,7 +2444,7 @@
       const proposals = (v.treaty_proposals || []).filter(inv);
       const betrayers = (v.players || []).filter((p) => num(p.betrayals) > 0 && (!f || p.id === f));
       const msgs = this.collectMessages().filter((m) => !f || m.from === f || m.to === f);
-      const hidden = v.status === 'running'
+      const hidden = v.status === 'running' && !Spectator.key
         ? '<div class="dsec small muted">Private messages and treaty proposals stay hidden while the game runs; the replay reveals them once it is over. Deals, contracts and negotiation threads are in the <a href="#" data-goto-tab="trade">Trade</a> tab.</div>' : '';
       $('#diplo').innerHTML = `${hidden}
         <div class="dsec"><h4>Active treaties (${treaties.length})</h4>
@@ -2626,7 +2671,7 @@
           ${d.message ? `<div class="dmsg">${this.dealMsg(d.message)}</div>` : ''}
         </div>`).join('');
 
-      // open deals (full views only: finished games / offline replays)
+      // open deals (full views: operator access, finished games or offline replays)
       const open = (v.deals?.open || (v.trade_offers || []).map((o) => ({ ...o, get: o.get ?? o.want, status: 'open' }))).filter(inv);
       const openHtml = open.map((d) => `<div class="deal-card open">
           <div class="dh"><span class="dt">T${esc(d.turn ?? '?')}</span> ${P(d.from)} <span class="muted">→</span> ${P(d.to)}
@@ -2638,7 +2683,7 @@
 
       // negotiation threads
       let threadsHtml;
-      const threadsHidden = !T.privateData && running;
+      const threadsHidden = !T.privateData && running && !Spectator.key;
       const threads = threadsHidden ? [] : T.threads.filter((th) => !f || th.parties.includes(f));
       if (threadsHidden) {
         threadsHtml = '<div class="empty">Proposals, counter-offers and rejections are private while the game runs. The full negotiation threads appear here once it is over.</div>';
@@ -2649,7 +2694,7 @@
         threadsHtml = threads.slice(0, nTh).map((th) => this.threadHtml(th)).join('') + more('threads', threads.length, nTh);
       }
 
-      const hidden = running && !T.privateData
+      const hidden = running && !T.privateData && !Spectator.key
         ? '<div class="small muted note">Spectators see executed deals, contracts and reputation live; private offers and haggling are revealed when the game ends.</div>' : '';
       el.innerHTML = `${summary}${hidden}
         <div class="dsec"><h4>Active contracts (${contracts.length})</h4>
@@ -2709,6 +2754,7 @@
 
   // ============================================================ 8. boot
   async function boot() {
+    $('#operator-view').hidden = !Spectator.key || App.mock;
     if (App.mock) setConn('mock', 'mock data');
     else {
       // Probe once so every later call knows whether to use the mock backend.
