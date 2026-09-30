@@ -32,7 +32,8 @@ TURNS = 24
 BOTS = ("strategist", "rusher", "economist", "turtle", "random")
 NEGOTIATION_ROUNDS = 3
 OUT = Path(__file__).with_name("nofog_golden.json")
-RECORDED_AT = "win-conditions (bank, legacy and victory streaks; fog code from da635b7)"
+RECORDED_AT = ("win-conditions (bank, legacy and victory streaks; contract defaults valued at start prices; "
+               "fog code from da635b7)")
 
 
 def digest(obj) -> str:
