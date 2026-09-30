@@ -1084,9 +1084,12 @@ def summarize_compact(view: dict, pid: str | None = None, changes: list[str] | N
     due = f"in {max(0.0, deadline - time.time()):.0f}s" if deadline else "none"
     out = [f"Turn {view.get('turn')}/{view.get('max_turns')} ({view.get('status')}); "
            f"season {season.get('name')} ({season.get('turns_left')} left); deadline {due}."]
-    res, inc = you.get("resources") or {}, seasonal_income(view, pid)
+    # finished games have no `you` block; the player's own row still carries the numbers
+    row = next((p for p in view.get("players", []) if p.get("id") == pid), {})
+    res, inc = you.get("resources") or row.get("resources") or {}, seasonal_income(view, pid)
+    upkeep = you.get("upkeep", row.get("upkeep"))
     out.append("You: " + ", ".join(f"{r} {_num(res.get(r))} ({inc.get(r, 0):+d})" for r in RESOURCES)
-               + f"; income in parentheses; upkeep {_num(you.get('upkeep'))} food.")
+               + f"; income in parentheses; upkeep {_num(upkeep)} food.")
     out.append("Your cities:")
     for c in view.get("cities", []):
         if c.get("owner") == pid:
