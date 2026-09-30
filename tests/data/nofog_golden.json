@@ -1,0 +1,5240 @@
+{
+ "base_commit": "0d4a71c",
+ "games": [
+  {
+   "seed": 3,
+   "turns": [
+    {
+     "digests": {
+      "full": "8797b69833dc2f08eb7bec3c9673a2bc1b732d54b5550fc69ade35b498063072",
+      "p1": "13532a2b740475cb8ddf64934fc8ddbef51562b505e99dd6c6e5903a1f957322",
+      "p2": "9f4a7192677a051adb2a55713313c96c4f0dcaff6ac8d73865acc90e7145a4ed",
+      "p3": "b5236590ee7e372e20c9847066bb9711baac720db7e85a49fd7da9b9c13a7a14",
+      "p4": "7d2d353036411914b3ecbcc967184373e7e6de15bc4bd2cad1f0883c28f22e12",
+      "p5": "280d804a999220fc08f1ac52c139981391aa1293f1605351a3d2eec4f858a850",
+      "public": "253bc40a65427039f57488bca0418bc416e5b907bc3344f78db26bd82187db77"
+     },
+     "orders": {}
+    },
+    {
+     "digests": {
+      "full": "b2a17f07f4db808bb4abe25d4576809c95d979fd5431d987cce98c1abed531b5",
+      "p1": "5f2432d3ef17292d1e53f08fc639de1cfad61c1547cd68d98b2e95c022ed7250",
+      "p2": "80046e52cc2bdb92660f87d155a177a70951b143142f4f66ed0c01533a7886a2",
+      "p3": "8585fb7b8724efacf1afae85c5f33d7978ef66bee94284f9d487c6bbb655ae1c",
+      "p4": "388638574334abb21a6a4fd372892daf2b291ba0a9ba00cc742c1d5480af023b",
+      "p5": "a834f0992975895289240809a6e0a2d862b67504bd90a7e1f533d89b8018a82b",
+      "public": "eba8be479c39a1e9cb2a763b2ff1dc3c6b2c2eddbde8fc04df7fa9c569393ac6",
+      "step": "ddb0b397718c4051ba40581af00eb3812816abf55e995d2f70252cf393bd9a85"
+     },
+     "orders": {
+      "p1": [
+       {
+        "at": [
+         9,
+         14
+        ],
+        "type": "claim"
+       },
+       {
+        "at": [
+         10,
+         17
+        ],
+        "type": "claim"
+       },
+       {
+        "at": [
+         6,
+         17
+        ],
+        "type": "claim"
+       },
+       {
+        "at": [
+         7,
+         15
+        ],
+        "building": "lumber_mill",
+        "type": "build"
+       },
+       {
+        "at": [
+         9,
+         15
+        ],
+        "building": "lumber_mill",
+        "type": "build"
+       }
+      ],
+      "p2": [
+       {
+        "limit": 1.0,
+        "qty": 20,
+        "resource": "stone",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "city": [
+         4,
+         10
+        ],
+        "count": 5,
+        "type": "recruit",
+        "unit": "infantry"
+       },
+       {
+        "from": [
+         4,
+         10
+        ],
+        "path": [
+         [
+          5,
+          10
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 2
+        }
+       },
+       {
+        "at": [
+         4,
+         8
+        ],
+        "type": "claim"
+       },
+       {
+        "at": [
+         3,
+         8
+        ],
+        "type": "claim"
+       },
+       {
+        "at": [
+         2,
+         10
+        ],
+        "type": "claim"
+       }
+      ],
+      "p3": [
+       {
+        "to": "p2",
+        "turns": 25,
+        "type": "propose_treaty"
+       },
+       {
+        "to": "p5",
+        "turns": 25,
+        "type": "propose_treaty"
+       },
+       {
+        "at": [
+         16,
+         6
+        ],
+        "type": "claim"
+       },
+       {
+        "at": [
+         17,
+         6
+        ],
+        "type": "claim"
+       },
+       {
+        "at": [
+         17,
+         10
+        ],
+        "type": "claim"
+       },
+       {
+        "at": [
+         15,
+         9
+        ],
+        "building": "lumber_mill",
+        "type": "build"
+       },
+       {
+        "at": [
+         15,
+         7
+        ],
+        "building": "lumber_mill",
+        "type": "build"
+       }
+      ],
+      "p4": [
+       {
+        "to": "p1",
+        "turns": 30,
+        "type": "propose_treaty"
+       },
+       {
+        "to": "p2",
+        "turns": 30,
+        "type": "propose_treaty"
+       },
+       {
+        "to": "p3",
+        "turns": 30,
+        "type": "propose_treaty"
+       },
+       {
+        "to": "p5",
+        "turns": 30,
+        "type": "propose_treaty"
+       },
+       {
+        "city": [
+         10,
+         4
+        ],
+        "count": 2,
+        "type": "recruit",
+        "unit": "archer"
+       },
+       {
+        "limit": 1.0,
+        "qty": 20,
+        "resource": "stone",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "at": [
+         8,
+         4
+        ],
+        "type": "claim"
+       },
+       {
+        "at": [
+         8,
+         3
+        ],
+        "type": "claim"
+       },
+       {
+        "at": [
+         10,
+         2
+        ],
+        "type": "claim"
+       },
+       {
+        "limit": 1.6241,
+        "qty": 5,
+        "resource": "wood",
+        "side": "buy",
+        "type": "market"
+       },
+       {
+        "at": [
+         9,
+         5
+        ],
+        "building": "lumber_mill",
+        "type": "build"
+       }
+      ],
+      "p5": [
+       {
+        "at": [
+         12,
+         14
+        ],
+        "type": "claim"
+       }
+      ]
+     }
+    },
+    {
+     "digests": {
+      "full": "a8f0d8e5345f902bda2199752f030a099f9aee80ede0a7a56ea065c91c1265d2",
+      "p1": "b5cd5ccb2bf3c98a97f100aa3c11aee670a9b6e4f029231b674b5da5d802cce5",
+      "p2": "7bdac14d02c31a305ac448f3589b9c2286756279a4c0a8a81f6a80f890637077",
+      "p3": "824b3e12a9d6984f8957fc510c0e5693c923e297c23f884811060d934dab8eee",
+      "p4": "72752f69bbae986e18d8bc9d4132c4c1417b71b38be8acd66d2cacf1cd135976",
+      "p5": "dd25af0a74470f2a0752e6d2936d975588be57a00272d3237bcd03662b368a8c",
+      "public": "9bd892fbcd6feb5fbcab73ce3e1d421b70e3ec15c21c38af368308999c2dceca",
+      "step": "61ed20c1d914005ac461da094d2fad439b424c9748db07a33f3a66abf8e8c33e"
+     },
+     "orders": {
+      "p1": [
+       {
+        "from": "p4",
+        "type": "accept_treaty"
+       },
+       {
+        "to": "p2",
+        "turns": 50,
+        "type": "propose_treaty"
+       },
+       {
+        "to": "p3",
+        "turns": 50,
+        "type": "propose_treaty"
+       },
+       {
+        "at": [
+         9,
+         13
+        ],
+        "type": "claim"
+       }
+      ],
+      "p2": [
+       {
+        "from": "p3",
+        "type": "accept_treaty"
+       },
+       {
+        "from": "p4",
+        "type": "accept_treaty"
+       },
+       {
+        "from": [
+         4,
+         10
+        ],
+        "path": [
+         [
+          5,
+          10
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 5
+        }
+       },
+       {
+        "from": [
+         5,
+         10
+        ],
+        "path": [
+         [
+          6,
+          10
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 2
+        }
+       },
+       {
+        "at": [
+         4,
+         7
+        ],
+        "type": "claim"
+       }
+      ],
+      "p3": [
+       {
+        "from": "p4",
+        "type": "accept_treaty"
+       },
+       {
+        "to": "p1",
+        "turns": 25,
+        "type": "propose_treaty"
+       },
+       {
+        "at": [
+         16,
+         5
+        ],
+        "type": "claim"
+       }
+      ],
+      "p4": [
+       {
+        "limit": 1.0,
+        "qty": 7,
+        "resource": "stone",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "at": [
+         7,
+         4
+        ],
+        "type": "claim"
+       },
+       {
+        "limit": 1.6326,
+        "qty": 8,
+        "resource": "wood",
+        "side": "buy",
+        "type": "market"
+       },
+       {
+        "at": [
+         11,
+         5
+        ],
+        "building": "lumber_mill",
+        "type": "build"
+       }
+      ],
+      "p5": [
+       {
+        "at": [
+         14,
+         13
+        ],
+        "building": "quarry",
+        "type": "build"
+       },
+       {
+        "at": [
+         15,
+         14
+        ],
+        "building": "farm",
+        "type": "build"
+       },
+       {
+        "at": [
+         14,
+         14
+        ],
+        "building": "walls",
+        "type": "build"
+       },
+       {
+        "city": [
+         14,
+         14
+        ],
+        "count": 1,
+        "type": "recruit",
+        "unit": "archer"
+       }
+      ]
+     }
+    },
+    {
+     "digests": {
+      "full": "0e7125eef7f9f31f70e7c739a3c0734362faba8d4856044d7f3c80609262c4e3",
+      "p1": "fe4cdc99732bf1d47b2d7a48016629af5dd2bfd66eff7bb7890e40392ebc0350",
+      "p2": "ccbe4c4e2ad0dc5643cad56e7e82fce9979cd0a4f4f17d17d8ef4abe3faba0f4",
+      "p3": "94e985f55856f4b3d4aaa29ed2a83684a49c795130df19793c1fdb1ea3032119",
+      "p4": "b9f3600aabd31f30e44a7f03eab2575fd1088653da17838c04694f3b30d56fb7",
+      "p5": "7bfcc5a540899d8560300f5a4ac1f42a62cfe1be2561c5f5e3b62d2d4e88e460",
+      "public": "0d982abce74592c9480a94cce3306e21ee40f3767008160a5dd9f51075c99e17",
+      "step": "ddfb94aa84d964cd7cfe76d8cda4261e45ac45894e12ab3b1a165f1bfc37690b"
+     },
+     "orders": {
+      "p1": [
+       {
+        "from": "p3",
+        "type": "accept_treaty"
+       },
+       {
+        "limit": 0.85,
+        "qty": 14,
+        "resource": "food",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "at": [
+         9,
+         12
+        ],
+        "type": "settle"
+       },
+       {
+        "at": [
+         10,
+         17
+        ],
+        "building": "quarry",
+        "type": "build"
+       }
+      ],
+      "p2": [
+       {
+        "limit": 1.0,
+        "qty": 14,
+        "resource": "stone",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "from": [
+         5,
+         10
+        ],
+        "path": [
+         [
+          6,
+          10
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 5
+        }
+       },
+       {
+        "from": [
+         6,
+         10
+        ],
+        "path": [
+         [
+          7,
+          10
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 2
+        }
+       }
+      ],
+      "p3": [
+       {
+        "from": "p1",
+        "type": "accept_treaty"
+       },
+       {
+        "limit": 0.6,
+        "qty": 14,
+        "resource": "food",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "at": [
+         16,
+         4
+        ],
+        "type": "settle"
+       },
+       {
+        "at": [
+         17,
+         6
+        ],
+        "building": "quarry",
+        "type": "build"
+       }
+      ],
+      "p4": [
+       {
+        "to": "p5",
+        "turns": 30,
+        "type": "propose_treaty"
+       },
+       {
+        "limit": 1.0,
+        "qty": 7,
+        "resource": "stone",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "at": [
+         6,
+         4
+        ],
+        "type": "settle"
+       },
+       {
+        "limit": 1.6476,
+        "qty": 16,
+        "resource": "wood",
+        "side": "buy",
+        "type": "market"
+       },
+       {
+        "at": [
+         10,
+         5
+        ],
+        "building": "quarry",
+        "type": "build"
+       }
+      ],
+      "p5": [
+       {
+        "city": [
+         14,
+         14
+        ],
+        "count": 1,
+        "type": "recruit",
+        "unit": "cavalry"
+       },
+       {
+        "at": [
+         13,
+         12
+        ],
+        "type": "claim"
+       },
+       {
+        "from": [
+         14,
+         14
+        ],
+        "path": [
+         [
+          15,
+          14
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "archer": 1
+        }
+       }
+      ]
+     }
+    },
+    {
+     "digests": {
+      "full": "a52480e902e2f6bc010b37637444e330b533c0f8cb18be8ef677266ec6136408",
+      "p1": "cd0d383915f2a9f90e9b84143758171f6ba450dcb15cb48e97901321ddc78b55",
+      "p2": "ce0d7b6c50776067d667bfc3f69975d934bbc91df47c52317e89e140d1558010",
+      "p3": "d6433655a22e8d90eef0b2e8715d3b89e1659700c1e79b4cc881d00996152887",
+      "p4": "276ac2c8ada2c0bc39e076456d0dcc4225d0dcdc7eaade1d5ea42b7b3cbdca11",
+      "p5": "0e2507f4dc385251ea3c6534a35ea3ccfb4f14203cd9badd68ed7359ec16171a",
+      "public": "f84fbf37c105f154c16ae54cd3ca7bd0da8ea26fb2b1059f87631b32be1838cc",
+      "step": "da051642bbf764cbc9531b2f15ee9fff4149c2d64da97b4c7ba37e0c0a002a24"
+     },
+     "orders": {
+      "p1": [
+       {
+        "at": [
+         8,
+         10
+        ],
+        "type": "claim"
+       }
+      ],
+      "p2": [
+       {
+        "city": [
+         4,
+         10
+        ],
+        "count": 1,
+        "type": "recruit",
+        "unit": "infantry"
+       },
+       {
+        "from": [
+         6,
+         10
+        ],
+        "path": [
+         [
+          7,
+          10
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 5
+        }
+       },
+       {
+        "from": [
+         7,
+         10
+        ],
+        "path": [
+         [
+          8,
+          10
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 2
+        }
+       },
+       {
+        "at": [
+         4,
+         6
+        ],
+        "type": "claim"
+       }
+      ],
+      "p3": [
+       {
+        "to": "p5",
+        "turns": 25,
+        "type": "propose_treaty"
+       },
+       {
+        "at": [
+         18,
+         6
+        ],
+        "type": "claim"
+       }
+      ],
+      "p4": [
+       {
+        "at": [
+         4,
+         4
+        ],
+        "type": "claim"
+       }
+      ],
+      "p5": [
+       {
+        "at": [
+         16,
+         15
+        ],
+        "type": "claim"
+       },
+       {
+        "from": [
+         14,
+         14
+        ],
+        "path": [
+         [
+          14,
+          13
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         15,
+         14
+        ],
+        "path": [
+         [
+          15,
+          13
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "archer": 1
+        }
+       }
+      ]
+     }
+    },
+    {
+     "digests": {
+      "full": "14280f4ffde14d0c9dfabf4b5c0b89bb916cace8743e41881dbc7c7b25caa4ae",
+      "p1": "5a9892a9c2142889443ef8231ea007565c7e0a8efbabe98a6aeb32047751f7dd",
+      "p2": "89980cd179a93fa10d1cd9b4ff2289a073b63e86c157500648f29937ce4434d9",
+      "p3": "5fc29594740006cf54f1ab9e09f1d64feb26db561a188f5c2941577dd5afd93b",
+      "p4": "77d995ea04d5c633f6f2e8387c6cb3651e1b7f41158cf47ebe1168840474c03a",
+      "p5": "d696b4ad97fcf0bf1a9d8f6e4f99e1d7aa2c86799bcf05c9f6ef742363775f09",
+      "public": "a71580d1e47a03ed379946af78bede4c59524b897fce9090f5450f51abaa0c18",
+      "step": "47a7a013e75b2852404eff0fcb2ab77db69d7c750edd3ece30ad829750b2754f"
+     },
+     "orders": {
+      "p1": [
+       {
+        "city": [
+         9,
+         12
+        ],
+        "count": 1,
+        "type": "recruit",
+        "unit": "archer"
+       },
+       {
+        "limit": 1.6547,
+        "qty": 9,
+        "resource": "stone",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "at": [
+         9,
+         10
+        ],
+        "type": "claim"
+       },
+       {
+        "at": [
+         9,
+         10
+        ],
+        "building": "temple",
+        "type": "build"
+       }
+      ],
+      "p2": [
+       {
+        "limit": 1.0,
+        "qty": 14,
+        "resource": "stone",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "city": [
+         4,
+         10
+        ],
+        "count": 1,
+        "type": "recruit",
+        "unit": "infantry"
+       },
+       {
+        "from": [
+         4,
+         10
+        ],
+        "path": [
+         [
+          5,
+          10
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         7,
+         10
+        ],
+        "path": [
+         [
+          8,
+          10
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 5
+        }
+       },
+       {
+        "from": [
+         8,
+         10
+        ],
+        "path": [
+         [
+          8,
+          11
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 2
+        }
+       },
+       {
+        "at": [
+         3,
+         6
+        ],
+        "type": "claim"
+       }
+      ],
+      "p3": [
+       {
+        "at": [
+         19,
+         6
+        ],
+        "type": "claim"
+       }
+      ],
+      "p4": [
+       {
+        "to": "p5",
+        "turns": 30,
+        "type": "propose_treaty"
+       },
+       {
+        "at": [
+         3,
+         4
+        ],
+        "type": "claim"
+       }
+      ],
+      "p5": []
+     }
+    },
+    {
+     "digests": {
+      "full": "0ba2ee9d562d2939cf89572895c555885958e72e3b8c6a1eb952720fff2533df",
+      "p1": "cb0484147c1e83dc2f8f140fed651077303e86eff0952a1989074ff594e8a782",
+      "p2": "0c34d31a8ab92db8b2256fd1c773a268b2d82fc1831c27d1c8e0bded5ea5db7e",
+      "p3": "06c548f0a8a92586d8a14634520a514937c899ef99a3ccc48af1158020b53c8d",
+      "p4": "049fa44d05a882eb034c18c7b04d18bd3bfb771c967edaea2a783998801b8fd1",
+      "p5": "e79446c767fd7b2d685bca507df705c08f5609dd4485f6fc8d483cef731ddd0b",
+      "public": "5703e213bafe71b7e43654e1e45adb3db3326bad30cefb3843982c57c7143860",
+      "step": "0e55eebb5ce58c31dec8a793127798a8134433b4928fc0d563deb5ab2f048609"
+     },
+     "orders": {
+      "p1": [
+       {
+        "limit": 2.0863,
+        "qty": 5,
+        "resource": "stone",
+        "side": "buy",
+        "type": "market"
+       },
+       {
+        "at": [
+         9,
+         12
+        ],
+        "building": "walls",
+        "type": "build"
+       },
+       {
+        "city": [
+         9,
+         12
+        ],
+        "count": 1,
+        "type": "recruit",
+        "unit": "infantry"
+       },
+       {
+        "at": [
+         9,
+         9
+        ],
+        "type": "claim"
+       }
+      ],
+      "p2": [
+       {
+        "city": [
+         4,
+         10
+        ],
+        "count": 1,
+        "type": "recruit",
+        "unit": "infantry"
+       },
+       {
+        "from": [
+         4,
+         10
+        ],
+        "path": [
+         [
+          5,
+          10
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         5,
+         10
+        ],
+        "path": [
+         [
+          6,
+          10
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         8,
+         10
+        ],
+        "path": [
+         [
+          8,
+          11
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 5
+        }
+       },
+       {
+        "from": [
+         8,
+         11
+        ],
+        "path": [
+         [
+          8,
+          12
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 2
+        }
+       }
+      ],
+      "p3": [
+       {
+        "limit": 1.2,
+        "qty": 10,
+        "resource": "stone",
+        "side": "sell",
+        "type": "market"
+       }
+      ],
+      "p4": [
+       {
+        "limit": 1.0,
+        "qty": 8,
+        "resource": "stone",
+        "side": "sell",
+        "type": "market"
+       }
+      ],
+      "p5": [
+       {
+        "at": [
+         16,
+         13
+        ],
+        "type": "claim"
+       },
+       {
+        "from": [
+         14,
+         14
+        ],
+        "path": [
+         [
+          13,
+          14
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "cavalry": 1,
+         "infantry": 2
+        }
+       }
+      ]
+     }
+    },
+    {
+     "digests": {
+      "full": "f4afc62e3f1cf0f750ec05e20f22aa12b90ab7293ab356107a2eeb3adba66053",
+      "p1": "7e763d5b1b7c46921af0e8ce8e2c95e2ae9db24ca055a33870a94b53e557b508",
+      "p2": "3fb78d0915e5da6bca2f1502c759c512c1f1679a8577ae56c8f27bf1f47dd4d6",
+      "p3": "3b04b373425e99c2b602895f62e264ea292eed31261371c7e7a8489345141b0f",
+      "p4": "ca1c23d6fc100c494bc7b765d21ba6beaef06f1ae2095d9e32435671769aef74",
+      "p5": "6cce9c9b4a7875cb03fbca96f3529a8404d5bd338582cb3c43ca07c1df642ddc",
+      "public": "877010ae913b4ce6d265bacf230cb949f9a210097aba8f5d710af44ca2c26129",
+      "step": "9ab47ddf96f4ebed6205aab65e4f237a145df679a9f0a73b482023650c654458"
+     },
+     "orders": {
+      "p1": [
+       {
+        "to": "p2",
+        "turns": 50,
+        "type": "propose_treaty"
+       },
+       {
+        "city": [
+         9,
+         12
+        ],
+        "count": 1,
+        "type": "recruit",
+        "unit": "archer"
+       },
+       {
+        "at": [
+         9,
+         8
+        ],
+        "type": "claim"
+       }
+      ],
+      "p2": [
+       {
+        "limit": 1.0,
+        "qty": 14,
+        "resource": "stone",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "city": [
+         4,
+         10
+        ],
+        "count": 1,
+        "type": "recruit",
+        "unit": "infantry"
+       },
+       {
+        "from": [
+         4,
+         10
+        ],
+        "path": [
+         [
+          5,
+          10
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         5,
+         10
+        ],
+        "path": [
+         [
+          6,
+          10
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         6,
+         10
+        ],
+        "path": [
+         [
+          7,
+          10
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         8,
+         11
+        ],
+        "path": [
+         [
+          8,
+          12
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 5
+        }
+       },
+       {
+        "from": [
+         8,
+         12
+        ],
+        "path": [
+         [
+          8,
+          13
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 2
+        }
+       },
+       {
+        "at": [
+         2,
+         6
+        ],
+        "type": "claim"
+       }
+      ],
+      "p3": [
+       {
+        "to": "p5",
+        "turns": 25,
+        "type": "propose_treaty"
+       },
+       {
+        "limit": 0.6,
+        "qty": 12,
+        "resource": "food",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "limit": 1.2,
+        "qty": 12,
+        "resource": "stone",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "at": [
+         18,
+         8
+        ],
+        "type": "claim"
+       }
+      ],
+      "p4": [
+       {
+        "to": "p5",
+        "turns": 30,
+        "type": "propose_treaty"
+       },
+       {
+        "limit": 1.0,
+        "qty": 14,
+        "resource": "stone",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "at": [
+         2,
+         4
+        ],
+        "type": "settle"
+       },
+       {
+        "at": [
+         12,
+         3
+        ],
+        "type": "claim"
+       },
+       {
+        "limit": 1.637,
+        "qty": 5,
+        "resource": "wood",
+        "side": "buy",
+        "type": "market"
+       },
+       {
+        "at": [
+         6,
+         5
+        ],
+        "building": "lumber_mill",
+        "type": "build"
+       }
+      ],
+      "p5": [
+       {
+        "at": [
+         14,
+         15
+        ],
+        "building": "temple",
+        "type": "build"
+       },
+       {
+        "at": [
+         14,
+         12
+        ],
+        "type": "claim"
+       },
+       {
+        "from": [
+         14,
+         13
+        ],
+        "path": [
+         [
+          14,
+          14
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         13,
+         14
+        ],
+        "path": [
+         [
+          13,
+          15
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 2
+        }
+       }
+      ]
+     }
+    },
+    {
+     "digests": {
+      "full": "134e3319fbffce8d5844d2ceda12fa2d65572483f1dd53d899c5c5c2d693d23e",
+      "p1": "4c295cac82f2332ac096314ae23bea94fcaf1fb6dae7b49298ecc3b662ed801c",
+      "p2": "dfb93a15639ef1a9284de6094dd02064155cf77611501e46c4c5e09ee54a5c19",
+      "p3": "97dcb034bf8f3c9ad157e09ce1bd63d60866258ff8bbf6db601126f5016e5a61",
+      "p4": "5e790beb97246385d52991c9876e7fd0aac77489fb95c3a25c78ffb5d94d7148",
+      "p5": "e4f18e538aadbccab140cfa4e719fc549cf9acc9227c540a87e75f941e4cf4c3",
+      "public": "ddbe6d9e65fade31dec65d91447b883ee0b9bfe7cf539fea03d861870fa5fc41",
+      "step": "ee1eaac13a35eeee662fe654f3275e463c4a09d39f72a04ab75b8138508e7d18"
+     },
+     "orders": {
+      "p1": [
+       {
+        "at": [
+         11,
+         11
+        ],
+        "type": "claim"
+       }
+      ],
+      "p2": [
+       {
+        "city": [
+         4,
+         10
+        ],
+        "count": 2,
+        "type": "recruit",
+        "unit": "infantry"
+       },
+       {
+        "from": [
+         4,
+         10
+        ],
+        "path": [
+         [
+          5,
+          10
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         5,
+         10
+        ],
+        "path": [
+         [
+          6,
+          10
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         6,
+         10
+        ],
+        "path": [
+         [
+          7,
+          10
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         7,
+         10
+        ],
+        "path": [
+         [
+          8,
+          10
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         8,
+         12
+        ],
+        "path": [
+         [
+          8,
+          13
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 5
+        }
+       },
+       {
+        "from": [
+         8,
+         13
+        ],
+        "path": [
+         [
+          8,
+          14
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 2
+        }
+       }
+      ],
+      "p3": [
+       {
+        "limit": 0.6,
+        "qty": 42,
+        "resource": "food",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "limit": 1.2,
+        "qty": 14,
+        "resource": "stone",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "at": [
+         20,
+         6
+        ],
+        "type": "settle"
+       }
+      ],
+      "p4": [],
+      "p5": [
+       {
+        "at": [
+         11,
+         14
+        ],
+        "type": "claim"
+       },
+       {
+        "from": [
+         15,
+         13
+        ],
+        "path": [
+         [
+          15,
+          14
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "archer": 1
+        }
+       }
+      ]
+     }
+    },
+    {
+     "digests": {
+      "full": "7a37de051884780df8b6fb787ebf583937faacfedecdcd1f69b0451b323b101e",
+      "p1": "f7e88dccbc3395f5b10747b17129bbc6f7f0d9e7f4023ca370e555a71df6e2cf",
+      "p2": "5afb654ba78bde825fb57480c8e49b0c933d02055b1a3bc3f137be113716e9f5",
+      "p3": "f04b6dc46c59ae7979f87fc11f1f7f8f6166f29e51b6859350c796fa176242f3",
+      "p4": "cfecf1904218b2989de83312ae48ff2893db3d19d1fd8d2c9245ff291464d4dd",
+      "p5": "24a10b1c91616603de105cc66aad0211b346a8449499de79bfceb2500656fe8f",
+      "public": "5f3f703dc1dba91f7dbff82f19f0f2e5572e73d205be386c9c83bbac4757cf64",
+      "step": "95a87d1a2c5cc9022d963152c666b143b753dea64338413ebd667e0b5955d438"
+     },
+     "orders": {
+      "p1": [
+       {
+        "limit": 0.8146,
+        "qty": 28,
+        "resource": "food",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "at": [
+         8,
+         18
+        ],
+        "type": "claim"
+       }
+      ],
+      "p2": [
+       {
+        "limit": 1.0,
+        "qty": 14,
+        "resource": "stone",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "city": [
+         4,
+         10
+        ],
+        "count": 1,
+        "type": "recruit",
+        "unit": "infantry"
+       },
+       {
+        "from": [
+         4,
+         10
+        ],
+        "path": [
+         [
+          5,
+          10
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 2
+        }
+       },
+       {
+        "from": [
+         5,
+         10
+        ],
+        "path": [
+         [
+          6,
+          10
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         6,
+         10
+        ],
+        "path": [
+         [
+          7,
+          10
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         7,
+         10
+        ],
+        "path": [
+         [
+          8,
+          10
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         8,
+         10
+        ],
+        "path": [
+         [
+          8,
+          11
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         8,
+         13
+        ],
+        "path": [
+         [
+          8,
+          14
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 5
+        }
+       },
+       {
+        "from": [
+         8,
+         14
+        ],
+        "path": [
+         [
+          8,
+          15
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 2
+        }
+       },
+       {
+        "at": [
+         3,
+         12
+        ],
+        "type": "claim"
+       }
+      ],
+      "p3": [
+       {
+        "at": [
+         20,
+         8
+        ],
+        "type": "claim"
+       }
+      ],
+      "p4": [
+       {
+        "to": "p5",
+        "turns": 30,
+        "type": "propose_treaty"
+       },
+       {
+        "at": [
+         10,
+         1
+        ],
+        "type": "claim"
+       }
+      ],
+      "p5": [
+       {
+        "at": [
+         12,
+         15
+        ],
+        "type": "claim"
+       },
+       {
+        "city": [
+         14,
+         14
+        ],
+        "count": 1,
+        "type": "recruit",
+        "unit": "archer"
+       },
+       {
+        "from": [
+         13,
+         14
+        ],
+        "path": [
+         [
+          13,
+          15
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "cavalry": 1
+        }
+       }
+      ]
+     }
+    },
+    {
+     "digests": {
+      "full": "483a906897a44760f2427ec09ffbf619a6c4076304fc9cc24ea08a2e43d1e3a8",
+      "p1": "4b33bfe4d38a69905ce6b9dd426bb2a4c7e86a509cfbea19c365789ecd8cbc21",
+      "p2": "b1f7b96d4ca1df550213ff1dc8ca67d2830935328999965d3d47ef1c39b7850b",
+      "p3": "fac42fc828c31f1b9ff69ef8a4df906c382df40c52a9be824d911ba05a06005b",
+      "p4": "39919ce7c0025ae94cd9c59c3449517c21eba29f0aaadd88d3ba27e3b44ba64a",
+      "p5": "54453fc9ca18a678a0ae054ddca25e6935eaf5c6493387a9721cecf5287ff9de",
+      "public": "54e47240f5a26a9dc1199f90d136cd89ec31d2c9611dc573d4507223bc66d7aa",
+      "step": "8716217b2a24ea02fac38e9fec007b4b4622b44fcc3c453529e3faf80bef1c6c"
+     },
+     "orders": {
+      "p1": [
+       {
+        "at": [
+         8,
+         16
+        ],
+        "building": "walls",
+        "type": "build"
+       },
+       {
+        "city": [
+         8,
+         16
+        ],
+        "count": 1,
+        "type": "recruit",
+        "unit": "archer"
+       },
+       {
+        "limit": 0.8066,
+        "qty": 23,
+        "resource": "food",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "from": [
+         9,
+         12
+        ],
+        "path": [
+         [
+          10,
+          12
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         9,
+         12
+        ],
+        "path": [
+         [
+          8,
+          12
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "archer": 1
+        }
+       },
+       {
+        "at": [
+         10,
+         10
+        ],
+        "type": "claim"
+       }
+      ],
+      "p2": [
+       {
+        "limit": 1.0,
+        "qty": 11,
+        "resource": "stone",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "from": [
+         4,
+         10
+        ],
+        "path": [
+         [
+          5,
+          10
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         5,
+         10
+        ],
+        "path": [
+         [
+          6,
+          10
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 2
+        }
+       },
+       {
+        "from": [
+         6,
+         10
+        ],
+        "path": [
+         [
+          7,
+          10
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         7,
+         10
+        ],
+        "path": [
+         [
+          8,
+          10
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         8,
+         10
+        ],
+        "path": [
+         [
+          8,
+          11
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         8,
+         11
+        ],
+        "path": [
+         [
+          8,
+          12
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         8,
+         14
+        ],
+        "path": [
+         [
+          8,
+          15
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 5
+        }
+       }
+      ],
+      "p3": [
+       {
+        "to": "p5",
+        "turns": 25,
+        "type": "propose_treaty"
+       },
+       {
+        "at": [
+         20,
+         9
+        ],
+        "type": "claim"
+       }
+      ],
+      "p4": [
+       {
+        "limit": 1.0,
+        "qty": 23,
+        "resource": "stone",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "at": [
+         4,
+         3
+        ],
+        "type": "claim"
+       }
+      ],
+      "p5": [
+       {
+        "from": [
+         14,
+         14
+        ],
+        "path": [
+         [
+          13,
+          14
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "archer": 1,
+         "infantry": 1
+        }
+       }
+      ]
+     }
+    },
+    {
+     "digests": {
+      "full": "ca98d336741e9a03778fd54e6a20b5acd8b7b605849115ba9a6b39c9fe40d375",
+      "p1": "9450eae5a5f0d2802796db89cb6844f185a50d3a5377296a5f8f90cfbb37cac2",
+      "p2": "9c95730525f852914c61e1f7f4cf0ee1e9c90519d98ea56af1e84dc9797c619f",
+      "p3": "b8b02ad9f24f4d712a41194b14ced50d8461f9d90817bc3e8a5939695c62e1ff",
+      "p4": "27683ea4d255bc46579ea142eb106cbc3f9121c46ef68dec7dba623ac321ba76",
+      "p5": "ae7cad1d79cb5b221ee5b676a3cc3dd6348e38370383bb675ab6d14d5c3e825e",
+      "public": "491e525201e57d161248700e8c503297ac43df8dcfa96735a7c3076cddcda4d3",
+      "step": "f81c6694ac106f7a20a0bb222dcffe7c6ebff34d3c84a4e5019a17ce50b63ba5"
+     },
+     "orders": {
+      "p1": [
+       {
+        "limit": 0.8037,
+        "qty": 35,
+        "resource": "food",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "from": [
+         10,
+         12
+        ],
+        "path": [
+         [
+          10,
+          13
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         8,
+         12
+        ],
+        "path": [
+         [
+          7,
+          12
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "archer": 1
+        }
+       },
+       {
+        "at": [
+         8,
+         19
+        ],
+        "type": "claim"
+       }
+      ],
+      "p2": [
+       {
+        "city": [
+         4,
+         10
+        ],
+        "count": 1,
+        "type": "recruit",
+        "unit": "infantry"
+       },
+       {
+        "from": [
+         5,
+         10
+        ],
+        "path": [
+         [
+          6,
+          10
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         6,
+         10
+        ],
+        "path": [
+         [
+          7,
+          10
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 2
+        }
+       },
+       {
+        "from": [
+         7,
+         10
+        ],
+        "path": [
+         [
+          8,
+          10
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         8,
+         10
+        ],
+        "path": [
+         [
+          8,
+          11
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "at": [
+         3,
+         13
+        ],
+        "type": "claim"
+       }
+      ],
+      "p3": [
+       {
+        "limit": 0.6,
+        "qty": 63,
+        "resource": "food",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "limit": 1.2,
+        "qty": 11,
+        "resource": "stone",
+        "side": "sell",
+        "type": "market"
+       }
+      ],
+      "p4": [
+       {
+        "to": "p5",
+        "turns": 30,
+        "type": "propose_treaty"
+       },
+       {
+        "limit": 0.5,
+        "qty": 42,
+        "resource": "food",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "limit": 1.0,
+        "qty": 23,
+        "resource": "stone",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "at": [
+         10,
+         0
+        ],
+        "type": "settle"
+       },
+       {
+        "limit": 2.0497,
+        "qty": 20,
+        "resource": "stone",
+        "side": "buy",
+        "type": "market"
+       },
+       {
+        "at": [
+         8,
+         4
+        ],
+        "building": "temple",
+        "type": "build"
+       },
+       {
+        "limit": 1.6324,
+        "qty": 7,
+        "resource": "wood",
+        "side": "buy",
+        "type": "market"
+       },
+       {
+        "at": [
+         10,
+         1
+        ],
+        "building": "lumber_mill",
+        "type": "build"
+       }
+      ],
+      "p5": [
+       {
+        "from": "p3",
+        "type": "accept_treaty"
+       },
+       {
+        "qty": 13,
+        "resource": "stone",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "to": "p1",
+        "turns": 40,
+        "type": "propose_treaty"
+       },
+       {
+        "city": [
+         14,
+         14
+        ],
+        "count": 1,
+        "type": "recruit",
+        "unit": "cavalry"
+       },
+       {
+        "from": [
+         13,
+         14
+        ],
+        "path": [
+         [
+          13,
+          13
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         15,
+         14
+        ],
+        "path": [
+         [
+          15,
+          15
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "archer": 1
+        }
+       },
+       {
+        "from": [
+         13,
+         15
+        ],
+        "path": [
+         [
+          13,
+          14
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "cavalry": 1,
+         "infantry": 1
+        }
+       }
+      ]
+     }
+    },
+    {
+     "digests": {
+      "full": "c3a33ba85064403702896fc0bd7993073675d1d485aa2eb84e52b5d13dc61fb0",
+      "p1": "07e83aa2cf27e11ea352c87d952411cd90bdfe830f3e5aefd26be06e7d278e29",
+      "p2": "73d555a0f1307cb001cb3a786aa32c82018a483136080f10b809cf3937dc1b40",
+      "p3": "9f31fcdfb097800008d84671011df8cccb4c44ba238657dd0167d92842c63c01",
+      "p4": "6ae6a6a63d1d3317e24c896c5f721441dcc6733615a8383f860603810c6a71a9",
+      "p5": "26e11676877bc2c19c9864aa877bf8c9598f125afa6760cd8b58757a8a2b82a5",
+      "public": "3c358b31ad7a0e17e66611c60ddc1ffa7551611e255799523ca00f5d25071974",
+      "step": "05a8d7befa2e584a5dfcf880ab4859ceed4a196cc65f98a607b7175d0a624431"
+     },
+     "orders": {
+      "p1": [
+       {
+        "to": "p2",
+        "turns": 50,
+        "type": "propose_treaty"
+       },
+       {
+        "limit": 0.7384,
+        "qty": 38,
+        "resource": "food",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "from": [
+         7,
+         12
+        ],
+        "path": [
+         [
+          6,
+          12
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "archer": 1
+        }
+       },
+       {
+        "at": [
+         11,
+         13
+        ],
+        "type": "claim"
+       }
+      ],
+      "p2": [
+       {
+        "city": [
+         4,
+         10
+        ],
+        "count": 1,
+        "type": "recruit",
+        "unit": "infantry"
+       },
+       {
+        "from": [
+         4,
+         10
+        ],
+        "path": [
+         [
+          5,
+          10
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         6,
+         10
+        ],
+        "path": [
+         [
+          7,
+          10
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         7,
+         10
+        ],
+        "path": [
+         [
+          8,
+          10
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 2
+        }
+       },
+       {
+        "from": [
+         8,
+         10
+        ],
+        "path": [
+         [
+          8,
+          11
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         8,
+         11
+        ],
+        "path": [
+         [
+          8,
+          12
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 2
+        }
+       }
+      ],
+      "p3": [
+       {
+        "limit": 0.6,
+        "qty": 63,
+        "resource": "food",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "limit": 1.2,
+        "qty": 17,
+        "resource": "stone",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "at": [
+         20,
+         10
+        ],
+        "type": "claim"
+       }
+      ],
+      "p4": [
+       {
+        "city": [
+         10,
+         0
+        ],
+        "count": 1,
+        "type": "recruit",
+        "unit": "archer"
+       },
+       {
+        "limit": 0.5,
+        "qty": 48,
+        "resource": "food",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "limit": 1.0,
+        "qty": 24,
+        "resource": "stone",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "at": [
+         4,
+         5
+        ],
+        "type": "claim"
+       },
+       {
+        "limit": 2.0415,
+        "qty": 20,
+        "resource": "stone",
+        "side": "buy",
+        "type": "market"
+       },
+       {
+        "at": [
+         7,
+         3
+        ],
+        "building": "temple",
+        "type": "build"
+       },
+       {
+        "limit": 1.6368,
+        "qty": 4,
+        "resource": "wood",
+        "side": "buy",
+        "type": "market"
+       },
+       {
+        "at": [
+         5,
+         5
+        ],
+        "building": "lumber_mill",
+        "type": "build"
+       }
+      ],
+      "p5": [
+       {
+        "city": [
+         14,
+         14
+        ],
+        "count": 1,
+        "type": "recruit",
+        "unit": "infantry"
+       },
+       {
+        "city": [
+         14,
+         14
+        ],
+        "count": 1,
+        "type": "recruit",
+        "unit": "infantry"
+       },
+       {
+        "from": [
+         13,
+         13
+        ],
+        "path": [
+         [
+          13,
+          12
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         14,
+         14
+        ],
+        "path": [
+         [
+          14,
+          13
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "cavalry": 1
+        }
+       },
+       {
+        "from": [
+         15,
+         15
+        ],
+        "path": [
+         [
+          15,
+          16
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "archer": 1
+        }
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "seed": 11,
+   "turns": [
+    {
+     "digests": {
+      "full": "1605f03536bcc9238f1ec67af06d62d5df19f687acd52db44bc7c61c1c682b88",
+      "p1": "1b7381281a85048e3e4c443cfff43d97dd3453a2226cdaa2735acfce3bb876d8",
+      "p2": "9a841f87174a5cdb6ba0f8efc3aa1ac02b19a013a4db5da2d879194d8db7b6d6",
+      "p3": "d9ed8672f394ca9ee1f5f3ecd7cb4ed9d4f017bd9e95d009115b98f525a42f6c",
+      "p4": "dece42a02a0ac377f4d309baa2297b514555b3e19b2997e34ccc7487823a147a",
+      "p5": "8d84c5366bc91ab3ecb188bfa86cd1dc2ff700b18e1a8eca6a72e62cff7cff6d",
+      "public": "72200b9bc94a75a954afed9c7666d331fe771728fe7aab056c5e7c31fe8cc3e4"
+     },
+     "orders": {}
+    },
+    {
+     "digests": {
+      "full": "828a5afe21b16681bc315bd25b61b73c8fe6028f136fd7999be6c50f00ee572e",
+      "p1": "f41177a88d6e9d830b1263f16332ba72c60686145e4acc285a5536dbda171b2b",
+      "p2": "651c0227fa917b8862924b5fec32789f8512a6ac2f378beeb93df3c4b97c75ee",
+      "p3": "5a286eb7d1031d6f18c2abba7f256e61d43db016a76552e1be19a4d8ddf89ae5",
+      "p4": "b4260b90357aa8e178f66e197c62445500d3668c9aae118133d221c5d549538d",
+      "p5": "d266150c60a88c583b18a1af71955bdd97b804424579c5a82844fdea7a651051",
+      "public": "f32d01ade5169fd465b4c3a727137d39733e1e96199e2971a03db5eabcc14943",
+      "step": "2824b1f2e0349201ce5640adacf826035333dd3611e911154b6128b39cb94c3c"
+     },
+     "orders": {
+      "p1": [
+       {
+        "at": [
+         7,
+         12
+        ],
+        "type": "claim"
+       },
+       {
+        "at": [
+         4,
+         15
+        ],
+        "type": "claim"
+       },
+       {
+        "at": [
+         3,
+         13
+        ],
+        "type": "claim"
+       },
+       {
+        "at": [
+         6,
+         14
+        ],
+        "building": "lumber_mill",
+        "type": "build"
+       },
+       {
+        "at": [
+         6,
+         12
+        ],
+        "building": "lumber_mill",
+        "type": "build"
+       }
+      ],
+      "p2": [
+       {
+        "limit": 1.0,
+        "qty": 20,
+        "resource": "stone",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "city": [
+         11,
+         17
+        ],
+        "count": 5,
+        "type": "recruit",
+        "unit": "infantry"
+       },
+       {
+        "from": [
+         11,
+         17
+        ],
+        "path": [
+         [
+          11,
+          16
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 2
+        }
+       },
+       {
+        "at": [
+         13,
+         17
+        ],
+        "type": "claim"
+       },
+       {
+        "at": [
+         11,
+         19
+        ],
+        "type": "claim"
+       },
+       {
+        "at": [
+         13,
+         18
+        ],
+        "type": "claim"
+       }
+      ],
+      "p3": [
+       {
+        "to": "p2",
+        "turns": 25,
+        "type": "propose_treaty"
+       },
+       {
+        "to": "p5",
+        "turns": 25,
+        "type": "propose_treaty"
+       },
+       {
+        "at": [
+         15,
+         5
+        ],
+        "type": "claim"
+       },
+       {
+        "at": [
+         13,
+         3
+        ],
+        "type": "claim"
+       },
+       {
+        "at": [
+         15,
+         4
+        ],
+        "type": "claim"
+       },
+       {
+        "at": [
+         12,
+         6
+        ],
+        "building": "lumber_mill",
+        "type": "build"
+       },
+       {
+        "at": [
+         14,
+         6
+        ],
+        "building": "lumber_mill",
+        "type": "build"
+       }
+      ],
+      "p4": [
+       {
+        "to": "p1",
+        "turns": 30,
+        "type": "propose_treaty"
+       },
+       {
+        "to": "p2",
+        "turns": 30,
+        "type": "propose_treaty"
+       },
+       {
+        "to": "p3",
+        "turns": 30,
+        "type": "propose_treaty"
+       },
+       {
+        "to": "p5",
+        "turns": 30,
+        "type": "propose_treaty"
+       },
+       {
+        "city": [
+         17,
+         11
+        ],
+        "count": 2,
+        "type": "recruit",
+        "unit": "archer"
+       },
+       {
+        "limit": 1.0,
+        "qty": 20,
+        "resource": "stone",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "at": [
+         17,
+         13
+        ],
+        "type": "claim"
+       },
+       {
+        "at": [
+         18,
+         9
+        ],
+        "type": "claim"
+       },
+       {
+        "at": [
+         19,
+         11
+        ],
+        "type": "claim"
+       },
+       {
+        "limit": 1.6241,
+        "qty": 5,
+        "resource": "wood",
+        "side": "buy",
+        "type": "market"
+       },
+       {
+        "at": [
+         16,
+         10
+        ],
+        "building": "lumber_mill",
+        "type": "build"
+       }
+      ],
+      "p5": [
+       {
+        "at": [
+         5,
+         6
+        ],
+        "type": "claim"
+       },
+       {
+        "from": [
+         7,
+         7
+        ],
+        "path": [
+         [
+          7,
+          6
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 3
+        }
+       }
+      ]
+     }
+    },
+    {
+     "digests": {
+      "full": "5b1e3c7567fa7bfc19363bed06b7f4a1df578d4ef17c018401e14e4bf3ce1a90",
+      "p1": "57034f1fc39a8b33196ff777a60274446fa2db8fb22a343e8f7c5c312f73f342",
+      "p2": "191de7db84d745b7355382573bf422f666d1502b81453bd837b7bd74f29f6f71",
+      "p3": "bfb7b700b3798ca23497856dc43476f021664813b34337c271d0d07cf1f5dcce",
+      "p4": "8c71400b427058ced570bec4194eb3c267b1c5802ddf1a72b386d84bfb7821f2",
+      "p5": "d84a02916c79a4fc7ba6b852d0b2371fb836f3cd1769f3fde18a5424ad151382",
+      "public": "b7486f82166be22c0de16e143028abbce2e70a2f0f970057195deca8e85d5386",
+      "step": "e6f14cd318a492f80744d199b00e457ad0565d8a52f30de7fe3fcb7b7157d157"
+     },
+     "orders": {
+      "p1": [
+       {
+        "from": "p4",
+        "type": "accept_treaty"
+       },
+       {
+        "to": "p2",
+        "turns": 50,
+        "type": "propose_treaty"
+       },
+       {
+        "to": "p3",
+        "turns": 50,
+        "type": "propose_treaty"
+       },
+       {
+        "at": [
+         8,
+         12
+        ],
+        "type": "claim"
+       }
+      ],
+      "p2": [
+       {
+        "from": "p3",
+        "type": "accept_treaty"
+       },
+       {
+        "from": "p4",
+        "type": "accept_treaty"
+       },
+       {
+        "from": [
+         11,
+         16
+        ],
+        "path": [
+         [
+          11,
+          15
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 2
+        }
+       },
+       {
+        "from": [
+         11,
+         17
+        ],
+        "path": [
+         [
+          11,
+          16
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 5
+        }
+       },
+       {
+        "at": [
+         14,
+         17
+        ],
+        "type": "claim"
+       }
+      ],
+      "p3": [
+       {
+        "from": "p4",
+        "type": "accept_treaty"
+       },
+       {
+        "to": "p1",
+        "turns": 25,
+        "type": "propose_treaty"
+       },
+       {
+        "at": [
+         16,
+         5
+        ],
+        "type": "claim"
+       }
+      ],
+      "p4": [
+       {
+        "limit": 1.0,
+        "qty": 7,
+        "resource": "stone",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "at": [
+         17,
+         14
+        ],
+        "type": "claim"
+       },
+       {
+        "limit": 1.6326,
+        "qty": 8,
+        "resource": "wood",
+        "side": "buy",
+        "type": "market"
+       },
+       {
+        "at": [
+         16,
+         12
+        ],
+        "building": "lumber_mill",
+        "type": "build"
+       }
+      ],
+      "p5": [
+       {
+        "qty": 34,
+        "resource": "food",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "qty": 20,
+        "resource": "food",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "from": [
+         7,
+         6
+        ],
+        "path": [
+         [
+          7,
+          5
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       }
+      ]
+     }
+    },
+    {
+     "digests": {
+      "full": "373de076287b6a9488785af7a1db13d166044c4271c82c8f62764c21415759bf",
+      "p1": "7404456d9326a951ca186d72f8bcee4369d0d14a7be75475a72f4a9e5616eff2",
+      "p2": "c2a4598a5536ad8caa2500f78de7cdf2157cd12a19cbd60ec8f3e1fe3c93bc94",
+      "p3": "03b6831eab6627640403a0acf297278a569353f3d22c0b0ff9fd51338a2737c8",
+      "p4": "ea37f4a60ccff2302e21a52c3f1dc725d8a8a59b37bfdafb99a0b6856ba1972e",
+      "p5": "cd17478dc79947242283c4180440d90f34c247d2d629b14063ad6b05604b738d",
+      "public": "fbcd10ca53e2ee3b492aec64ea2a6fed68656489f91a1d10483fc31389887cce",
+      "step": "aa1aba64a074dde7763147079fe39da5269534cd3cf94b71b5453b921519ef04"
+     },
+     "orders": {
+      "p1": [
+       {
+        "from": "p3",
+        "type": "accept_treaty"
+       },
+       {
+        "limit": 0.8167,
+        "qty": 14,
+        "resource": "food",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "at": [
+         9,
+         12
+        ],
+        "type": "settle"
+       },
+       {
+        "at": [
+         4,
+         15
+        ],
+        "building": "quarry",
+        "type": "build"
+       }
+      ],
+      "p2": [
+       {
+        "limit": 1.0,
+        "qty": 14,
+        "resource": "stone",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "from": [
+         11,
+         15
+        ],
+        "path": [
+         [
+          11,
+          14
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 2
+        }
+       },
+       {
+        "from": [
+         11,
+         16
+        ],
+        "path": [
+         [
+          11,
+          15
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 5
+        }
+       }
+      ],
+      "p3": [
+       {
+        "from": "p1",
+        "type": "accept_treaty"
+       },
+       {
+        "limit": 0.6,
+        "qty": 14,
+        "resource": "food",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "at": [
+         17,
+         5
+        ],
+        "type": "settle"
+       },
+       {
+        "at": [
+         13,
+         3
+        ],
+        "building": "quarry",
+        "type": "build"
+       }
+      ],
+      "p4": [
+       {
+        "to": "p5",
+        "turns": 30,
+        "type": "propose_treaty"
+       },
+       {
+        "limit": 1.0,
+        "qty": 7,
+        "resource": "stone",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "at": [
+         17,
+         15
+        ],
+        "type": "settle"
+       },
+       {
+        "limit": 1.6476,
+        "qty": 16,
+        "resource": "wood",
+        "side": "buy",
+        "type": "market"
+       },
+       {
+        "at": [
+         18,
+         9
+        ],
+        "building": "quarry",
+        "type": "build"
+       }
+      ],
+      "p5": [
+       {
+        "city": [
+         7,
+         7
+        ],
+        "count": 2,
+        "type": "recruit",
+        "unit": "cavalry"
+       },
+       {
+        "from": [
+         7,
+         6
+        ],
+        "path": [
+         [
+          6,
+          6
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       }
+      ]
+     }
+    },
+    {
+     "digests": {
+      "full": "84a7eacffa87103f94626562a64f7934d37298a471510f2ae9be68e1b664a6b8",
+      "p1": "89297ab5de244b151891178b835e035e992cc0aafe92c8707eb47a0aa10197ef",
+      "p2": "0e2541c6099e41b75b06fec073837021c3c8ed63841d25cc94c94d4f3243aaa0",
+      "p3": "2e39df16e65f3ee126089a0e48ffafe2878eaf37d38c559e38de14eae45733a3",
+      "p4": "a4e5152ce00df7004116897aafd944186f670fc6cd20587efb4770ae385104d4",
+      "p5": "67306d7ad0ed9bd1e9838fad7396ae7906704afbc7ab587f07570b16d87db4f8",
+      "public": "1f9f2181220c8f70564dcfda029683e0f3239d41825152dbeda7a7f6ae9eca95",
+      "step": "42676b958732f26ec6701524d69cfad1f5302d9b73478031e4ae26e312f882f4"
+     },
+     "orders": {
+      "p1": [
+       {
+        "at": [
+         11,
+         13
+        ],
+        "type": "claim"
+       }
+      ],
+      "p2": [
+       {
+        "city": [
+         11,
+         17
+        ],
+        "count": 1,
+        "type": "recruit",
+        "unit": "infantry"
+       },
+       {
+        "from": [
+         11,
+         14
+        ],
+        "path": [
+         [
+          11,
+          13
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 2
+        }
+       },
+       {
+        "from": [
+         11,
+         15
+        ],
+        "path": [
+         [
+          11,
+          14
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 5
+        }
+       },
+       {
+        "at": [
+         9,
+         18
+        ],
+        "type": "claim"
+       }
+      ],
+      "p3": [
+       {
+        "to": "p5",
+        "turns": 25,
+        "type": "propose_treaty"
+       },
+       {
+        "at": [
+         16,
+         3
+        ],
+        "type": "claim"
+       }
+      ],
+      "p4": [
+       {
+        "at": [
+         18,
+         17
+        ],
+        "type": "claim"
+       }
+      ],
+      "p5": [
+       {
+        "qty": 15,
+        "resource": "stone",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "city": [
+         7,
+         7
+        ],
+        "count": 1,
+        "type": "recruit",
+        "unit": "cavalry"
+       },
+       {
+        "at": [
+         7,
+         7
+        ],
+        "building": "warehouse",
+        "type": "build"
+       },
+       {
+        "from": [
+         7,
+         5
+        ],
+        "path": [
+         [
+          7,
+          4
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         7,
+         7
+        ],
+        "path": [
+         [
+          6,
+          7
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "cavalry": 2
+        }
+       }
+      ]
+     }
+    },
+    {
+     "digests": {
+      "full": "3ddad85f5d7b4e41e728a9843f8b78097f72bc82161d8e94f85c6cb54e9fa884",
+      "p1": "821b71d929d24533e1dd2c83920a933fc34135b63a890c613adfc491564733eb",
+      "p2": "3ab191963dab3327a07969af28364af3ed7453627408403ecf53d99fa82a170a",
+      "p3": "1f9dd8a35f8f821c3e8af7e08d6704021b30ad101f350ad145e500bc5a42d901",
+      "p4": "5a2f8c01a45854fee9eb584160fe96857e0e0b53eea20109c90dda62f1aeea77",
+      "p5": "e60d5bf1137db9889194d41859a68acea46319a2ee6d50eab327cfc32dcbf4b7",
+      "public": "72c4de0990c7e62b25e9ac913dd96d3a2be08b6246e92a4903c4cd0950197788",
+      "step": "0a7698fbd7980b05c6cb46311849d623f1ee522d7e4ca9c293045d6d66bc97da"
+     },
+     "orders": {
+      "p1": [
+       {
+        "city": [
+         9,
+         12
+        ],
+        "count": 1,
+        "type": "recruit",
+        "unit": "archer"
+       },
+       {
+        "limit": 1.6366,
+        "qty": 9,
+        "resource": "stone",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "at": [
+         11,
+         12
+        ],
+        "type": "claim"
+       }
+      ],
+      "p2": [
+       {
+        "limit": 1.0,
+        "qty": 16,
+        "resource": "stone",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "city": [
+         11,
+         17
+        ],
+        "count": 1,
+        "type": "recruit",
+        "unit": "infantry"
+       },
+       {
+        "from": [
+         11,
+         13
+        ],
+        "path": [
+         [
+          10,
+          13
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 2
+        }
+       },
+       {
+        "from": [
+         11,
+         14
+        ],
+        "path": [
+         [
+          11,
+          13
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 5
+        }
+       },
+       {
+        "from": [
+         11,
+         17
+        ],
+        "path": [
+         [
+          11,
+          16
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "at": [
+         8,
+         18
+        ],
+        "type": "claim"
+       }
+      ],
+      "p3": [
+       {
+        "at": [
+         16,
+         2
+        ],
+        "type": "claim"
+       }
+      ],
+      "p4": [
+       {
+        "to": "p5",
+        "turns": 30,
+        "type": "propose_treaty"
+       },
+       {
+        "at": [
+         18,
+         18
+        ],
+        "type": "claim"
+       }
+      ],
+      "p5": [
+       {
+        "at": [
+         9,
+         8
+        ],
+        "type": "claim"
+       },
+       {
+        "from": [
+         7,
+         4
+        ],
+        "path": [
+         [
+          8,
+          4
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         6,
+         6
+        ],
+        "path": [
+         [
+          5,
+          6
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         7,
+         6
+        ],
+        "path": [
+         [
+          7,
+          7
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         6,
+         7
+        ],
+        "path": [
+         [
+          7,
+          7
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "cavalry": 2
+        }
+       },
+       {
+        "from": [
+         7,
+         7
+        ],
+        "path": [
+         [
+          8,
+          7
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "cavalry": 1
+        }
+       }
+      ]
+     }
+    },
+    {
+     "digests": {
+      "full": "b844d76ea1e14080e3ade7236f4a1650a76562aaa2993e6bfae90f60e4baad44",
+      "p1": "1952427ee00c3fdd0de42ac1b88f0a1bfadd9b6d18638f941e27826640c29793",
+      "p2": "86e4608f66e90aa523d9fea6b9f57dded4e566a816e2470aecb965fe45eba314",
+      "p3": "f8f05a779267ea9d81016f4c17e162f87e87a345e1315636b2ece54af9dab012",
+      "p4": "0f22adcf01e5761c360489ecb8dce1fc3b441a3e8e513ad5bcfe3d3e5f63cd21",
+      "p5": "87e4cb6239b47749942c020df5b7b14148c5e3f54358ebed3a4cd28a28ab59e1",
+      "public": "1011101c03dabf58f63ffab98490321dde58c9ae467f043b420830244531f4a0",
+      "step": "cc270f3f4fccfeaea9dbef8a070862badb6104604bb9918a162f9c3eb1f3bb0f"
+     },
+     "orders": {
+      "p1": [
+       {
+        "at": [
+         9,
+         12
+        ],
+        "building": "walls",
+        "type": "build"
+       }
+      ],
+      "p2": [
+       {
+        "from": [
+         10,
+         13
+        ],
+        "path": [
+         [
+          9,
+          13
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 2
+        }
+       },
+       {
+        "from": [
+         11,
+         13
+        ],
+        "path": [
+         [
+          10,
+          13
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 5
+        }
+       },
+       {
+        "from": [
+         11,
+         16
+        ],
+        "path": [
+         [
+          11,
+          15
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         11,
+         17
+        ],
+        "path": [
+         [
+          11,
+          16
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       }
+      ],
+      "p3": [
+       {
+        "limit": 1.2,
+        "qty": 10,
+        "resource": "stone",
+        "side": "sell",
+        "type": "market"
+       }
+      ],
+      "p4": [
+       {
+        "limit": 1.0,
+        "qty": 10,
+        "resource": "stone",
+        "side": "sell",
+        "type": "market"
+       }
+      ],
+      "p5": [
+       {
+        "qty": 8,
+        "resource": "wood",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "from": [
+         8,
+         4
+        ],
+        "path": [
+         [
+          8,
+          5
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         5,
+         6
+        ],
+        "path": [
+         [
+          5,
+          7
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         7,
+         7
+        ],
+        "path": [
+         [
+          7,
+          8
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "cavalry": 2
+        }
+       },
+       {
+        "from": [
+         8,
+         7
+        ],
+        "path": [
+         [
+          8,
+          8
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "cavalry": 1
+        }
+       }
+      ]
+     }
+    },
+    {
+     "digests": {
+      "full": "7ec77c87206a3e050a1e2ec9f2f2830cafaf55251396ce6bebe780a2525eb071",
+      "p1": "067450daf0ec8a36bfc3a0ad7ad4caf0a7c033d22273c86b6bd36fe9f5d40623",
+      "p2": "32fd3164e3b2ba39f11238a0a96ef8904f6b9606c5d51ba33c83bd1a7458cf0a",
+      "p3": "91c0d443da1d0c39fccc2ecc40c86b989d42f4221a58d1a6ea04c6be9f8ae5af",
+      "p4": "91dac131a2935b7c4082f09446189e084083ab254e70187386873079bfbf3916",
+      "p5": "98ea520f713596bed2501a2303b9dec3e3fb494a9066e36c0b250cd0ddb903f7",
+      "public": "c98ae5dc36267ecb6c9b83306e1659a8115d699ad2f305ccf10ae5f6c323b668",
+      "step": "150cadefca2bd5793573d2732e98f613bedfb13dd1db5866e1598155f3752e72"
+     },
+     "orders": {
+      "p1": [
+       {
+        "to": "p2",
+        "turns": 50,
+        "type": "propose_treaty"
+       },
+       {
+        "to": "p5",
+        "turns": 50,
+        "type": "propose_treaty"
+       },
+       {
+        "city": [
+         9,
+         12
+        ],
+        "count": 1,
+        "type": "recruit",
+        "unit": "infantry"
+       },
+       {
+        "at": [
+         12,
+         12
+        ],
+        "type": "claim"
+       }
+      ],
+      "p2": [
+       {
+        "limit": 1.0,
+        "qty": 18,
+        "resource": "stone",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "city": [
+         11,
+         17
+        ],
+        "count": 1,
+        "type": "recruit",
+        "unit": "infantry"
+       },
+       {
+        "from": [
+         9,
+         13
+        ],
+        "path": [
+         [
+          8,
+          13
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 2
+        }
+       },
+       {
+        "from": [
+         10,
+         13
+        ],
+        "path": [
+         [
+          9,
+          13
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 5
+        }
+       },
+       {
+        "from": [
+         11,
+         15
+        ],
+        "path": [
+         [
+          11,
+          14
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         11,
+         16
+        ],
+        "path": [
+         [
+          11,
+          15
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "at": [
+         8,
+         19
+        ],
+        "type": "claim"
+       }
+      ],
+      "p3": [
+       {
+        "to": "p5",
+        "turns": 25,
+        "type": "propose_treaty"
+       },
+       {
+        "limit": 0.6,
+        "qty": 6,
+        "resource": "food",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "limit": 1.2,
+        "qty": 12,
+        "resource": "stone",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "at": [
+         16,
+         1
+        ],
+        "type": "settle"
+       },
+       {
+        "at": [
+         11,
+         4
+        ],
+        "type": "claim"
+       }
+      ],
+      "p4": [
+       {
+        "to": "p5",
+        "turns": 30,
+        "type": "propose_treaty"
+       },
+       {
+        "limit": 1.0,
+        "qty": 14,
+        "resource": "stone",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "at": [
+         18,
+         19
+        ],
+        "type": "settle"
+       },
+       {
+        "at": [
+         16,
+         17
+        ],
+        "type": "claim"
+       }
+      ],
+      "p5": [
+       {
+        "from": [
+         7,
+         7
+        ],
+        "path": [
+         [
+          7,
+          8
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         7,
+         8
+        ],
+        "path": [
+         [
+          7,
+          7
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "cavalry": 1
+        }
+       }
+      ]
+     }
+    },
+    {
+     "digests": {
+      "full": "32d7aabab0c5b3c12c09b952453f4edc2be000285607e9d5623411a94c5292db",
+      "p1": "70ade8945992d6b064806a1c0cdbd54f841504bcdab8e1a1595557da63365cf3",
+      "p2": "eb3d31a8ab343a4e59caedddcb8e7e80ea6e40ba8fd9fedd133f79739dcb7aef",
+      "p3": "bfa5a46525d4e7d6ada276d7e3b72e1f3465933d0289d142c4ffac83f3673bfb",
+      "p4": "a16cc017483cacca76bc5b4b20501b4c24eb58cb77ca589096372a007c42966a",
+      "p5": "ffc794cdeaa7324e3ec0230dabed3acb4118f81a6b37b37e81dc4d64e041451f",
+      "public": "62f6f1d6a3d61a4deb754d84af89353c160b5cc200315a8324b239522902857d",
+      "step": "f61310595056de2b9fe421011fd13ca7aaa8b3fd0a968f8c08a92c7fe3bd5618"
+     },
+     "orders": {
+      "p1": [
+       {
+        "city": [
+         9,
+         12
+        ],
+        "count": 1,
+        "type": "recruit",
+        "unit": "infantry"
+       },
+       {
+        "at": [
+         13,
+         12
+        ],
+        "type": "claim"
+       }
+      ],
+      "p2": [
+       {
+        "city": [
+         11,
+         17
+        ],
+        "count": 2,
+        "type": "recruit",
+        "unit": "infantry"
+       },
+       {
+        "from": [
+         8,
+         13
+        ],
+        "path": [
+         [
+          7,
+          13
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 2
+        }
+       },
+       {
+        "from": [
+         9,
+         13
+        ],
+        "path": [
+         [
+          8,
+          13
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 5
+        }
+       },
+       {
+        "from": [
+         11,
+         14
+        ],
+        "path": [
+         [
+          11,
+          13
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         11,
+         15
+        ],
+        "path": [
+         [
+          11,
+          14
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         11,
+         17
+        ],
+        "path": [
+         [
+          11,
+          16
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       }
+      ],
+      "p3": [],
+      "p4": [],
+      "p5": [
+       {
+        "at": [
+         5,
+         5
+        ],
+        "type": "claim"
+       },
+       {
+        "limit": 2.0216,
+        "qty": 6,
+        "resource": "stone",
+        "side": "buy",
+        "type": "market"
+       },
+       {
+        "from": [
+         5,
+         7
+        ],
+        "path": [
+         [
+          5,
+          6
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         7,
+         7
+        ],
+        "path": [
+         [
+          8,
+          7
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "cavalry": 1
+        }
+       }
+      ]
+     }
+    },
+    {
+     "digests": {
+      "full": "d288b2bd58113e104655f69cab4c8e4440b8fb367017088145f2cae5838c6cce",
+      "p1": "b22ad83b12d380aa97138ddd710cade0aaac40e546db26111a4b9fcc865b5f21",
+      "p2": "71096d352cdc09dfd94eb955fbbb89fdcb326d7cda7d29d2566b1df4bbc5c37e",
+      "p3": "68848c70a57c100b8740f8d868069a0826e3fc54b42933f7c70d5ff5ec5bf13f",
+      "p4": "e7335628aae3f6956684e9fe7c0cea36f951cac199f7db1b2c05f8669409c0fa",
+      "p5": "7c5cdf09896ef732ad5509cf5cc80913439dcf69b3ecb5c49ede8e99b693cf15",
+      "public": "7e388889e99b3bbcc86147866e193f3fabef845af26ea81e0fc463405ed21791",
+      "step": "2c310799fb53091ee28c126ac5da47a6c26c7d1f8c3804ad319a7139bc445b0d"
+     },
+     "orders": {
+      "p1": [
+       {
+        "limit": 0.8371,
+        "qty": 36,
+        "resource": "food",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "at": [
+         10,
+         10
+        ],
+        "type": "claim"
+       }
+      ],
+      "p2": [
+       {
+        "limit": 1.0,
+        "qty": 18,
+        "resource": "stone",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "city": [
+         11,
+         17
+        ],
+        "count": 2,
+        "type": "recruit",
+        "unit": "infantry"
+       },
+       {
+        "from": [
+         7,
+         13
+        ],
+        "path": [
+         [
+          6,
+          13
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 2
+        }
+       },
+       {
+        "from": [
+         8,
+         13
+        ],
+        "path": [
+         [
+          7,
+          13
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 5
+        }
+       },
+       {
+        "from": [
+         11,
+         13
+        ],
+        "path": [
+         [
+          10,
+          13
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         11,
+         14
+        ],
+        "path": [
+         [
+          11,
+          13
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         11,
+         16
+        ],
+        "path": [
+         [
+          11,
+          15
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         11,
+         17
+        ],
+        "path": [
+         [
+          11,
+          16
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 2
+        }
+       },
+       {
+        "at": [
+         7,
+         19
+        ],
+        "type": "claim"
+       }
+      ],
+      "p3": [
+       {
+        "at": [
+         11,
+         3
+        ],
+        "type": "claim"
+       }
+      ],
+      "p4": [
+       {
+        "to": "p5",
+        "turns": 30,
+        "type": "propose_treaty"
+       },
+       {
+        "at": [
+         20,
+         11
+        ],
+        "type": "claim"
+       }
+      ],
+      "p5": [
+       {
+        "city": [
+         7,
+         7
+        ],
+        "count": 2,
+        "type": "recruit",
+        "unit": "cavalry"
+       },
+       {
+        "limit": 1.6406,
+        "qty": 23,
+        "resource": "wood",
+        "side": "buy",
+        "type": "market"
+       },
+       {
+        "limit": 2.0679,
+        "qty": 8,
+        "resource": "stone",
+        "side": "buy",
+        "type": "market"
+       },
+       {
+        "from": [
+         5,
+         6
+        ],
+        "path": [
+         [
+          5,
+          5
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       }
+      ]
+     }
+    },
+    {
+     "digests": {
+      "full": "6d96cdf69f26256dd8d6abbcec0b9bb013186d65748c4eac661cdfe3af77b1f8",
+      "p1": "14d1ed71a9ef18d1bc4d29eec8678eae4e3cbc93864e13c285e093196ee822e2",
+      "p2": "a994fe1f0b4e5d9b034cb1efbd8f3929983d905daa0a6b99d17492dceffe8700",
+      "p3": "e345bcee32cae00fef106cc179e5a714eab07461c0e8c2d8a3c6f75135481bcc",
+      "p4": "043a8e736e0938a975a69191b4570bcb717324f15cf5ee18e5bb3ea8d1bf1156",
+      "p5": "5a31a34f03dcf39a822b205ed60480ba8e978b1d7cb464427d654f2b0b6d7850",
+      "public": "bb8c45ed62590301f2f03c09a08694cb4e7893f1944dd8e7531aa041807e566e",
+      "step": "f7314a4fd3ce372e1c51049c994015cfbddbc44e92beca505dd1a33000ed89b3"
+     },
+     "orders": {
+      "p1": [
+       {
+        "at": [
+         5,
+         13
+        ],
+        "building": "walls",
+        "type": "build"
+       },
+       {
+        "limit": 1.6699,
+        "qty": 24,
+        "resource": "wood",
+        "side": "buy",
+        "type": "market"
+       },
+       {
+        "city": [
+         5,
+         13
+        ],
+        "count": 1,
+        "type": "recruit",
+        "unit": "archer"
+       },
+       {
+        "limit": 0.8183,
+        "qty": 26,
+        "resource": "food",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "from": [
+         9,
+         12
+        ],
+        "path": [
+         [
+          8,
+          12
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       }
+      ],
+      "p2": [
+       {
+        "limit": 1.0,
+        "qty": 11,
+        "resource": "stone",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "city": [
+         11,
+         17
+        ],
+        "count": 1,
+        "type": "recruit",
+        "unit": "infantry"
+       },
+       {
+        "from": [
+         7,
+         13
+        ],
+        "path": [
+         [
+          6,
+          13
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 5
+        }
+       },
+       {
+        "from": [
+         10,
+         13
+        ],
+        "path": [
+         [
+          9,
+          13
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         11,
+         13
+        ],
+        "path": [
+         [
+          10,
+          13
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         11,
+         15
+        ],
+        "path": [
+         [
+          11,
+          14
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         11,
+         16
+        ],
+        "path": [
+         [
+          11,
+          15
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 2
+        }
+       },
+       {
+        "from": [
+         11,
+         17
+        ],
+        "path": [
+         [
+          11,
+          16
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 2
+        }
+       }
+      ],
+      "p3": [
+       {
+        "to": "p5",
+        "turns": 25,
+        "type": "propose_treaty"
+       },
+       {
+        "limit": 0.6,
+        "qty": 54,
+        "resource": "food",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "limit": 1.2,
+        "qty": 11,
+        "resource": "stone",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "at": [
+         11,
+         2
+        ],
+        "type": "claim"
+       }
+      ],
+      "p4": [
+       {
+        "limit": 1.0,
+        "qty": 11,
+        "resource": "stone",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "at": [
+         18,
+         13
+        ],
+        "type": "claim"
+       }
+      ],
+      "p5": [
+       {
+        "qty": 6,
+        "resource": "wood",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "from": [
+         7,
+         7
+        ],
+        "path": [
+         [
+          7,
+          8
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "cavalry": 2
+        }
+       },
+       {
+        "from": [
+         8,
+         7
+        ],
+        "path": [
+         [
+          7,
+          7
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "cavalry": 1
+        }
+       },
+       {
+        "from": [
+         7,
+         8
+        ],
+        "path": [
+         [
+          6,
+          8
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "cavalry": 1,
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         8,
+         8
+        ],
+        "path": [
+         [
+          7,
+          8
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "cavalry": 1
+        }
+       }
+      ]
+     }
+    },
+    {
+     "digests": {
+      "full": "526d4e2f52687f0e302d80617bb0b50f7ed5dc6429b14076fff152cb3d0d99f8",
+      "p1": "b45bba2258e38cb3dc3350649cc6aa0f2e28891159436f424af8677ee1adfbb9",
+      "p2": "0b3a8531a301299fafaf63ade2d1cab490ecb21bb19e40cec3eff9fc23d24f4c",
+      "p3": "7d7772a9515a5d485dcb425607fc95811661e7fca7af374c2792d090d1b82179",
+      "p4": "565aa860b8c07b4fe447ea0cf3da5932c048e7eee0076d2039890c0fe454c974",
+      "p5": "a1cb075b1adb73e1f2ef2b2dd94e8110570c35667ed329ca8cff6e39dbf00b2e",
+      "public": "dfe1491d599a62c40a8fff74f91aef4db53a2ad7b6b77d6e19fc5fc212b3a310",
+      "step": "1ce4d7f47894bfe314bf6897c2045b0c3ef813934e80d1bfab6c463f61063ad9"
+     },
+     "orders": {
+      "p1": [
+       {
+        "limit": 0.7798,
+        "qty": 35,
+        "resource": "food",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "from": [
+         8,
+         12
+        ],
+        "path": [
+         [
+          8,
+          13
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "at": [
+         4,
+         11
+        ],
+        "type": "claim"
+       }
+      ],
+      "p2": [
+       {
+        "city": [
+         11,
+         17
+        ],
+        "count": 1,
+        "type": "recruit",
+        "unit": "infantry"
+       },
+       {
+        "from": [
+         9,
+         13
+        ],
+        "path": [
+         [
+          8,
+          13
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         10,
+         13
+        ],
+        "path": [
+         [
+          9,
+          13
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         11,
+         14
+        ],
+        "path": [
+         [
+          11,
+          13
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         11,
+         15
+        ],
+        "path": [
+         [
+          11,
+          14
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 2
+        }
+       },
+       {
+        "from": [
+         11,
+         16
+        ],
+        "path": [
+         [
+          11,
+          15
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 2
+        }
+       },
+       {
+        "from": [
+         11,
+         17
+        ],
+        "path": [
+         [
+          11,
+          16
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "at": [
+         11,
+         20
+        ],
+        "type": "claim"
+       }
+      ],
+      "p3": [
+       {
+        "limit": 0.6,
+        "qty": 63,
+        "resource": "food",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "limit": 1.2,
+        "qty": 17,
+        "resource": "stone",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "at": [
+         11,
+         1
+        ],
+        "type": "settle"
+       }
+      ],
+      "p4": [
+       {
+        "to": "p5",
+        "turns": 30,
+        "type": "propose_treaty"
+       },
+       {
+        "city": [
+         17,
+         15
+        ],
+        "count": 1,
+        "type": "recruit",
+        "unit": "archer"
+       },
+       {
+        "limit": 0.5,
+        "qty": 28,
+        "resource": "food",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "limit": 1.0,
+        "qty": 19,
+        "resource": "stone",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "at": [
+         21,
+         11
+        ],
+        "type": "settle"
+       },
+       {
+        "limit": 2.062,
+        "qty": 20,
+        "resource": "stone",
+        "side": "buy",
+        "type": "market"
+       },
+       {
+        "at": [
+         18,
+         16
+        ],
+        "building": "temple",
+        "type": "build"
+       },
+       {
+        "limit": 1.6699,
+        "qty": 6,
+        "resource": "wood",
+        "side": "buy",
+        "type": "market"
+       },
+       {
+        "at": [
+         16,
+         14
+        ],
+        "building": "lumber_mill",
+        "type": "build"
+       }
+      ],
+      "p5": [
+       {
+        "at": [
+         7,
+         5
+        ],
+        "type": "claim"
+       },
+       {
+        "at": [
+         8,
+         7
+        ],
+        "building": "quarry",
+        "type": "build"
+       },
+       {
+        "from": [
+         5,
+         5
+        ],
+        "path": [
+         [
+          6,
+          5
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         8,
+         5
+        ],
+        "path": [
+         [
+          8,
+          6
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         7,
+         7
+        ],
+        "path": [
+         [
+          6,
+          7
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "cavalry": 1
+        }
+       }
+      ]
+     }
+    },
+    {
+     "digests": {
+      "full": "0e12493068e5df44acb1221e7df44225da543e9145a926edfb6457c18350c1a5",
+      "p1": "5ff73e521fa7d21ae8d17883f4aa7053a87f4a718c8975668af5178faa178926",
+      "p2": "e053745b28996a6d1665501aebf8c97cbdf341af47d4ec5ecb990beefc129f91",
+      "p3": "04b0545f0d12851fc7433eb28178e007ed36129c467981a272cc5825f2e54704",
+      "p4": "d3350c84856d3048876eb8e1eb6c6b92e25bd78707c761baacadf15bdc993057",
+      "p5": "aafeba4da94b0ed037fbe63a4c0a67e2006ee6daefcaed0dd684fa948a31ccaa",
+      "public": "40cc7526e66f25311e9e1cef8ea2ed14fc5b6669885c9a9c7614fa4b289a952e",
+      "step": "f3cb363520fbb293cdfd20ebb0197d87c78c4308f5558dd35c3e9a771cd2cd89"
+     },
+     "orders": {
+      "p1": [
+       {
+        "to": "p2",
+        "turns": 50,
+        "type": "propose_treaty"
+       },
+       {
+        "to": "p5",
+        "turns": 50,
+        "type": "propose_treaty"
+       },
+       {
+        "limit": 0.7298,
+        "qty": 36,
+        "resource": "food",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "at": [
+         11,
+         11
+        ],
+        "type": "claim"
+       }
+      ],
+      "p2": [
+       {
+        "city": [
+         11,
+         17
+        ],
+        "count": 1,
+        "type": "recruit",
+        "unit": "infantry"
+       },
+       {
+        "from": [
+         9,
+         13
+        ],
+        "path": [
+         [
+          8,
+          13
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         11,
+         13
+        ],
+        "path": [
+         [
+          10,
+          13
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         11,
+         14
+        ],
+        "path": [
+         [
+          11,
+          13
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 2
+        }
+       },
+       {
+        "from": [
+         11,
+         15
+        ],
+        "path": [
+         [
+          11,
+          14
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 2
+        }
+       },
+       {
+        "from": [
+         11,
+         16
+        ],
+        "path": [
+         [
+          11,
+          15
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         11,
+         17
+        ],
+        "path": [
+         [
+          11,
+          16
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       }
+      ],
+      "p3": [
+       {
+        "at": [
+         9,
+         1
+        ],
+        "type": "claim"
+       }
+      ],
+      "p4": [
+       {
+        "city": [
+         21,
+         11
+        ],
+        "count": 1,
+        "type": "recruit",
+        "unit": "archer"
+       },
+       {
+        "city": [
+         18,
+         19
+        ],
+        "count": 1,
+        "type": "recruit",
+        "unit": "archer"
+       },
+       {
+        "limit": 0.5,
+        "qty": 34,
+        "resource": "food",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "limit": 1.0,
+        "qty": 20,
+        "resource": "stone",
+        "side": "sell",
+        "type": "market"
+       },
+       {
+        "at": [
+         15,
+         16
+        ],
+        "type": "claim"
+       },
+       {
+        "limit": 2.067,
+        "qty": 20,
+        "resource": "stone",
+        "side": "buy",
+        "type": "market"
+       },
+       {
+        "at": [
+         17,
+         13
+        ],
+        "building": "temple",
+        "type": "build"
+       }
+      ],
+      "p5": [
+       {
+        "at": [
+         8,
+         5
+        ],
+        "type": "claim"
+       },
+       {
+        "city": [
+         7,
+         7
+        ],
+        "count": 1,
+        "type": "recruit",
+        "unit": "archer"
+       },
+       {
+        "from": "p4",
+        "type": "accept_treaty"
+       },
+       {
+        "from": [
+         8,
+         6
+        ],
+        "path": [
+         [
+          9,
+          6
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "infantry": 1
+        }
+       },
+       {
+        "from": [
+         6,
+         8
+        ],
+        "path": [
+         [
+          6,
+          9
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "cavalry": 1
+        }
+       },
+       {
+        "from": [
+         7,
+         8
+        ],
+        "path": [
+         [
+          6,
+          8
+         ]
+        ],
+        "type": "move",
+        "units": {
+         "cavalry": 2
+        }
+       }
+      ]
+     }
+    }
+   ]
+  }
+ ],
+ "players": 5,
+ "rules": "fef8d7eec37e9a490b73ced0cb97948b8e2e555e3a334f903f9afd2df528c8c2"
+}
