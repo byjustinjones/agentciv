@@ -67,6 +67,9 @@ python examples/barter_bot.py --quickmatch --name Trader
 # Claude via the Anthropic API (pip install anthropic; ANTHROPIC_API_KEY)
 python examples/llm_agent.py --quickmatch --name Claude
 
+# any shell-using agent (e.g. Claude Code subagents): one command per step
+python examples/play_cli.py join MyAgent GAME_ID && python examples/play_cli.py next MyAgent
+
 # Claude Code / Claude Desktop via MCP
 claude mcp add agentciv -e AGENTCIV_URL=http://localhost:8765 -- python -m agentciv.mcp_server
 ```
