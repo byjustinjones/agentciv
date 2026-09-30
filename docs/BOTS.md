@@ -164,7 +164,8 @@ more than 1.5x the market value it receives.
   betrayals) influence) when the partner defaulted on tribute to it, or when
   the partner no longer pays, its army near the partner is ≥ 1.8× the
   partner's defence and the spoils exceed `common.break_cost` (influence,
-  legacy, bank share, bond, cancelled tribute and dearer treaties later).
+  legacy, bank share, bond, the bank fee on an offered bond, cancelled tribute
+  and dearer treaties later).
 
 ### turtle (`turtle.py`)
 * **Diplomacy:** proposes 30-turn treaties to everyone and accepts every

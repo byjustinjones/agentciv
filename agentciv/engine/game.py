@@ -404,57 +404,70 @@ class Game:
     def break_preview(self, pid: str) -> dict:
         """What breaking each of ``pid``'s treaties would cost right now."""
         out = {}
-        p = self._by_id[pid]
-        cost, lost, share = self.treaty_break_cost(pid), self.treaty_break_legacy(pid), self.treaty_break_bank(pid)
+        cost, lost = self.treaty_break_cost(pid), self.treaty_break_legacy(pid)
         for key in sorted(self.treaties):
             if pid not in key:
                 continue
             other = key[1] if key[0] == pid else key[0]
             terms = self.treaty_terms.get(key) or {}
-            deals = set(terms.get("deals", ()))
-            refund = D.peace_refund(self, deals, other, pid)
-            bond = terms.get("bond", {}).get(pid, 0)
-            owed = share + bond + refund
-            covered = max(0, p.bank) + max(0, p.resources["gold"])
+            bill = self._break_bill(pid, other, terms, cost)
             out[other] = {
-                "influence": cost, "legacy": lost, "gold_to_partner": owed,
-                "influence_debt": -(-max(0, owed - covered) // C.CONTRACT_DEFAULT_GOLD_PER_INFLUENCE),
+                "influence": cost, "legacy": lost, "gold_to_partner": bill["owed"],
+                "bank_fee": bill["fee"], "influence_debt": bill["debt"],
                 "cancels": [c["id"] for c in self.contracts
-                            if c["deal"] in deals and c["payer"] == other and c["payee"] == pid],
+                            if c["deal"] in bill["deals"] and c["payer"] == other and c["payee"] == pid],
             }
         return out
 
+    def _break_bill(self, pid: str, other: str, terms: dict, cost: int) -> dict:
+        """What ``pid`` owes ``other`` for breaking the treaty with ``terms``
+        (before any of it is paid; ``cost`` influence already counted as
+        spent): the bank share, its bond and the deal refunds, paid from the
+        bank, then gold; the rest as ``influence_debt``. Bank gold paid beyond
+        the bank share and the required bond (the offered bond and the
+        refunds) also costs a fee of 1 influence per
+        ``CONTRACT_DEFAULT_GOLD_PER_INFLUENCE`` gold, like a contract default
+        (§10), taken from influence and then as ``influence_debt``."""
+        p = self._by_id[pid]
+        per = C.CONTRACT_DEFAULT_GOLD_PER_INFLUENCE
+        deals = set(terms.get("deals", ()))
+        share = self.treaty_break_bank(pid)
+        bond = terms.get("bond", {}).get(pid, 0)
+        refund = D.peace_refund(self, deals, other, pid)
+        owed = share + bond + refund
+        from_bank = min(max(0, p.bank), owed)
+        from_gold = min(max(0, p.resources["gold"]), owed - from_bank)
+        exempt = share + min(bond, self.bond_required(pid))
+        fee = -(-max(0, from_bank - exempt) // per)
+        fee_paid = min(fee, max(0, p.resources["influence"] - cost))
+        debt = -(-(owed - from_bank - from_gold) // per) + fee - fee_paid
+        return {"deals": deals, "share": share, "bond": bond, "refund": refund, "owed": owed,
+                "from_bank": from_bank, "from_gold": from_gold, "fee": fee, "fee_paid": fee_paid, "debt": debt}
+
     def _break_treaty(self, p, v, cost: int, terms: dict) -> None:
         """Settle ``p`` breaking its treaty with ``v`` (already removed): §9."""
-        p.resources["influence"] -= cost
+        bill = self._break_bill(p.id, v.id, terms, cost)
         lost = self.treaty_break_legacy(p.id)
-        share = self.treaty_break_bank(p.id)
+        p.resources["influence"] -= cost + bill["fee_paid"]
         p.legacy -= lost
         p.betrayals += 1
         self.betrayed_this_turn.add(p.id)
-        deals = set(terms.get("deals", ()))
         cancelled = [c["id"] for c in self.contracts
-                     if c["deal"] in deals and c["payer"] == v.id and c["payee"] == p.id]
+                     if c["deal"] in bill["deals"] and c["payer"] == v.id and c["payee"] == p.id]
         if cancelled:
             self.contracts = [c for c in self.contracts if c["id"] not in cancelled]
             for cid in cancelled:
                 self._emit("contract_cancelled", vis=[p.id, v.id], contract=cid, payer=v.id, payee=p.id,
                            reason="treaty_broken")
-        refund = D.peace_refund(self, deals, v.id, p.id)
-        bond = terms.get("bond", {}).get(p.id, 0)
-        owed = bond + refund + share
-        from_bank = min(max(0, p.bank), owed)
-        p.bank -= from_bank
-        from_gold = min(max(0, p.resources["gold"]), owed - from_bank)
-        p.resources["gold"] -= from_gold
-        paid = from_bank + from_gold
+        p.bank -= bill["from_bank"]
+        p.resources["gold"] -= bill["from_gold"]
+        paid = bill["from_bank"] + bill["from_gold"]
         v.resources["gold"] += paid
-        debt = -(-(owed - paid) // C.CONTRACT_DEFAULT_GOLD_PER_INFLUENCE)
-        p.influence_debt += debt
+        p.influence_debt += bill["debt"]
         self._end_streak(p, "influence", reason="treaty_broken")
-        self._emit("treaty_broken", by=p.id, cost=cost, legacy_lost=lost, bank_share=share, bond=bond,
-                   refund=refund, paid=paid, debt=debt, cancelled=cancelled, betrayals=p.betrayals,
-                   **{"with": v.id})
+        self._emit("treaty_broken", by=p.id, cost=cost, legacy_lost=lost, bank_share=bill["share"],
+                   bond=bill["bond"], refund=bill["refund"], paid=paid, bank_fee=bill["fee"], debt=bill["debt"],
+                   cancelled=cancelled, betrayals=p.betrayals, **{"with": v.id})
 
     def owned_cities(self, pid: str) -> list:
         return [c for c in self.cities.values() if c.owner == pid]

@@ -177,7 +177,7 @@ def _fog() -> str:
         [names("city_captured"), "everyone; `plunder` only to `from` and `to`"],
         [names("deal_executed"), "everyone; `give`, `get` and `contracts` only to `from` and `to`"],
         [names("contract_default"), "everyone; `per_turn`, `penalty`, `debt` and `seized` only to `payer` and `payee`"],
-        [names("treaty_broken"), "everyone; `refund`, `paid`, `debt` and `cancelled` only to `by` and `with`"],
+        [names("treaty_broken"), "everyone; `refund`, `paid`, `bank_fee`, `debt` and `cancelled` only to `by` and `with`"],
         [names(*public), "everyone"],
         [names(*parties), "as in standard games: the parties only (a `say` to `\"all\"`: everyone)"],
     ]
@@ -288,8 +288,9 @@ sightings of that player's stacks (with `turn` = `as_of_turn`).
 * Still observable in fog games: aggregate market pool movements; deposit `remaining`;
   `influence_debt`; that an owner guards a relic (`guarded`, `relics_guarded`); that a capturer had units on a
   captured tile or city; that deals and contracts exist and when; contract defaults; changes in a player's public
-  `bank`, which show `seized` of a contract default and `plunder.bank` of a capture (and, with `turns_left`, the value
-  of a defaulted contract); treaty bonds and the `cost`, `legacy_lost`, `bank_share` and `bond` of a treaty break;
+  `bank`, which show `seized` of a contract default, `plunder.bank` of a capture (and, with `turns_left`, the value
+  of a defaulted contract) and the bank payment of a treaty break (when the bank covers what is owed, this shows `paid`,
+  `refund` and `bank_fee`); treaty bonds and the `cost`, `legacy_lost`, `bank_share` and `bond` of a treaty break;
   order failures on contact; a failed
   `accept` (one bit: which side could not deliver); espionage outcomes (they bound the target's rating); `diplomacy_seq`.
   The seed determines only the map, relics and starting positions.
@@ -525,9 +526,10 @@ Units left on a relic keep it; a hostile army that beats them (or walks onto an 
   other players still in the game (`you.treaty.slots`, `you.treaty.held`). Treaties signed before L fell are kept until they
   end, and no new treaty can be signed while at or over the limit. Renewing a treaty needs no free slot.
 * **Bonds**: each party pledges banked gold to its partner on a treaty: the `bond` it offers plus
-  {C.TREATY_BOND_PER_BETRAYAL} × its `betrayals` (`you.treaty.bond_required`). A player's pledges on all its treaties together cannot
-  exceed its bank (`you.treaty.bond_free` is what is left); a treaty whose bonds cannot be covered is not signed. Pledged
-  gold stays in the bank (§5). Bonds are public (`treaties[].bond`).
+  {C.TREATY_BOND_PER_BETRAYAL} × its `betrayals` (`you.treaty.bond_required`). When a treaty is signed or renewed, each
+  party's pledges on all its treaties together must not exceed its bank (`you.treaty.bond_free` is what is left); a treaty
+  whose bonds cannot be covered is not signed. Pledged gold stays in the bank (§5). Later bank losses do not reduce a bond;
+  on a break it is paid from bank, then gold, then `influence_debt` (below). Bonds are public (`treaties[].bond`).
 * **Ending a treaty at no cost**: expiry, `release_treaty {{with}}` ordered by both parties in the same turn, or the
   elimination of a party. The bonds are released.
 * **Breaking a treaty**: `break_treaty {{with}}` ends it immediately. With b = your `betrayals` before the break and
@@ -538,6 +540,9 @@ Units left on a relic keep it; a hostile army that beats them (or walks onto an 
     treaty, the start-price value (§10) of the resources the partner handed over in that deal, net of what you handed over
     (tiles and contracts not counted), times the unexpired share of that deal's peace. This is paid from your bank, then
     your gold; the rest becomes `influence_debt` (1 per {C.CONTRACT_DEFAULT_GOLD_PER_INFLUENCE} gold, §10);
+  * bank gold paid beyond the bank share and {C.TREATY_BOND_PER_BETRAYAL} × b of the bond (that is, the rest of the bond and the
+    deal refunds, as far as the bank pays them) costs a `bank_fee` of 1 influence per {C.CONTRACT_DEFAULT_GOLD_PER_INFLUENCE} gold,
+    rounded up, taken from your influence left after the break cost; the rest becomes `influence_debt`;
   * contracts from those deals that the partner pays to you end (`contract_cancelled`);
   * your influence streak ends and this turn end does not count toward it (§11); your public `betrayals` increases by 1.
   `you.treaty.break_preview` gives these amounts for each of your treaties as of now.
@@ -627,7 +632,7 @@ and again when executed (e.g. resources are only checked then) — execution fai
 * `turn`, `max_turns`, `status`, `deadline`, `season` {{name, turns_left, modifiers, next}}.
 * `you`: resources, caps, income, upkeep, claim_cost, settle_cost, market_fee, bank_limit, capital, and
   `treaty` {{slots, held, bond_required, bond_pledged, bond_free, break_cost, break_pct, break_preview}} (§9;
-  `break_preview` = {{partner: {{influence, legacy, gold_to_partner, influence_debt, cancels}}}}).
+  `break_preview` = {{partner: {{influence, legacy, gold_to_partner, bank_fee, influence_debt, cancels}}}}).
 * `players[]`: stats of every player (resources, income, cities, tiles, units, military_power, wonder_stage, relics_held, relics_guarded, relic_streak, bank, legacy, economic_streak, influence_streak, betrayals, reputation, score, victory_progress, submitted); in fog games some fields of other players are `null` (§14).
 * `map`: width, height, terrain rows, owner grid, improvements, deposits, relics (`{{x, y, owner, guarded}}`).
 * `cities[]` (walls, warehouse, market_hall, wonder_stage, garrison), `armies[]` ({{x, y, owner, units}}).

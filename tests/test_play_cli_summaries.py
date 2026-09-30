@@ -205,11 +205,14 @@ def test_treaty_alerts_bonds_and_warnings_from_the_engine():
     assert "Your treaties (2/2 slots): p2 ends t21; p3 ends t32, bonds you 40 / p3 0." in text
     full = summarize_view(view)
     assert "(2/2 slots used; unpledged bank 160, required bond 0)" in full
-    assert f"breaking it now: {C.TREATY_BREAK_COST} influence, legacy -0, 60 gold to p3" in full
+    # p1's 40 bond was offered, not required: it leaves the bank for a fee of 1 influence per 2 gold
+    assert f"breaking it now: {C.TREATY_BREAK_COST} influence + 20 influence bank fee, legacy -0, 60 gold to p3" in full
     w = order_warnings(view, [{"type": "propose_treaty", "to": "p4", "turns": 20},
                               {"type": "release_treaty", "with": "p2"}])
-    assert any("propose_treaty with p4 will FAIL: you hold 2 of 2 treaty slots" in s for s in w)
+    assert any("propose_treaty with p4 will FAIL unless p2 also order(s) release_treaty this turn" in s for s in w)
     assert any("only if p2 also orders release_treaty" in s for s in w)
+    w = order_warnings(view, [{"type": "propose_treaty", "to": "p4", "turns": 20}])
+    assert any("propose_treaty with p4 will FAIL: you hold 2 of 2 treaty slots" in s for s in w)
     # a break: cooldown alert for both, bond alert for the breaker without a bank
     g.player("p1").resources["influence"] = 200
     g.player("p1").bank = 0
@@ -219,7 +222,85 @@ def test_treaty_alerts_bonds_and_warnings_from_the_engine():
     until = 2 + C.TREATY_RESIGN_COOLDOWN
     assert f"Treaty cooldown with p2 until turn {until}: no treaty with p2 can be signed before then." in lines
     assert (f"Required treaty bond {C.TREATY_BOND_PER_BETRAYAL} exceeds your unpledged bank 0: "
-            "no treaty can be signed or renewed.") in lines
+            "no new treaty can be signed.") in lines
     assert f"Treaty cooldowns: p2 until t{until}." in summarize_compact(view)
     assert any("will FAIL: no treaty with p2 can be signed before turn" in s
                for s in order_warnings(view, [{"type": "propose_treaty", "to": "p2", "turns": 20}]))
+
+
+def _treaty_world(n):
+    from agentciv.engine.testing import sandbox
+    g = sandbox(n)
+    for k, (x, y) in enumerate([(2, 2), (12, 2), (2, 12), (12, 12), (20, 2)][:n]):
+        g.add_city(x, y, f"p{k + 1}", capital=True)
+    return g
+
+
+def _failed(ev):
+    return [e for e in ev if e["type"] == "order_failed"]
+
+
+def test_treaty_warnings_count_a_break_before_a_proposal():
+    """Breaks resolve before proposals (rules §9): the freed slot is usable."""
+    g = _treaty_world(3)
+    p1 = g.player("p1")
+    p1.bank, p1.resources["influence"] = 200, 100
+    g.sign_treaty("p1", "p2", 20)
+    orders = [{"type": "break_treaty", "with": "p2"}, {"type": "propose_treaty", "to": "p3", "turns": 20}]
+    assert order_warnings(g.player_view("p1"), orders) == []
+    assert not _failed(run_turn(g, {"p1": orders}))
+
+
+def test_treaty_warnings_check_each_proposal_on_its_own():
+    g = _treaty_world(5)
+    p1 = g.player("p1")
+    p1.bank, p1.betrayals = 60, 1
+    orders = [{"type": "propose_treaty", "to": q, "turns": 20} for q in ("p2", "p3")]
+    w = order_warnings(g.player_view("p1"), orders)
+    assert not any("FAIL" in s for s in w)
+    assert any("if all these proposals are accepted" in s for s in w)
+    assert not _failed(run_turn(g, {"p1": orders}))
+    # accepts sign now and do pledge: the second one fails
+    orders = [{"type": "accept_treaty", "from": "p1"}]
+    g2 = _treaty_world(5)
+    q = g2.player("p1")
+    q.bank, q.betrayals = 60, 1
+    run_turn(g2, {"p2": [{"type": "propose_treaty", "to": "p1", "turns": 20}],
+                  "p3": [{"type": "propose_treaty", "to": "p1", "turns": 20}]})
+    orders = [{"type": "accept_treaty", "from": "p2"}, {"type": "accept_treaty", "from": "p3"}]
+    w = order_warnings(g2.player_view("p1"), orders)
+    assert [s for s in w if "FAIL" in s] == [
+        "accept_treaty with p3 will FAIL: your bond of 50 exceeds your unpledged bank 10"]
+    assert len(_failed(run_turn(g2, {"p1": orders}))) == 1
+
+
+def test_treaty_warnings_price_a_second_break_higher():
+    from agentciv.engine import constants as C
+    g = _treaty_world(5)
+    p1 = g.player("p1")
+    p1.resources["influence"] = 120
+    g.sign_treaty("p1", "p2", 20)
+    g.sign_treaty("p1", "p3", 20)
+    orders = [{"type": "break_treaty", "with": q} for q in ("p2", "p3")]
+    w = order_warnings(g.player_view("p1"), orders)
+    assert w == [f"break_treaty with p3 costs {2 * C.TREATY_BREAK_COST} influence after the earlier break "
+                 "in this list but you hold 70: it will FAIL"]
+    assert [e["reason"] for e in _failed(run_turn(g, {"p1": orders}))] == [
+        f"breaking this treaty costs {2 * C.TREATY_BREAK_COST} influence"]
+
+
+def test_bond_alert_does_not_claim_a_renewal_is_impossible():
+    g = _treaty_world(3)
+    p1 = g.player("p1")
+    p1.bank, p1.betrayals = 60, 1
+    g.sign_treaty("p1", "p2", 20)
+    lines = view_alerts(g.player_view("p1"))
+    assert "Required treaty bond 50 exceeds your unpledged bank 10: no new treaty can be signed." in lines
+    assert not any("cannot be renewed" in s for s in lines)
+    assert g.diplomacy("p2", [{"type": "propose", "to": "p1", "peace": 40}])[0]["ok"]
+    assert g.diplomacy("p1", [{"type": "accept", "deal": "d1"}])[0]["ok"]
+    assert g.treaties[("p1", "p2")] == 40
+    # once the bank no longer covers the bond, the alert names the treaty
+    p1.bank = 30
+    assert ("Treaty with p2 cannot be renewed: its bond (50) exceeds your unpledged bank plus your bond "
+            "on it (30).") in view_alerts(g.player_view("p1"))

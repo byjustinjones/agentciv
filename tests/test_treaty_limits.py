@@ -7,6 +7,7 @@ import pytest
 from agentciv.engine import constants as C
 from agentciv.engine import deals as D
 from agentciv.engine import rules_json
+from agentciv.engine.rulesdoc import render as rules_md
 from agentciv.engine.testing import events_of, run_turn, sandbox
 
 SPOTS = [(2, 2), (12, 2), (2, 12), (12, 12), (20, 2), (20, 20)]
@@ -224,8 +225,11 @@ def test_break_pipeline_exact_amounts():
     assert (b["cost"], b["legacy_lost"], b["bank_share"], b["bond"], b["refund"]) == (
         C.TREATY_BREAK_COST, legacy * C.TREATY_BREAK_PCT // 100, share, 100, refund)
     assert b["paid"] == 100 + share + refund and b["debt"] == 0 and b["betrayals"] == 1
+    # the offered bond and the refund leave the bank: 1 influence per 2 gold, like a default
+    fee = -(-(100 + refund) // C.CONTRACT_DEFAULT_GOLD_PER_INFLUENCE)
+    assert b["bank_fee"] == fee
     assert preview == {"influence": b["cost"], "legacy": b["legacy_lost"], "gold_to_partner": b["paid"],
-                       "influence_debt": 0, "cancels": b["cancelled"]}
+                       "bank_fee": fee, "influence_debt": 0, "cancels": b["cancelled"]}
     assert b["cancelled"] and not g.contracts
     assert events_of(ev, "contract_cancelled")[0]["reason"] == "treaty_broken"
     inc = g.stats()
@@ -251,9 +255,63 @@ def test_break_pays_from_bank_then_gold_then_debt():
     b = events_of(ev, "treaty_broken")[0]
     owed = 300 + 100 * C.TREATY_BREAK_PCT // 100
     assert b["bank_share"] == 10 and b["paid"] == 160
+    # 90 of the offered bond came from the bank: a 45 fee, held after the 50 break cost
+    assert b["bank_fee"] == 45
     assert b["debt"] == -(-(owed - 160) // C.CONTRACT_DEFAULT_GOLD_PER_INFLUENCE)
     assert p1.bank == 0 and p1.resources["gold"] == g.stats()["p1"]["income"]["gold"]
     assert g.player_view("p3")["players"][0]["reputation"]["influence_debt"] == p1.influence_debt > 0
+
+
+def _default_route_cost(n):
+    """Influence a player pays to move ``n`` bank gold to another player's
+    gold by defaulting on a contract worth ``n`` (the obligation is seized)."""
+    return D.default_penalty(n)
+
+
+@pytest.mark.parametrize("bond", [900, 1000])
+def test_a_self_arranged_break_moves_bank_gold_no_cheaper_than_a_default(bond):
+    g = world(4)
+    p1, p2 = g.player("p1"), g.player("p2")
+    p1.bank, p1.legacy, p1.resources["gold"] = 1000, 0, 0
+    p1.resources["influence"] = 60
+    gold2 = p2.resources["gold"]
+    deal_sign(g, "p1", "p2", give={"bond": bond})
+    ev = run_turn(g, {"p1": [{"type": "break_treaty", "with": "p2"}]})
+    b = events_of(ev, "treaty_broken")[0]
+    moved = 1000 - p1.bank
+    assert moved == b["paid"] == 1000 and p2.resources["gold"] - gold2 - g.stats()["p2"]["income"]["gold"] == moved
+    assert b["bank_fee"] == -(-(moved - b["bank_share"]) // 2)
+    assert b["cost"] + b["bank_fee"] >= _default_route_cost(moved)
+    # the fee beyond the influence left after the break cost is owed, plus the unpaid 100 of a 1000 bond
+    unpaid = b["bank_share"] + bond - moved
+    assert b["debt"] == b["bank_fee"] - (60 - b["cost"]) + -(-unpaid // 2)
+    assert p1.influence_debt == b["debt"] - g.stats()["p1"]["income"]["influence"]   # phase 7 repays
+
+
+def test_the_bank_paid_refund_of_a_peace_deal_carries_the_fee():
+    g = world(4)
+    p1, p2 = g.player("p1"), g.player("p2")
+    p1.bank, p1.resources["gold"] = 1000, 0
+    p2.resources["wood"] = 400
+    deal_sign(g, "p2", "p1", give={"wood": 400})            # p2 "pays" 400 wood for peace
+    p1.resources["influence"] = 1000
+    ev = run_turn(g, {"p1": [{"type": "break_treaty", "with": "p2"}]})
+    b = events_of(ev, "treaty_broken")[0]
+    assert b["refund"] == 400 * D.REFERENCE_PRICES["wood"] and b["bond"] == 0
+    assert b["bank_fee"] == -(-b["refund"] // 2) and b["debt"] == 0
+    assert b["cost"] + b["bank_fee"] >= _default_route_cost(b["refund"])
+
+
+def test_the_required_bond_and_bank_share_carry_no_fee():
+    g = world(4)
+    p1 = g.player("p1")
+    p1.betrayals, p1.bank = 1, 500
+    deal_sign(g, "p1", "p2")                                # p1 pledges the required 50
+    assert g.treaty_terms[("p1", "p2")]["bond"]["p1"] == C.TREATY_BOND_PER_BETRAYAL
+    p1.resources["influence"] = 200
+    ev = run_turn(g, {"p1": [{"type": "break_treaty", "with": "p2"}]})
+    b = events_of(ev, "treaty_broken")[0]
+    assert b["paid"] == b["bank_share"] + C.TREATY_BOND_PER_BETRAYAL and b["bank_fee"] == 0
 
 
 def test_refund_is_prorated_per_deal_and_only_for_the_victims_net_lump():
@@ -361,8 +419,16 @@ def test_fog_redacts_the_deal_value_of_a_break():
     run_turn(g, {"p1": [{"type": "break_treaty", "with": "p2"}]})
     seen = {pid: next(e for e in g.player_view(pid)["events"] if e["type"] == "treaty_broken")
             for pid in ("p1", "p2", "p3")}
-    for k in ("refund", "paid", "debt", "cancelled"):
+    for k in ("refund", "paid", "bank_fee", "debt", "cancelled"):
         assert k in seen["p1"] and k in seen["p2"] and k not in seen["p3"]
+    # documented (RULES §14): the public bank shows the bank payment, so when the bank
+    # covers what is owed a third party can work out `paid` and `refund`
+    b = seen["p1"]
+    before = next(e for e in g.player_view("p3")["events"] if e["type"] == "treaty_broken")
+    p3_bank = next(r for r in g.player_view("p3")["players"] if r["id"] == "p1")["bank"]
+    assert p1.resources["gold"] >= 0 and 400 - p3_bank == b["paid"]
+    assert b["paid"] - before["bank_share"] - before["bond"] == b["refund"]
+    assert "bank payment of a treaty break" in rules_md()
     for k in ("cost", "legacy_lost", "bank_share", "bond", "betrayals"):
         assert seen["p3"][k] == seen["p1"][k]
     assert "break_preview" in g.player_view("p1")["you"]["treaty"]

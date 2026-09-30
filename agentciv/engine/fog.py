@@ -81,7 +81,7 @@ REDACT = {
     "city_captured": (("from", "to"), ("plunder",)),
     "deal_executed": (("from", "to"), ("give", "get", "contracts")),
     "contract_default": (("payer", "payee"), ("per_turn", "penalty", "debt", "seized")),
-    "treaty_broken": (("by", "with"), ("refund", "paid", "debt", "cancelled")),
+    "treaty_broken": (("by", "with"), ("refund", "paid", "bank_fee", "debt", "cancelled")),
 }
 
 _HIDDEN_KEYS = ("_vis", "_fog")

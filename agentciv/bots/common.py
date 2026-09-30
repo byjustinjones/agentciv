@@ -922,7 +922,8 @@ def break_cost(world: World, q: str) -> tuple:
     """(influence needed, gold-equivalent cost) of breaking our treaty with
     ``q``: the influence, the legacy loss (dear on the influence path), our
     bond on the treaty, the tribute ``q`` still owes us under contracts that
-    the break cancels, and dearer treaties afterwards."""
+    the break cancels, the bank fee on an offered bond, and dearer treaties
+    afterwards."""
     w = world
     me = w.players.get(w.me) or {}
     b = w.betrayals(w.me)
@@ -932,6 +933,8 @@ def break_cost(world: World, q: str) -> tuple:
     lw = 1.0 + 4.0 * float(w.progress(w.me).get("influence", 0) or 0)
     key = (w.me, q) if w.me < q else (q, w.me)
     bond = int((w.treaty_bonds.get(key) or {}).get(w.me, 0) or 0)
+    # the offered part of the bond leaves the bank for 1 influence per 2 gold (§9)
+    fee = -(-max(0, bond - C.TREATY_BOND_PER_BETRAYAL * b) // C.CONTRACT_DEFAULT_GOLD_PER_INFLUENCE)
     tribute = 0.0
     for c in w.view.get("contracts", []) or []:
         if c.get("payer") == q and c.get("payee") == w.me:
@@ -940,7 +943,7 @@ def break_cost(world: World, q: str) -> tuple:
     later = 2 * C.TREATY_BOND_PER_BETRAYAL  # dearer treaties afterwards
     bank = int(me.get("bank", 0) or 0) * pct // 100
     bw = 1.0 + 2.0 * float(w.progress(w.me).get("economic", 0) or 0)
-    return infl, 2.0 * infl + lw * legacy + bw * bank + bond + tribute + later
+    return infl, 2.0 * (infl + fee) + lw * legacy + bw * bank + bond + tribute + later
 
 
 # ---------------------------------------------------------------------------

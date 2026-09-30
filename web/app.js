@@ -2483,7 +2483,7 @@
       const brk = (t, q) => {
         const other = t.a === q ? t.b : t.a;
         const pv = own && v.you?.id === q ? own[other] : null;
-        const c = pv ? { influence: pv.influence, legacy: pv.legacy, gold: pv.gold_to_partner } : Rules.breakCost(rows[q], t.bond?.[q]);
+        const c = pv ? { influence: pv.influence + num(pv.bank_fee), legacy: pv.legacy, gold: pv.gold_to_partner } : Rules.breakCost(rows[q], t.bond?.[q]);
         return `<span class="muted" title="cost for ${esc(q)} to break it now${pv ? '' : ' (bank share + bond; deal refunds not included)'}">${esc(q)} break: ${fmt(c.influence)} infl, −${fmt(c.legacy)} legacy, ${fmt(c.gold)} gold</span>`;
       };
       const bondTxt = (t) => {

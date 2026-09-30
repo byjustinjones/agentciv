@@ -786,39 +786,82 @@ def order_warnings(view: dict, orders: list) -> list[str]:
     return warnings
 
 
+_BOND_PER_BETRAYAL = 50   # rules §9: required bond per betrayal (rules.json diplomacy.treaty_bond_per_betrayal)
+
+
 def _treaty_warnings(view: dict, pid: str, orders: list) -> list[str]:
-    """Treaty orders that the §9 limits visible in the view will make fail."""
+    """Treaty orders that the §9 limits visible in the view will make fail.
+
+    Follows the engine's order of resolution whatever the order of the list:
+    every break first (each one raising the next break's cost and the
+    required bond, and paying from the bank), then releases, then accepts
+    (which sign and pledge at once), then proposals (each checked on its
+    own; a proposal pledges nothing until it is accepted)."""
     ts = treaty_status(view, pid)
     you = view.get("you") or {}
     info = you.get("treaty") or {}
+    row = next((r for r in view.get("players", []) if r.get("id") == pid), {})
+    of = lambda t: [o for o in orders if o.get("type") == t]
     out = []
-    new = 0
-    pledged = 0
-    for o in orders:
-        t = o.get("type")
-        q = o.get("to") if t == "propose_treaty" else o.get("from") if t == "accept_treaty" else o.get("with")
-        if t in ("propose_treaty", "accept_treaty"):
+    held, slots, free, req = ts["held"], ts["slots"], ts["bond_free"], ts["bond_required"]
+    infl = (you.get("resources") or {}).get("influence", 0)
+    cost, b, bank = info.get("break_cost"), int(row.get("betrayals", 0) or 0), row.get("bank")
+    pledged = info.get("bond_pledged")
+    broken: list = []
+    for o in of("break_treaty"):
+        q = o.get("with")
+        if q not in ts["treaties"] or q in broken or cost is None:
+            continue
+        k_cost = cost * (1 + b + len(broken)) // (1 + b)
+        if infl < k_cost:
+            more = " after the earlier break in this list" if broken else ""
+            out.append(f"break_treaty with {q} costs {k_cost} influence{more} but you hold {infl}: it will FAIL")
+            continue
+        bp = ts["break_preview"].get(q) or {}
+        infl -= k_cost + int(bp.get("bank_fee", 0) or 0)
+        held -= 1
+        req += _BOND_PER_BETRAYAL
+        if free is not None and bank is not None and pledged is not None:
+            bank -= min(max(0, bank), int(bp.get("gold_to_partner", 0) or 0))
+            pledged -= ts["treaties"][q]["mine"]
+            free = max(0, bank - pledged)
+        broken.append(q)
+    releases = []
+    for o in of("release_treaty"):
+        q = o.get("with")
+        if q in ts["treaties"] and q not in broken:
+            releases.append(q)
+            out.append(f"release_treaty with {q} ends the treaty only if {q} also orders release_treaty this turn")
+    accepted = 0
+    wanted = 0
+    for t, key in (("accept_treaty", "from"), ("propose_treaty", "to")):
+        for o in of(t):
+            q = o.get(key)
             if q in ts["cooldowns"]:
                 out.append(f"{t} with {q} will FAIL: no treaty with {q} can be signed before turn {ts['cooldowns'][q]}")
                 continue
-            # accepts resolve before new proposals; a proposal needs a free slot when made
-            used = ts["held"] + new + (1 if t == "accept_treaty" else 0)
-            if ts["slots"] is not None and (used > ts["slots"] if t == "accept_treaty" else used >= ts["slots"]):
-                out.append(f"{t} with {q} will FAIL: you hold {ts['held']} of {ts['slots']} treaty slots"
-                           + (f" and accept {new} more earlier in this list" if new else ""))
-            elif t == "accept_treaty":
-                new += 1
-            pledged += ts["bond_required"] + int(o.get("bond") or 0)
-            if ts["bond_free"] is not None and pledged > ts["bond_free"]:
-                out.append(f"{t} with {q}: bonds of {pledged} exceed your unpledged bank {ts['bond_free']}; "
-                           "it will FAIL")
-        elif t == "break_treaty" and info.get("break_cost") is not None:
-            infl = (you.get("resources") or {}).get("influence", 0)
-            if infl < info["break_cost"]:
-                out.append(f"break_treaty with {q} costs {info['break_cost']} influence but you hold {infl}: "
-                           "it will FAIL")
-        elif t == "release_treaty":
-            out.append(f"release_treaty with {q} ends the treaty only if {q} also orders release_treaty this turn")
+            if slots is not None and held >= slots:
+                if held - len(releases) < slots:
+                    out.append(f"{t} with {q} will FAIL unless {' and '.join(releases)} also order(s) "
+                               f"release_treaty this turn: you would hold {held} of {slots} treaty slots")
+                else:
+                    out.append(f"{t} with {q} will FAIL: you hold {held} of {slots} treaty slots"
+                               + (f" counting the {accepted} accept(s) in this list" if accepted else ""))
+                continue
+            need = req + int(o.get("bond") or 0)
+            if free is not None and need > free:
+                out.append(f"{t} with {q} will FAIL: your bond of {need} exceeds your unpledged bank {free}")
+                continue
+            if t == "accept_treaty":
+                held += 1
+                accepted += 1
+                if free is not None:
+                    free -= need
+            else:
+                wanted += need
+    if free is not None and len(of("propose_treaty")) > 1 and wanted > free:
+        out.append(f"propose_treaty: if all these proposals are accepted their bonds ({wanted}) exceed your "
+                   f"unpledged bank {free}; the later accepts will fail")
     return out
 
 
@@ -1068,7 +1111,17 @@ def view_alerts(view: dict, pid: str | None = None) -> list[str]:
         out.append(f"Treaty cooldown with {q} until turn {until}: no treaty with {q} can be signed before then.")
     if ts["bond_free"] is not None and ts["bond_required"] > ts["bond_free"]:
         out.append(f"Required treaty bond {ts['bond_required']} exceeds your unpledged bank {ts['bond_free']}: "
-                   "no treaty can be signed or renewed.")
+                   "no new treaty can be signed.")
+    if ts["bond_free"] is not None:
+        row = next((r for r in view.get("players", []) if r.get("id") == pid), {})
+        pledged = (you.get("treaty") or {}).get("bond_pledged")
+        free = row["bank"] - pledged if row.get("bank") is not None and pledged is not None else ts["bond_free"]
+        # a renewal without an offer keeps max(required, old bond) against the bank left besides the old bond
+        for q, t in sorted(ts["treaties"].items()):
+            need, room = max(ts["bond_required"], t["mine"]), max(0, free + t["mine"])
+            if need > room:
+                out.append(f"Treaty with {q} cannot be renewed: its bond ({need}) exceeds your unpledged bank "
+                           f"plus your bond on it ({room}).")
     for a in armies:
         if a.get("owner") == pid or a.get("owner") in partners:
             continue
@@ -1351,7 +1404,8 @@ def summarize_view(view: dict, pid: str | None = None, max_events: int = 12, max
                 bonds = (f", bonds you {mine[q]['mine']} / {q} {mine[q]['theirs']}"
                          if mine[q]["mine"] or mine[q]["theirs"] else "")
                 bp = ts["break_preview"].get(q)
-                brk = (f"; breaking it now: {bp['influence']} influence, legacy -{bp['legacy']}, "
+                fee = f" + {bp['bank_fee']} influence bank fee" if bp and bp.get("bank_fee") else ""
+                brk = (f"; breaking it now: {bp['influence']} influence{fee}, legacy -{bp['legacy']}, "
                        f"{bp['gold_to_partner']} gold to {q}" if bp else "")
                 lines.append(f"{q}: peace until turn {mine[q]['until']} ({left} turn(s) left){soon}{bonds}{brk}")
             elif q in ts["cooldowns"]:

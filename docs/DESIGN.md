@@ -349,8 +349,10 @@ Treaties are scarce and breaking one is priced (constants `TREATY_*`):
   (If games get too bloody, the documented fallback is ceil(L/1.5), see
   BALANCE.md.)
 * **Bonds.** Each party pledges banked gold on each treaty: its offered `bond`
-  plus 50 × its `betrayals`. Pledges on all of a player's treaties together
-  cannot exceed its bank. Pledged gold stays in the bank (it counts for the
+  plus 50 × its `betrayals`. At signing or renewal, pledges on all of a
+  player's treaties together must not exceed its bank; later bank losses
+  (a capture, a default seizure, another break) do not reduce a bond, which a
+  break then pays from bank, gold and `influence_debt`. Pledged gold stays in the bank (it counts for the
   bank victory and earns interest); it is recorded, not moved. Bonds are public
   (`treaties[].bond`). A renewal without a new offer keeps the old bond (raised
   to the required minimum).
@@ -367,15 +369,24 @@ Treaties are scarce and breaking one is priced (constants `TREATY_*`):
   bond on the treaty, and for each deal that signed or renewed the treaty the
   net start-price value of the lump resources the partner handed over times the
   unexpired share of that deal's peace (`deals.peace_refund`), from the bank,
-  then gold, the rest as `influence_debt` (1 per 2 gold); cancel that deal's
+  then gold, the rest as `influence_debt` (1 per 2 gold); bank gold paid
+  beyond the bank share and 50·b of the bond (the offered bond and the
+  refunds) also costs `bank_fee` = 1 influence per 2 gold, from influence
+  left after the break cost, then `influence_debt`. That fee prices a break
+  arranged with an ally (a large offered bond, or a peace deal refunded from
+  the bank) like a contract default, the other way bank gold leaves the
+  bank; without it, a break moved the whole bank to an ally's spendable gold
+  for 50 influence. Cancel that deal's
   contracts the partner pays the breaker (`contract_cancelled`, parties only);
   end the influence streak (the break turn's end does not count); betrayals +1.
   The pair cannot sign again for 15 turns (`treaty_cooldowns`) and stays
   movement-restricted during the break turn and the next. If both partners
   break in the same turn, each pays in full and each is paid by the other.
   `you.treaty.break_preview` lists these amounts per own treaty. Under fog,
-  `treaty_broken` shows `refund`, `paid`, `debt` and `cancelled` only to the
-  two parties.
+  `treaty_broken` shows `refund`, `paid`, `bank_fee`, `debt` and `cancelled`
+  only to the two parties; the public bank still shows the bank part of the
+  payment, so when the bank covers it all a third party can derive them
+  (RULES §14 lists this).
 
 **Disband** `{at, units}` removes your units (no refund).
 

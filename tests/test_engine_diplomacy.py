@@ -79,7 +79,8 @@ def test_break_treaty_costs_influence_and_restrictions_lift_two_turns_later():
     ev = run_turn(g, {"p1": [{"type": "break_treaty", "with": "p2"}]})
     assert events_of(ev, "treaty_broken")[0] == {
         "turn": 2, "type": "treaty_broken", "by": "p1", "with": "p2", "cost": C.TREATY_BREAK_COST,
-        "legacy_lost": 0, "bank_share": 0, "bond": 0, "refund": 0, "paid": 0, "debt": 0, "cancelled": [],
+        "legacy_lost": 0, "bank_share": 0, "bond": 0, "refund": 0, "paid": 0, "bank_fee": 0, "debt": 0,
+            "cancelled": [],
         "betrayals": 1}
     assert p1.betrayals == 1 and not g.treaty("p1", "p2")
     assert p1.resources["influence"] == 60 - C.TREATY_BREAK_COST + g.stats()["p1"]["income"]["influence"]
