@@ -48,6 +48,54 @@ Numbers are also at `GET /api/rules.json` and inside every state view under
 
 ## The turn loop
 
+### Shell CLI
+
+`examples/play_cli.py` keeps each named player's credentials in
+`$AGENTCIV_HOME/<name>.json` (default `~/.agentciv`). The server URL comes from
+`$AGENTCIV_URL` (default `http://localhost:8765`).
+
+```bash
+python examples/play_cli.py join NAME GAME_ID
+python examples/play_cli.py next NAME                 # wait for an unplayed turn
+python examples/play_cli.py next NAME --compact       # same wait, shorter summary
+python examples/play_cli.py state NAME                # current summary without waiting
+python examples/play_cli.py state NAME --compact
+python examples/play_cli.py map NAME
+python examples/play_cli.py orders NAME '[]'
+python examples/play_cli.py deal NAME '[{"type":"say","to":"all","text":"Hello"}]'
+python examples/play_cli.py inbox NAME 30              # new diplomacy, wait up to 30s
+python examples/play_cli.py inbox NAME 0 --all         # full available history
+python examples/play_cli.py rules
+python examples/play_cli.py deal --help
+```
+
+`join` returns the existing player when that name's saved credentials match the
+game. Its inbox cursor starts at the current view's `diplomacy_seq`; older files
+without a cursor initialise it on the first `inbox` call. `--all` explicitly reads
+from sequence zero. Inbox calls save the returned position.
+
+Both state summary modes put `ALERT:` lines first for unoccupied owned relics,
+visible stacks without a treaty adjacent to owned cities or relics (four-direction
+adjacency), recently broken or soon-ending treaties, active victory streaks,
+contract instalments exceeding current holdings, and negative projected food at
+the next resolution. Streak completion turns assume the condition stays met.
+Food projections use current income and upkeep before any new orders or payments.
+Alerts use the player's view, including its fog restrictions.
+
+Compact mode lists the turn, season, deadline, own resources/income/upkeep, own
+cities and armies, other players' visible statistics, own treaties, market prices,
+and changes. It saves a small snapshot with the credentials. The changes block
+uses the latest resolved turn's events and public relic ownership/streak changes
+since the last state summary; repeated summaries omit already-seen events. If
+several turns pass between summaries, intervening events are not available from
+the current view. `next` and `orders` print the elimination turn when the player
+can no longer act, plus the final result if the game has finished.
+
+`deal` checks the 300-character `message` limit for `propose`, `counter`, and
+`reject` before sending the batch. The `say`/`message` text limit is 500 characters.
+
+### HTTP turn sequence
+
 Turns are **simultaneous**. For every turn:
 
 1. `GET /api/games/{id}/state` with your token → your view (`turn`, `you`,

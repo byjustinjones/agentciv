@@ -708,6 +708,9 @@ def order_warnings(view: dict, orders: list) -> list[str]:
         mine = [o for o in orders if o.get("type") == "market" and o.get("resource") == r]
         buy = sum(int(o.get("qty") or 0) for o in mine if o.get("side") == "buy")
         sell = sum(int(o.get("qty") or 0) for o in mine if o.get("side") == "sell")
+        if sell > res.get(r, 0):
+            warnings.append(f"market sell of {sell} {r} exceeds current stock {res.get(r, 0)}; "
+                            "sells are checked against stock at resolution before this turn's income (step 7)")
         if not buy and not sell:
             continue
         pool = pools.get(r) or {}
@@ -958,6 +961,166 @@ def describe_event(ev: dict, pid: str | None = None) -> str:
         return f"{who(ev.get('from'))} → {to}: {ev.get('text')}"
     fields = {k: v for k, v in ev.items() if k not in ("type", "turn", "seq")}
     return f"{t}: {json.dumps(fields, separators=(',', ':'))[:200]}"
+
+
+def view_alerts(view: dict, pid: str | None = None) -> list[str]:
+    """Facts from the player's current view; never consult remembered enemy armies."""
+    you = view.get("you") or {}
+    pid = pid or you.get("id")
+    if not pid:
+        return []
+    turn = view.get("turn", 0)
+    out = []
+    armies = [a for a in view.get("armies", []) if any((a.get("units") or {}).values())]
+    relics = [r for r in (view.get("map") or {}).get("relics", []) if r.get("owner") == pid]
+    cities = [c for c in view.get("cities", []) if c.get("owner") == pid]
+    occupied = {(a["x"], a["y"]) for a in armies if a.get("owner") == pid}
+    for r in relics:
+        if (r["x"], r["y"]) not in occupied:
+            out.append(f"Your relic [{r['x']},{r['y']}] has no units of yours.")
+    partners = set()
+    for t in view.get("treaties", []):
+        if pid not in (t.get("a"), t.get("b")):
+            continue
+        partner = t["b"] if t["a"] == pid else t["a"]
+        partners.add(partner)
+        if 0 <= t["until_turn"] - turn <= 2:
+            out.append(f"Treaty with {partner} ends on turn {t['until_turn']}.")
+    for a in armies:
+        if a.get("owner") == pid or a.get("owner") in partners:
+            continue
+        for kind, places in (("relic", relics), ("city", cities)):
+            for place in places:
+                if abs(a["x"] - place["x"]) + abs(a["y"] - place["y"]) == 1:
+                    out.append(f"{a['owner']} stack [{a['x']},{a['y']}] adjacent to your {kind} "
+                               f"[{place['x']},{place['y']}]; no treaty.")
+    for ev in view.get("events", []):
+        if ev.get("type") == "treaty_broken" and pid in (ev.get("by"), ev.get("with")):
+            out.append(f"Treaty {ev.get('by')}–{ev.get('with')} broken on turn {ev.get('turn')}.")
+    thresholds = (view.get("victory") or {}).get("thresholds") or {}
+    for p in view.get("players", []):
+        for condition, key in (("relic", "relic_turns"), ("economic", "streak_turns"),
+                               ("influence", "streak_turns")):
+            value = p.get(condition + "_streak") or 0
+            target = thresholds.get(key)
+            if value and target:
+                # Streaks count completed resolutions; view.turn is the next turn to resolve.
+                completes = turn + target - value - 1
+                out.append(f"{p['id']} {condition} streak {value}/{target}; "
+                           f"completes at end of turn {completes} if maintained.")
+    resources = you.get("resources") or {}
+    for contract in view.get("contracts", []):
+        if contract.get("payer") != pid or contract.get("turns_left", 0) <= 0:
+            continue
+        for resource, amount in (contract.get("per_turn") or {}).items():
+            held = resources.get(resource, 0)
+            if amount > held:
+                out.append(f"Contract {contract['id']} next instalment: {amount} {resource}; holding {held}.")
+    food, income, upkeep = resources.get("food"), seasonal_income(view, pid).get("food"), you.get("upkeep")
+    if food is not None and income is not None and upkeep is not None and food + income - upkeep < 0:
+        out.append(f"Next resolution food: {food} + {income} income - {upkeep} upkeep = {food + income - upkeep}.")
+    return out
+
+
+def view_changes(view: dict, previous: dict | None = None) -> tuple[list[str], dict]:
+    """Latest visible events plus public relic deltas; return a bounded saved snapshot.
+
+    The engine emits no relic streak events, and fog can hide a capture event
+    while still publishing the relic owner. Snapshots cover those two cases.
+    Older turns' events cannot be recovered from a state view.
+    """
+    previous = previous or {}
+    kinds = {"city_captured", "treaty_signed", "treaty_broken", "treaty_expired", "eliminated",
+             "streak_started", "streak_ended"}
+    events = [e for e in view.get("events", []) if e.get("type") in kinds
+              or (e.get("type") == "tile_captured" and e.get("relic"))]
+    keys = [json.dumps(e, sort_keys=True) for e in events]
+    seen = set(previous.get("events", []))
+    relics = {f"{r['x']},{r['y']}": r.get("owner") for r in (view.get("map") or {}).get("relics", [])}
+    streaks = {p["id"]: p.get("relic_streak", 0) for p in view.get("players", [])}
+    out, captured = [], set()
+    for ev, key in zip(events, keys):
+        if key in seen:
+            continue
+        kind = ev.get("type")
+        detail = None
+        if kind == "tile_captured" and ev.get("relic"):
+            pos = f"{ev['x']},{ev['y']}"
+            captured.add(pos)
+            detail = f"Relic [{pos}] owner {ev.get('from') or 'none'} → {ev.get('to') or 'none'}"
+        elif kind == "city_captured":
+            detail = f"City {ev.get('city')} [{ev.get('x')},{ev.get('y')}] captured: {ev.get('from')} → {ev.get('to')}"
+        elif kind in ("treaty_signed", "treaty_expired"):
+            detail = f"Treaty {ev.get('a')}–{ev.get('b')} {'signed' if kind == 'treaty_signed' else 'expired'}"
+            if kind == "treaty_signed":
+                detail += f"; ends on turn {ev.get('until_turn')}"
+        elif kind == "treaty_broken":
+            detail = f"Treaty {ev.get('by')}–{ev.get('with')} broken by {ev.get('by')}"
+        elif kind == "eliminated":
+            detail = f"{ev.get('player')} eliminated"
+        elif kind in ("streak_started", "streak_ended"):
+            detail = f"{ev.get('player')} {ev.get('condition')} streak {'started' if kind == 'streak_started' else 'ended'}"
+        if detail:
+            out.append(f"t{ev.get('turn')}: {detail}.")
+    for pos, owner in relics.items():
+        old = previous.get("relics", {})
+        if pos in old and old[pos] != owner and pos not in captured:
+            out.append(f"Relic [{pos}] owner {old[pos] or 'none'} → {owner or 'none'} (since saved view).")
+    for pid, streak in streaks.items():
+        old = previous.get("relic_streaks", {}).get(pid)
+        if old is not None and bool(old) != bool(streak):
+            out.append(f"{pid} relic streak {'started' if streak else 'ended'} (since saved view).")
+    if previous and view.get("turn", 0) > previous.get("turn", 0) + 1:
+        out.insert(0, "Only the latest turn's events are available; intervening events are not in this view.")
+    return out, {"turn": view.get("turn", 0), "events": keys, "relics": relics, "relic_streaks": streaks}
+
+
+def summarize_compact(view: dict, pid: str | None = None, changes: list[str] | None = None) -> str:
+    """Short state rendering; all fields come from the supplied player view."""
+    you = view.get("you") or {}
+    pid = pid or you.get("id")
+    season = view.get("season") or {}
+    deadline = view.get("deadline")
+    due = f"in {max(0.0, deadline - time.time()):.0f}s" if deadline else "none"
+    out = [f"Turn {view.get('turn')}/{view.get('max_turns')} ({view.get('status')}); "
+           f"season {season.get('name')} ({season.get('turns_left')} left); deadline {due}."]
+    res, inc = you.get("resources") or {}, seasonal_income(view, pid)
+    out.append("You: " + ", ".join(f"{r} {_num(res.get(r))} ({inc.get(r, 0):+d})" for r in RESOURCES)
+               + f"; income in parentheses; upkeep {_num(you.get('upkeep'))} food.")
+    out.append("Your cities:")
+    for c in view.get("cities", []):
+        if c.get("owner") == pid:
+            buildings = ", ".join(f"{k} {v}" for k, v in (c.get("buildings") or {}).items()) or "none"
+            out.append(f"  {c['name']} [{c['x']},{c['y']}]: {buildings}; wonder {c.get('wonder_stage', 0)}.")
+    out.append("Your armies:")
+    for a in view.get("armies", []):
+        if a.get("owner") == pid:
+            out.append(f"  [{a['x']},{a['y']}]: {_units_str(a.get('units') or {})}.")
+    out.append("Other players:")
+    for p in view.get("players", []):
+        if p["id"] == pid:
+            continue
+        fields = [f"score {_num(p.get('score'))}", f"cities {_num(p.get('cities'))}", f"tiles {_num(p.get('tiles'))}"]
+        for key, label in (("military_power", "military"), ("relics_held", "relics held"),
+                           ("relics_guarded", "guarded"), ("relic_streak", "relic streak"),
+                           ("wonder_stage", "wonder"), ("bank", "bank"), ("legacy", "legacy"),
+                           ("economic_streak", "economic streak"), ("influence_streak", "influence streak")):
+            if p.get(key) is not None:
+                fields.append(f"{label} {p[key]}")
+        out.append(f"  {p['id']} {p.get('name', '')}" + (" [eliminated]" if p.get("alive") is False else "")
+                   + ": " + ", ".join(fields) + ".")
+    treaties = [f"{t['b'] if t['a'] == pid else t['a']} ends t{t['until_turn']}"
+                for t in view.get("treaties", []) if pid in (t.get("a"), t.get("b"))]
+    out.append("Your treaties: " + ("; ".join(treaties) or "none") + ".")
+    prices = (view.get("market") or {}).get("prices") or {}
+    out.append("Market (gold/unit): " + (", ".join(f"{r} {p:.2f}" for r, p in prices.items()) or "none") + ".")
+    out.append("Changes since your last turn:")
+    out.extend("  " + line for line in (changes if changes is not None else view_changes(view)[0])
+               or ["No changes in this view."])
+    result = (view.get("victory") or {}).get("result")
+    if result:
+        out.append("GAME OVER: " + json.dumps(result))
+    return "\n".join(out)
 
 
 def summarize_view(view: dict, pid: str | None = None, max_events: int = 12, max_messages: int = 6,

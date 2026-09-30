@@ -7,12 +7,12 @@ kept in ``$AGENTCIV_HOME/<name>.json`` (default ``~/.agentciv``) so each
 command only needs your player name.
 
     python examples/play_cli.py join   NAME GAME_ID      # join a lobby
-    python examples/play_cli.py state  NAME              # summary of your view
+    python examples/play_cli.py state  NAME [--compact]  # summary of your view
     python examples/play_cli.py map    NAME              # ASCII map
     python examples/play_cli.py orders NAME '<json list of orders>'
     python examples/play_cli.py deal   NAME '<json list of diplomacy actions>'
-    python examples/play_cli.py inbox  NAME [SECONDS]    # new offers/messages for you
-    python examples/play_cli.py next   NAME              # block until the next turn, then print state
+    python examples/play_cli.py inbox  NAME [SECONDS] [--all]  # new items; --all: full history
+    python examples/play_cli.py next   NAME [--compact]  # wait for the next turn, then print state
     python examples/play_cli.py rules                    # full rules (markdown)
 
 When some orders are rejected, the turn is held open for ``$AGENTCIV_FIX_WINDOW``
@@ -20,6 +20,10 @@ seconds (default 60) so a corrected list can be resubmitted; after that the
 accepted orders are confirmed automatically by a small background process.
 
 Orders and diplomacy action formats: see ``rules`` (docs/RULES.md).
+Deal propose/counter/reject ``message`` fields have a 300-character limit;
+say/message text has a 500-character limit. ``deal --help`` prints this help.
+State summaries print factual ALERT lines first. Compact summaries include
+changes from the latest turn events and the previous saved view.
 """
 from __future__ import annotations
 
@@ -33,7 +37,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agentciv.client import (AgentCivClient, ApiError, ascii_map, describe_event, order_warnings,  # noqa: E402
-                             summarize_view)
+                             summarize_view, summarize_compact, view_alerts, view_changes)
+from agentciv.engine.constants import DEAL_MESSAGE_MAX_LENGTH  # noqa: E402
 
 URL = os.environ.get("AGENTCIV_URL", "http://localhost:8765")
 HOME = Path(os.environ.get("AGENTCIV_HOME", Path.home() / ".agentciv"))
@@ -74,17 +79,35 @@ def _seen(name: str, creds: dict, view: dict) -> None:
         _save(name, creds)
 
 
-def _print_state(c: AgentCivClient, name: str, creds: dict) -> dict:
-    view = c.state()
-    _seen(name, creds, view)
-    print(summarize_view(view, c.player_id))
+def _print_state(c: AgentCivClient, name: str, creds: dict, compact: bool = False,
+                 view: dict | None = None) -> dict:
+    view = c.state() if view is None else view
+    changes, snapshot = view_changes(view, creds.get("summary_snapshot"))
+    creds["summary_snapshot"] = snapshot
+    if view.get("status") == "running":
+        creds["seen_turn"] = view.get("turn")
+    _save(name, creds)
+    alerts = view_alerts(view, c.player_id)
+    if alerts:
+        print("ALERTS:")
+        print("\n".join("ALERT: " + line for line in alerts))
+    print(summarize_compact(view, c.player_id, changes) if compact else summarize_view(view, c.player_id))
     return view
 
 
 def cmd_join(name: str, game_id: str) -> None:
+    path = _creds_path(name)
+    if path.exists():
+        creds = json.loads(path.read_text())
+        if creds.get("game_id") == game_id:
+            print(f"already joined {game_id} as {creds['player_id']}; use next")
+            return
     c = AgentCivClient(URL)
     res = c.join(game_id, name)
-    _save(name, {"game_id": res["game_id"], "player_id": res["player_id"], "token": res["token"], "seq": 0})
+    creds = {"game_id": res["game_id"], "player_id": res["player_id"], "token": res["token"]}
+    _save(name, creds)  # retain the token even if the initial state request fails
+    creds["seq"] = c.state().get("diplomacy_seq", 0)
+    _save(name, creds)
     print(f"Joined {res['game_id']} as {res['player_id']} ({name}). Status: {res.get('status')}.")
     print("Next: run `next NAME` to wait for the game to start, then read the state and submit orders.")
 
@@ -94,6 +117,8 @@ def cmd_orders(name: str, text: str) -> None:
     orders = _parse_json(text)
     turn = creds.get("seen_turn")
     before = c.state()  # the state these orders are written against (warnings use it, not a later turn)
+    if _print_eliminated(before, c.player_id):
+        return
     if turn is None:
         turn = before["turn"]
     # Submit as a draft first so the turn cannot resolve while rejected orders are being fixed;
@@ -156,7 +181,13 @@ def cmd_release(name: str, stamp: str) -> None:
 
 def cmd_deal(name: str, text: str) -> None:
     c, _ = _client(name)
-    res = c.diplomacy(_parse_json(text))
+    actions = _parse_json(text)
+    for i, action in enumerate(actions):
+        if (isinstance(action, dict) and action.get("type") in ("propose", "counter", "reject")
+                and isinstance(action.get("message"), str)
+                and len(action["message"]) > DEAL_MESSAGE_MAX_LENGTH):
+            sys.exit(f"NOT SENT: deal action #{i} message exceeds the {DEAL_MESSAGE_MAX_LENGTH}-character limit.")
+    res = c.diplomacy(actions)
     for r in res.get("results", []):
         if r.get("ok"):
             extra = {k: v for k, v in r.items() if k not in ("index", "ok")}
@@ -165,9 +196,12 @@ def cmd_deal(name: str, text: str) -> None:
             print(f"  #{r.get('index')} FAILED: {r.get('error')}")
 
 
-def cmd_inbox(name: str, seconds: float = 0.0) -> None:
+def cmd_inbox(name: str, seconds: float = 0.0, all_history: bool = False) -> None:
     c, creds = _client(name)
-    res = c.inbox(since=creds.get("seq", 0), timeout=seconds)
+    if "seq" not in creds and not all_history:
+        creds["seq"] = c.state().get("diplomacy_seq", 0)
+        _save(name, creds)
+    res = c.inbox(since=0 if all_history else creds["seq"], timeout=seconds)
     items = res.get("items", [])
     creds["seq"] = res.get("seq", creds.get("seq", 0))
     _save(name, creds)
@@ -177,7 +211,20 @@ def cmd_inbox(name: str, seconds: float = 0.0) -> None:
         print("  " + describe_event(ev, c.player_id))
 
 
-def cmd_next(name: str) -> None:
+def _print_eliminated(view: dict, pid: str) -> bool:
+    me = next((p for p in view.get("players", []) if p.get("id") == pid), {})
+    if me.get("alive") is not False:
+        return False
+    turn = me.get("eliminated_turn")
+    if turn is None:
+        turn = view.get("turn")
+    print(f"ELIMINATED on turn {turn}. You can no longer act in this game; it continues without you.")
+    if view.get("status") == "finished":
+        print("GAME OVER:", json.dumps((view.get("victory") or {}).get("result")))
+    return True
+
+
+def cmd_next(name: str, compact: bool = False) -> None:
     """Wait until there is a turn you have not submitted orders for yet (or the
     game is over), then print the state. Never skips a turn: if the turn you
     acted on already resolved, it returns at once."""
@@ -186,6 +233,8 @@ def cmd_next(name: str) -> None:
     deadline = time.time() + 900
     while time.time() < deadline:
         view = c.state()
+        if _print_eliminated(view, c.player_id):
+            return
         status = view.get("status")
         if status == "finished" or (status == "running" and view.get("turn", 0) > acted):
             break
@@ -193,7 +242,7 @@ def cmd_next(name: str) -> None:
             time.sleep(2)
         else:
             c.wait(since_turn=view.get("turn", 0), timeout=60)
-    view = _print_state(c, name, creds)
+    view = _print_state(c, name, creds, compact, view)
     if view.get("status") == "finished":
         print("\nGAME OVER:", json.dumps(view.get("victory", {}).get("result")))
 
@@ -203,6 +252,9 @@ def main(argv: list[str]) -> None:
         print(__doc__)
         return
     cmd, args = argv[0], argv[1:]
+    if "--help" in args or "-h" in args:
+        print(__doc__)
+        return
     try:
         if cmd == "rules":
             print(AgentCivClient(URL).rules())
@@ -210,7 +262,7 @@ def main(argv: list[str]) -> None:
             cmd_join(args[0], args[1])
         elif cmd == "state":
             c, creds = _client(args[0])
-            _print_state(c, args[0], creds)
+            _print_state(c, args[0], creds, "--compact" in args[1:])
         elif cmd == "map":
             c, creds = _client(args[0])
             view = c.state()
@@ -221,9 +273,10 @@ def main(argv: list[str]) -> None:
         elif cmd == "deal":
             cmd_deal(args[0], args[1])
         elif cmd == "inbox":
-            cmd_inbox(args[0], float(args[1]) if len(args) > 1 else 0.0)
+            rest = [arg for arg in args[1:] if arg != "--all"]
+            cmd_inbox(args[0], float(rest[0]) if rest else 0.0, "--all" in args[1:])
         elif cmd == "next":
-            cmd_next(args[0])
+            cmd_next(args[0], "--compact" in args[1:])
         elif cmd == "_release":
             cmd_release(args[0], args[1])
         else:

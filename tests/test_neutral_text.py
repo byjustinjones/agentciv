@@ -1,11 +1,13 @@
 """Agent-facing text must describe rules, not recommend strategies (DESIGN §1)."""
 import importlib.util
+import inspect
 from pathlib import Path
 
 import pytest
 
 from agentciv import mcp_server
-from agentciv.client import ascii_map, summarize_view
+from agentciv.client import (ascii_map, describe_event, order_warnings, summarize_view,
+                             summarize_compact, view_alerts, view_changes)
 from agentciv.engine import rulesdoc
 from agentciv.server import guide
 
@@ -33,6 +35,13 @@ def _llm_prompt() -> str:
     return module.SYSTEM_PROMPT
 
 
+def _cli_summaries() -> str:
+    from test_play_cli_summaries import alert_view
+    view = alert_view()
+    return "\n".join(view_alerts(view) + [summarize_compact(view), summarize_view(view)]
+                     + order_warnings(view, [{"type": "market", "side": "sell", "resource": "food", "qty": 100}]))
+
+
 TEXTS = {
     "rules": lambda: rulesdoc.render(),
     "api_index": lambda: str(guide.api_index("http://x")),
@@ -40,6 +49,10 @@ TEXTS = {
     "llm_prompt": _llm_prompt,
     "agent_prompt_template": lambda: (ROOT / "examples" / "agent_prompt.md").read_text(),
     "client_fog_summary": _fog_summary,
+    "play_cli_output_literals": lambda: (ROOT / "examples" / "play_cli.py").read_text(),
+    "play_cli_summaries": _cli_summaries,
+    "client_new_text_branches": lambda: "\n".join(inspect.getsource(f) for f in
+        (view_alerts, view_changes, summarize_compact, describe_event, order_warnings)),
 }
 
 
