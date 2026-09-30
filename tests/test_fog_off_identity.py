@@ -1,7 +1,8 @@
 """Games created without ``fog`` are unchanged by the fog-of-war feature.
 
 ``tests/data/nofog_golden.json`` was recorded at the base commit (before fog
-existed) by ``tests/data/make_nofog_golden.py``: the orders five bots
+existed) by ``tests/data/make_nofog_golden.py``, and re-recorded when the
+bank/legacy victory rules changed standard-game outcomes on purpose: the orders five bots
 submitted over 12 turns on two seeds (each turn preceded by rounds of live
 diplomacy through ``Game.diplomacy``), and a digest of every player view, the
 public and full spectator views, every diplomacy result, every inbox after

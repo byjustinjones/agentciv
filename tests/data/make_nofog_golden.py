@@ -11,8 +11,10 @@ orders and checks that a game created without ``fog`` still produces
 byte-identical views, diplomacy results and inboxes (the only allowed
 difference is the static ``costs.fog`` rules block).
 
-Run with the base commit's package on the path, e.g.:
-  git archive 0d4a71c | tar -x -C /tmp/base
+First recorded at the base commit before fog existed (0d4a71c). Re-recorded
+with the working tree's package when the bank/legacy victory rules changed
+no-fog outcomes on purpose (``RECORDED_AT``). To record at another commit:
+  git archive <commit> | tar -x -C /tmp/base
   PYTHONPATH=/tmp/base python tests/data/make_nofog_golden.py
 """
 from __future__ import annotations
@@ -30,6 +32,7 @@ TURNS = 24
 BOTS = ("strategist", "rusher", "economist", "turtle", "random")
 NEGOTIATION_ROUNDS = 3
 OUT = Path(__file__).with_name("nofog_golden.json")
+RECORDED_AT = "win-conditions (bank, legacy and victory streaks; fog code from da635b7)"
 
 
 def digest(obj) -> str:
@@ -121,7 +124,7 @@ def record(seed: int) -> dict:
 
 
 def main() -> None:
-    data = {"base_commit": "0d4a71c", "players": PLAYERS, "rules": digest(rules_json()),
+    data = {"base_commit": RECORDED_AT, "players": PLAYERS, "rules": digest({k: v for k, v in rules_json().items() if k != "fog"}),
             "games": [record(s) for s in SEEDS]}
     OUT.write_text(json.dumps(data, indent=1, sort_keys=True) + "\n")
     print(f"wrote {OUT} ({OUT.stat().st_size} bytes)")
