@@ -32,7 +32,7 @@ from __future__ import annotations
 
 from agentciv.engine import constants as C
 
-from .common import (DealValuer, contract_income, raw_strength, total_units,
+from .common import (DealValuer, bank_of, contract_income, raw_strength, total_units,
                      treaty_proposals_to_me)
 from .planner import PlannerBot
 
@@ -128,6 +128,8 @@ class RusherBot(PlannerBot):
     # -- opportunism in act() ---------------------------------------------
     def honour_contract(self, c: dict) -> bool:
         w = self.w
+        if bank_of(w):
+            return True       # a default would take the rest of the obligation from our bank
         payee = (w.players.get(c.get("payee")) or {}).get("military_power", 0) or 0
         return payee >= 0.7 * max(1, raw_strength(w.my_units))
 

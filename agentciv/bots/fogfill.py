@@ -7,8 +7,8 @@ view in which every other player's row has estimated ``units``,
 
 * units: armies in sight plus remembered ``sightings``, or the latest
   military ``intel`` report if it shows more;
-* resources: the latest treasury report; otherwise gold and influence from
-  the banded victory progress and food/wood/stone from income;
+* resources: the latest treasury report; otherwise every resource from its
+  public income (gold: 5 turns of it, at most 1000);
 * score: the score formula over the public terms and these estimates.
 
 Remembered stacks are also appended to ``armies`` (with ``"stale": age``).
@@ -28,6 +28,10 @@ def _add(a: dict, b: dict) -> dict:
     return out
 
 
+GOLD_GUESS_TURNS = 5      # a fogged rival's gold on hand: this many turns of gold income...
+GOLD_GUESS_CAP = 1000     # ...at most this much
+
+
 def _latest(reports: list, target: str, mission: str) -> dict | None:
     best = None
     for r in reports:
@@ -43,7 +47,8 @@ def _score(row: dict, res: dict, mp: int) -> int:
                + sw["capitals_held"] * (row.get("capitals_held") or 0)
                + sw["wonder_stage"] * (row.get("wonder_stage") or 0)
                + int(res.get("influence", 0)) // sd["influence"] + int(res.get("gold", 0)) // sd["gold"]
-               + sw["relics_held"] * (row.get("relics_held") or 0) + mp // sd["military_power"])
+               + sw["relics_held"] * (row.get("relics_held") or 0) + mp // sd["military_power"]
+               + int(row.get("bank") or 0) // sd["gold"])
 
 
 def fill(view: dict) -> dict:
@@ -79,11 +84,11 @@ def fill(view: dict) -> dict:
         if tre is not None and tre["data"].get("resources"):
             res = dict(tre["data"]["resources"])
         else:
-            vp = row.get("victory_progress") or {}
+            # bank and legacy are public; the stock on hand is guessed from income
             inc = row.get("income") or {}
             res = {r: min(C.STORAGE_BASE, 3 * max(0, int(inc.get(r, 0)))) for r in C.CAPPED_RESOURCES}
-            res["gold"] = int(float(vp.get("economic", 0) or 0) * C.ECONOMIC_VICTORY_GOLD)
-            res["influence"] = int(float(vp.get("influence", 0) or 0) * C.INFLUENCE_VICTORY)
+            res["gold"] = min(GOLD_GUESS_CAP, GOLD_GUESS_TURNS * max(0, int(inc.get("gold", 0))))
+            res["influence"] = 3 * max(0, int(inc.get("influence", 0)))
             res = {r: res.get(r, 0) for r in C.RESOURCES}
         row.update(units=units, military_power=mp, upkeep=upkeep_of(units), resources=res,
                    score=_score(row, res, mp) if row.get("alive") else 0, estimated=True)

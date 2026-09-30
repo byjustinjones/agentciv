@@ -73,7 +73,8 @@ def test_good_offer_accepted_and_settles(name):
 @pytest.mark.parametrize("name", RATIONAL)
 def test_no_deals_with_a_player_close_to_winning(name):
     g = new_game(3, seed=4)
-    g.player("p2").resources["gold"] = int(0.9 * C.ECONOMIC_VICTORY_GOLD)
+    g.player("p2").bank = int(0.9 * C.BANK_VICTORY)      # economic progress 0.72
+    g._invalidate()
     bot = get_bot(name, seed=1)
     d = propose(g, "p2", "p1", {"gold": 120}, {"stone": 20})
     acts = answers(bot, g, "p1", d)
@@ -181,10 +182,20 @@ def test_guard_projects_wonder_and_net_gold():
     assert not v.helps_winner("p2", {"stone": 10})
     # enough for stage 4: projected 0.8
     assert v.helps_winner("p2", {"stone": 700, "wood": 500, "gold": 600})
-    # net gold counts: a loan handed out is not "help" for an economic racer
-    g.player("p3").resources["gold"] = int(0.65 * C.ECONOMIC_VICTORY_GOLD)
+    # economic: the bank plus net gold, at most 10 turns of the bank limit
+    g.player("p3").bank = int(0.8 * C.BANK_VICTORY)      # progress 0.64
+    g.player("p3").resources["gold"] = 5000             # gold on hand does not count
+    g._invalidate()
     v = DealValuer(World(g.player_view("p1")))
-    assert v.helps_winner("p3", {"gold": 1000})
+    assert danger(v.w, "p3") == pytest.approx(0.64)
+    assert not v.helps_winner("p3", {"gold": 1000})     # one city: 10 x 10 gold can reach the bank
+    g.add_city(9, 14, "p3")
+    c = g.add_city(4, 9, "p3")
+    c.market_hall = 1
+    g._invalidate()
+    v = DealValuer(World(g.player_view("p1")))
+    assert v.helps_winner("p3", {"gold": 1000})         # limit 40/turn: +400 -> 0.729
+    # net gold counts: a loan handed out is not "help" for an economic racer
     assert not v.helps_winner("p3", {"per_turn": {"gold": 30}, "turns": 30}, 0.7, {"gold": 1000})
 
 

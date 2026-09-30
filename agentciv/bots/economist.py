@@ -6,8 +6,8 @@ Strategy
 * Expands steadily (claims, settling new cities), builds improvements by
   return on investment, a market hall early and a warehouse when near caps.
 * Sells surplus food/wood/stone on the market every turn.
-* After the build-up phase it hoards gold for the economic victory, only
-  investing in things that repay quickly.
+* From turn 10 it banks what gold is left after each turn's plan, up to the
+  bank limit, for the economic victory.
 * Defends minimally: reacts to armies within 2 turns of a city with just
   enough infantry/archers, keeps one unit in the capital.
 
@@ -32,7 +32,7 @@ import math
 
 from agentciv.engine import constants as C
 
-from .common import contract_income, contract_obligations
+from .common import bank_of, contract_income, contract_obligations
 from .planner import PlannerBot
 
 
@@ -46,7 +46,7 @@ class EconomistBot(PlannerBot):
     DEFENSE_MARGIN = 1.0
     MIN_GARRISON = 2
     SELL_FLOOR = 0.6
-    HOARD_TURN = 55            # after this turn, gold is saved for victory
+    BANK_START = 10            # banks from this turn on
     DEFENSIVE_WALLS = False    # a pure builder: never raises walls and spends
     DEFENSE_BUY_FRACTION = 0.15  # little of its hoard on defenders (its weak spot)
 
@@ -69,8 +69,8 @@ class EconomistBot(PlannerBot):
         is not close to winning (and while our own race is far away)."""
         w, v = self.tw, self.tv
         gold = v.stock(w.me).get("gold", 0)
-        target = w.thresholds.get("economic_gold", C.ECONOMIC_VICTORY_GOLD)
-        if w.turn < self.LOAN_START or gold < 300 or gold >= 0.5 * target:
+        target = w.thresholds.get("bank", C.BANK_VICTORY)
+        if w.turn < self.LOAN_START or gold < 300 or bank_of(w) >= 0.5 * target:
             return []
         if v.remaining < self.LOAN_TURNS + 5:
             return []
@@ -122,20 +122,9 @@ class EconomistBot(PlannerBot):
     def diplomacy(self) -> None:
         self.accept_all_and_propose(turns=25)
 
-    def prepare(self) -> None:
-        super().prepare()
-        w = self.w
-        gold = w.res.get("gold", 0)
-        self.hoarding = w.turn >= self.HOARD_TURN or gold >= 700
-        if self.hoarding:
-            # keep gold: stricter return requirement on anything costing gold
-            self.MIN_ROI = 1 / 20.0
+    def bank_wanted(self) -> bool:
+        return self.w.turn >= self.BANK_START
 
     def keep(self, r: str) -> int:
         return {"food": 30, "wood": 40, "stone": 30}.get(r, 0)
 
-    def develop(self) -> None:
-        if self.hoarding:
-            # only gold-free or fast-paying investments
-            self.reserved["gold"] = max(self.reserved.get("gold", 0), int(self.w.res.get("gold", 0) * 0.9))
-        super().develop()

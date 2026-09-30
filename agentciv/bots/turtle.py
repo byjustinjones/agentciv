@@ -176,8 +176,11 @@ class TurtleBot(PlannerBot):
 
     def influence_eta(self) -> float:
         w = self.w
-        target = w.thresholds.get("influence", C.INFLUENCE_VICTORY)
-        have = w.res.get("influence", 0)
+        target = w.thresholds.get("legacy", C.LEGACY_VICTORY)
+        me = w.players.get(w.me) or {}
+        have = int(me.get("legacy", 0) or 0)
+        clock = max(0, w.thresholds.get("streak_turns", C.VICTORY_STREAK_TURNS)
+                    - int(me.get("influence_streak", 0) or 0))
         rate = self.raw.get("influence", 0)
         slots = self.temple_slots()
         bonus = C.IMPROVEMENTS["temple"]["bonus"]["influence"]
@@ -187,9 +190,9 @@ class TurtleBot(PlannerBot):
         if have + gained >= target:
             # finishes while building: solve roughly with the average rate
             avg = max(0.5, rate + bonus * slots / 2)
-            return max(0.0, (target - have) / avg)
+            return max(0.0, (target - have) / avg) + clock
         final = max(0.5, rate + bonus * slots)
-        return t_build + (target - have - gained) / final
+        return t_build + (target - have - gained) / final + clock
 
     def choose_path(self) -> None:
         w = self.w

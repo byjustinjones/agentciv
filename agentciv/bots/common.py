@@ -33,6 +33,7 @@ from collections import deque
 from agentciv.engine import combat as CB
 from agentciv.engine import constants as C
 from agentciv.engine import market as MK
+from agentciv.engine.rules import bank_limit as _bank_limit
 from agentciv.engine.rules import building_cost, claim_cost, settle_cost, unit_cost
 
 from .base import Bot
@@ -852,6 +853,7 @@ PROGRESS_KEYS = ("conquest", "wonder", "influence", "relics", "economic")
 GOLD_NEED_PREMIUM = 0.15        # gold we need for a plan/investment is worth more than 1
 THREAT_REACH = 3                # turns of marching considered by peace valuation
 CREDIT_BASE = 150.0             # credit limit (gold PV) of a payer with no contract history
+COLLATERAL_WEIGHT = 0.5         # share of a payer's bank added to its credit limit (seized on default)
 SAFE_PEACE_TURNS = 10           # a received tile near a partner's army is safe for this long a treaty
 
 
@@ -883,6 +885,26 @@ def danger(world: World, q: str) -> float:
     if int((world.players.get(q) or {}).get("capitals_held", 0) or 0) >= 2:
         out = max(out, float(prog.get("conquest", 0.0) or 0.0))
     return out
+
+
+def bank_limit(world: World, pid: str | None = None) -> int:
+    """Gold ``pid`` (default: me) may bank per turn: ``you.bank_limit`` for
+    myself, else computed from its cities and market halls."""
+    pid = pid or world.me
+    if pid == world.me and world.you.get("bank_limit") is not None:
+        return int(world.you["bank_limit"])
+    n = h = 0
+    for c in world.cities.values():
+        if c.get("owner") == pid:
+            n += 1
+            if (c.get("buildings") or {}).get("market_hall"):
+                h += 1
+    return _bank_limit(n, h)
+
+
+def bank_of(world: World, pid: str | None = None) -> int:
+    """Public bank of ``pid`` (default: me)."""
+    return int((world.players.get(pid or world.me) or {}).get("bank", 0) or 0)
 
 
 def contract_obligations(world: World, pid: str | None = None) -> dict:
@@ -1130,9 +1152,12 @@ class DealValuer:
         goods handed over now: grows with contracts ``payer`` honoured,
         none after a default."""
         rep = (self.w.players.get(payer) or {}).get("reputation") or {}
+        # a default takes the remaining obligation from the payer's bank:
+        # part of the bank backs a loan whatever the payer's record
+        collateral = COLLATERAL_WEIGHT * bank_of(self.w, payer)
         if int(rep.get("defaults", 0) or 0):
-            return 0.0
-        return CREDIT_BASE * (1 + min(4, int(rep.get("contracts_honoured", 0) or 0)))
+            return collateral
+        return CREDIT_BASE * (1 + min(4, int(rep.get("contracts_honoured", 0) or 0))) + collateral
 
     def contract_value(self, viewer: str, bundle: dict, payer: str, payee: str) -> float:
         """+PV for the payee, −cost for the payer (from ``viewer``'s side)."""
@@ -1144,14 +1169,20 @@ class DealValuer:
         mine = viewer == self.me
         disc = self.discount if mine else 0.97
         t = min(turns, self.remaining)
+        owed = inst * t                                   # what a default would leave unpaid (at most)
+        bank = bank_of(self.w, payer)
         if viewer == payer:
             if mine and self.horizon is not None:
                 t = min(t, max(1, self.horizon))
             cost = inst * annuity(disc, t)
             if self.reliability(payer, per, turns) < 0.5:
-                cost += C.CONTRACT_DEFAULT_PENALTY * 3.0     # we would likely default
+                # we would likely default: influence fine, and the bank pays the rest
+                cost += C.CONTRACT_DEFAULT_PENALTY * 3.0 + 0.5 * min(bank, owed)
             return -cost
-        return inst * annuity(disc, t) * self.reliability(payer, per, turns)
+        rel = self.reliability(payer, per, turns)
+        # on a default the payee receives part of the rest from the payer's bank
+        recovery = (1 - rel) * min(bank, 0.5 * owed)
+        return inst * annuity(disc, t) * rel + recovery
 
     # -- peace ----------------------------------------------------------------
     def _dist_from(self, city: int) -> dict:
@@ -1267,9 +1298,9 @@ class DealValuer:
 
     def projected_danger(self, q: str, bundle: dict, bundle_from: dict | None = None) -> float:
         """``q``'s victory progress if it received ``bundle`` and handed over
-        ``bundle_from`` (economic: the net gold value, contract payments of
-        the next 10 turns included; wonder: the next stage becomes
-        affordable)."""
+        ``bundle_from`` (economic: the bank plus the net gold value, contract
+        payments of the next 10 turns included, capped at 10 turns of its
+        bank limit; wonder: the next stage becomes affordable)."""
         w = self.w
         d = danger(w, q)
         if not bundle:
@@ -1284,8 +1315,10 @@ class DealValuer:
             if per:
                 v += self.installment(per) * min(10, int(b.get("turns", 0) or 0))
             return v
-        target = w.thresholds.get("economic_gold", C.ECONOMIC_VICTORY_GOLD)
-        d = max(d, (stock.get("gold", 0) + value(bundle) - value(out)) / max(1, target))
+        # economic: net gold can only reach the bank at bank_limit per turn
+        target = w.thresholds.get("bank", C.BANK_VICTORY)
+        extra = max(0.0, min(value(bundle) - value(out), 10 * bank_limit(w, q)))
+        d = max(d, C.LEDGER_PROGRESS_WEIGHT * min(1.0, (bank_of(w, q) + extra) / max(1, target)))
         stage = int(pl.get("wonder_stage", 0) or 0)
         if 1 <= stage < C.WONDER_VICTORY_STAGE:
             cost = building_cost("wonder", stage + 1)

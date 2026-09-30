@@ -15,7 +15,7 @@ from agentciv.engine import combat as CB
 from agentciv.engine import constants as C
 from agentciv.engine.rules import claim_cost, settle_cost
 
-from .common import (CAPPED, Plan, SafeBot, World, add_units, base_price,
+from .common import (CAPPED, Plan, SafeBot, World, add_units, bank_limit, base_price,
                      best_counter, best_improvement, buy_price, food_projection,
                      raw_income, raw_strength, season_mods, simulate_attack,
                      threat_to, tile_yield, total_units,
@@ -55,13 +55,30 @@ class PlannerBot(Trader, SafeBot):
         p = self.new_plan(w)
         self.w, self.p = w, p
         self.prepare()
-        for step in self.pipeline():
+        for step in self.pipeline() + [self.bank_step]:
             try:
                 step()
             except Exception as e:  # keep going with the other behaviours
                 self.last_error = f"{getattr(step, '__name__', step)}: {type(e).__name__}: {e}"
         self.memory["last_orders"] = (w.turn, list(p.orders))
         return p.orders
+
+    BANK_KEEP = 40                # gold left on hand after banking
+
+    def bank_wanted(self) -> bool:
+        """Move gold into the bank this turn (economic victory, rules §5)?"""
+        return False
+
+    def bank_step(self) -> None:
+        """Last step: bank what is left, up to this turn's limit, keeping
+        BANK_KEEP gold and this turn's contract instalments on hand."""
+        if not self.bank_wanted() or self.p.full():
+            return
+        p = self.p
+        amt = min(bank_limit(self.w), int(p.budget.get("gold", 0)) - self.BANK_KEEP - self.contract_gold)
+        if amt >= 1:
+            p.budget["gold"] -= amt
+            p.orders.append({"type": "bank", "gold": amt})
 
     def note_contested(self) -> None:
         """Claims/settles that failed because a rival tried the same spot get
@@ -108,6 +125,10 @@ class PlannerBot(Trader, SafeBot):
         rem = max(1, w.max_turns - w.turn)
         self.remaining = rem
         self.reserve_contracts()
+        self.contract_gold = self.reserved.get("gold", 0)
+        if self.bank_wanted():
+            # earlier steps must leave this turn's bank allowance
+            self.reserved["gold"] = self.contract_gold + bank_limit(w)
         self.note_contested()
         # per-game random tie-breaker per tile: breaking ties by tile index
         # would favour one map direction (and so some start positions)
@@ -121,7 +142,8 @@ class PlannerBot(Trader, SafeBot):
     # ------------------------------------------------------------------
     def honour_contract(self, c: dict) -> bool:
         """Reserve this turn's instalment of contract ``c`` (we are the
-        payer)? Default: always — a default costs influence and reputation."""
+        payer)? Default: always — a default costs influence, reputation, the
+        bank's gold up to the remaining obligation and the economic streak."""
         return True
 
     def reserve_contracts(self) -> None:

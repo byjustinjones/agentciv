@@ -64,7 +64,7 @@ from agentciv.engine import combat as CB
 from agentciv.engine import constants as C
 from agentciv.engine.rules import building_cost
 
-from .common import (CAPPED, add_units, base_price, best_counter, danger,
+from .common import (CAPPED, add_units, bank_limit, base_price, best_counter, danger,
                      season_mods, sell_price, simulate_attack, threat_to,
                      treaty_proposals_to_me, wonder_city)
 from .planner import PlannerBot
@@ -130,7 +130,7 @@ class StrategistBot(PlannerBot):
                 self.plan_goal_spending, self.relic_ops, self.plan_military, self.sell, self.goal_spending,
                 self.field_army, self.expand, self.develop, self.garrison_moves, self.espionage]
 
-    ESPIONAGE_LEAD = 0.5          # fog games: rival progress (banded) that triggers a treasury spy
+    ESPIONAGE_LEAD = 0.5          # fog games: rival progress that triggers a treasury spy
     COUNTERINTEL_PER_TURN = 50    # fog games: gold into counter-intelligence while our own lead is >= that
     ESPIONAGE_RESERVE = 100       # gold kept back
 
@@ -277,6 +277,9 @@ class StrategistBot(PlannerBot):
                 inc = int(self.raw.get(r, 0) * mods.get(r, 1.0)) - (w.upkeep if r == "food" else 0)
                 needs[r] = max(needs[r], cap - max(0, inc))
         return needs, gold
+
+    def bank_wanted(self) -> bool:
+        return "economic" in self.PATHS and self.memory.get("path") == "economic"
 
     def trade_horizon(self):
         # our instalments only matter until we expect to have won
@@ -477,8 +480,8 @@ class StrategistBot(PlannerBot):
         for q, pl in w.players.items():
             h = hist.setdefault(q, [])
             if not h or h[-1][0] != w.turn:
-                r = pl.get("resources") or {}
-                h.append((w.turn, r.get("gold", 0), r.get("influence", 0), pl.get("wonder_stage", 0)))
+                h.append((w.turn, int(pl.get("bank", 0) or 0), int(pl.get("legacy", 0) or 0),
+                          pl.get("wonder_stage", 0)))
                 if len(h) > self.HISTORY + 1:
                     del h[0]
             # turn at which each wonder stage was first seen (for the pace)
@@ -556,19 +559,20 @@ class StrategistBot(PlannerBot):
         th = w.thresholds
         me = q == w.me
         out = {}
-        # economic
-        need = th.get("economic_gold", C.ECONOMIC_VICTORY_GOLD) - res.get("gold", 0)
-        r = max(self.rate(q, 1), inc.get("gold", 0))
+        # economic and influence: reach the bank / legacy target, then hold it
+        # for the streak (only while owning the original capital)
+        home = w.capital_of(q) is not None
+        streak_turns = th.get("streak_turns", C.VICTORY_STREAK_TURNS)
+        need = th.get("bank", C.BANK_VICTORY) - int(pl.get("bank", 0) or 0)
+        r = self.rate(q, 1)
         if me:
-            r = max(r, self.potential_gold_rate())
-        else:
-            # rivals could start selling everything at any time
-            r = max(r, self.RIVAL_POTENTIAL * self.production_value(q))
-        out["economic"] = 0 if need <= 0 else (need / r if r > 0.5 else INF)
-        # influence
-        need = th.get("influence", C.INFLUENCE_VICTORY) - res.get("influence", 0)
+            r = max(r, min(bank_limit(w), self.potential_gold_rate()))
+        clock = max(0, streak_turns - int(pl.get("economic_streak", 0) or 0))
+        out["economic"] = ((0 if need <= 0 else (need / r if r > 0.5 else INF)) + clock) if home else INF
+        need = th.get("legacy", C.LEGACY_VICTORY) - int(pl.get("legacy", 0) or 0)
         r = max(self.rate(q, 2), inc.get("influence", 0) * (1.0 if me else 0.8))
-        out["influence"] = 0 if need <= 0 else (need / r if r > 0.2 else INF)
+        clock = max(0, streak_turns - int(pl.get("influence_streak", 0) or 0))
+        out["influence"] = ((0 if need <= 0 else (need / r if r > 0.2 else INF)) + clock) if home else INF
         # wonder
         stage = pl.get("wonder_stage", 0)
         left = C.WONDER_VICTORY_STAGE - stage
@@ -785,8 +789,6 @@ class StrategistBot(PlannerBot):
         if self.goal == "wonder":
             self.SELL_FLOOR = 0.5
         if self.goal == "economic" and self.my_eta < 25:
-            # stop investing gold: keep almost all of it
-            self.reserved["gold"] = max(self.reserved.get("gold", 0), int(w.res.get("gold", 0) * 0.85))
             self.MIN_ROI = 1 / 12.0
         if self.goal == "influence":
             # temples everywhere (buying their stone), influence kept

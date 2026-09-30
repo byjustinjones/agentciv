@@ -61,7 +61,9 @@ def test_fogfill_is_identity_without_active_fog():
     f = fill(v)
     assert f is not v and v["players"][1]["resources"] is None      # the original is not modified
     rival = f["players"][1]
-    assert rival["estimated"] and rival["resources"]["gold"] == 0 and rival["units"]["infantry"] == 0
+    gold_income = v["players"][1]["income"]["gold"]
+    assert rival["estimated"] and rival["units"]["infantry"] == 0
+    assert rival["resources"]["gold"] == min(1000, 5 * gold_income) > 0     # bank/legacy are public; gold is guessed
     assert isinstance(rival["score"], int) and rival["military_power"] == 0
 
 
