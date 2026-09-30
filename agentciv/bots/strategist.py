@@ -433,7 +433,7 @@ class StrategistBot(PlannerBot):
         for q, pl in w.players.items():
             h = hist.setdefault(q, [])
             if not h or h[-1][0] != w.turn:
-                r = pl.get("resources", {})
+                r = pl.get("resources") or {}
                 h.append((w.turn, r.get("gold", 0), r.get("influence", 0), pl.get("wonder_stage", 0)))
                 if len(h) > self.HISTORY + 1:
                     del h[0]
@@ -489,7 +489,7 @@ class StrategistBot(PlannerBot):
         inc = self.w.players[q].get("income", {}) or {}
         v = inc.get("gold", 0)
         for r in CAPPED:
-            amt = inc.get(r, 0) - (self.w.players[q].get("upkeep", 0) if r == "food" else 0)
+            amt = inc.get(r, 0) - ((self.w.players[q].get("upkeep") or 0) if r == "food" else 0)
             v += max(0, amt) * self.price(r)
         return v
 
@@ -507,7 +507,7 @@ class StrategistBot(PlannerBot):
         """Estimated turns until ``q`` meets each victory condition."""
         w = self.w
         pl = w.players[q]
-        res = pl.get("resources", {})
+        res = pl.get("resources") or {}
         inc = pl.get("income", {}) or {}
         th = w.thresholds
         me = q == w.me
@@ -644,17 +644,17 @@ class StrategistBot(PlannerBot):
                 return True
             return pl.get("wonder_stage", 0) > 0 or pl.get("relics_guarded", 0) >= need_r - 1
 
-        mine = max(1, w.players[w.me].get("military_power", 0))
+        mine = max(1, w.players[w.me].get("military_power") or 0)
 
         def rich(q):
             # hoarders are prey: capturing their capital plunders half their gold
-            return w.players[q].get("resources", {}).get("gold", 0) >= self.PREY_GOLD
+            return (w.players[q].get("resources") or {}).get("gold", 0) >= self.PREY_GOLD
 
         def useful(q):
             # a treaty protects us from strong armies; far-away players cost
             # little to leave alone unless they hoard; others (peaceful
             # builders) never attack us anyway, so we keep free to strike them
-            strong = w.players[q].get("military_power", 0) > 1.2 * mine
+            strong = (w.players[q].get("military_power") or 0) > 1.2 * mine
             return strong or (far(q) and not rich(q))
 
         for pr in treaty_proposals_to_me(w):
@@ -665,7 +665,7 @@ class StrategistBot(PlannerBot):
             for q in w.rivals:
                 if q in w.treaties or risky(q):
                     continue
-                if (far(q) and not rich(q)) or w.players[q].get("military_power", 0) > 1.5 * mine:
+                if (far(q) and not rich(q)) or (w.players[q].get("military_power") or 0) > 1.5 * mine:
                     p.propose(q, self.TREATY_TURNS)
 
     def home(self):
@@ -1030,7 +1030,7 @@ class StrategistBot(PlannerBot):
         """Units ``q`` could recruit in one turn (the best counter to ``vs``)
         with its stock plus what it could buy with part of its gold — what a
         target can add once it sees us coming."""
-        res = self.w.players.get(q, {}).get("resources", {})
+        res = (self.w.players.get(q) or {}).get("resources") or {}
         t = best_counter(vs or {"infantry": 1}, allowed=("infantry", "archer"))
         cost = C.UNITS[t]["cost"]
         n = min(int(res.get(r, 0) // v) for r, v in cost.items() if v)
@@ -1111,7 +1111,7 @@ class StrategistBot(PlannerBot):
         pl = w.players.get(owner, {})
         v = 25 * 6.0 + 60 * c.get("wonder_stage", 0) ** 2
         if c.get("capital") and c.get("original_owner") == owner:
-            v += self.res_value(pl.get("resources", {}), C.PLUNDER_FRACTION)
+            v += self.res_value(pl.get("resources") or {}, C.PLUNDER_FRACTION)
         if c.get("capital"):
             # conquest progress: worth more the closer it brings us
             need = w.thresholds.get("conquest_capitals", 99)
@@ -1443,7 +1443,7 @@ class StrategistBot(PlannerBot):
             force = self.strike_force(c)
             if sum(force.values()) > 30:
                 continue
-            res = w.players[o].get("resources", {})
+            res = w.players[o].get("resources") or {}
             plunder = 0.0
             if cc.get("original_owner") == o:
                 plunder = sum(res.get(r, 0) * C.PLUNDER_FRACTION * (1.0 if r == "gold" else self.price(r))

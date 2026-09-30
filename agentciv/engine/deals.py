@@ -27,6 +27,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from . import constants as C
+from . import fog as F
 
 if TYPE_CHECKING:  # pragma: no cover
     from .game import Game
@@ -391,9 +392,13 @@ def view_delivery_problem(view: dict, pid: str, bundle, receiver: str | None = N
     b, err = check_bundle(bundle)
     if err:
         return err
-    res = next((p.get("resources", {}) for p in view.get("players", []) if p.get("id") == pid), None)
-    if res is None:
+    row = next((p for p in view.get("players", []) if p.get("id") == pid), None)
+    if row is None:
         return f"unknown player {pid!r}"
+    res = row.get("resources", {})
+    if res is None:   # fog game: another player's stock is unknown, not short
+        res = {}
+        b = {k: v for k, v in b.items() if k not in C.TRADABLE}
     err = delivery_problem(pid, res, b, _view_tile_info(view))
     if err or receiver is None or not b.get("tiles"):
         return err
@@ -670,32 +675,68 @@ def _do_say(g, pid, a):
     return {"ok": True}
 
 
-def settle_problem(g: "Game", d: dict) -> str | None:
-    """Why deal ``d`` cannot be settled right now (None = it can)."""
+def _settle_detail(g: "Game", d: dict, viewer: str | None = None) -> tuple:
+    """``(problem, giver, hidden)``: why deal ``d`` cannot be settled right
+    now (problem None = it can), which side fails, and whether the failing
+    check depends on information hidden in fog games (a stockpile, or units
+    on a tile).
+
+    With ``viewer`` (a fogged player view) only what ``viewer`` may see is
+    checked: its own giving side in full; for the other side only public
+    facts (tile owners, cities, relics, adjacency, the per-turn tile cap)
+    and units on tiles in ``viewer``'s sight. The other side's stock is
+    never looked at."""
     fp, tp = g.player(d["from"]), g.player(d["to"])
     if fp is None or tp is None or not fp.alive or not tp.alive:
-        return "a party is no longer in the game"
+        return "a party is no longer in the game", None, False
     info, owner_at, units_at = _tile_info(g), _owner_at(g), _units_at(g)
+    if viewer is not None:
+        sight = F.vision(g, viewer)
+        full_units = units_at
+
+        def units_at(x, y):
+            return full_units(x, y) if g.idx(x, y) in sight else ()
     for giver, receiver, bundle, back in ((fp, tp, d["give"], d["get"]), (tp, fp, d["get"], d["give"])):
-        err = delivery_problem(giver.id, giver.resources, bundle, info)
-        if err:
-            return err
-        if bundle.get("tiles"):
-            err = land_problem(receiver.id, bundle["tiles"], owner_at, units_at, back.get("tiles", ()),
-                               tiles_received(g.deal_log, g.turn, receiver.id))
+        tiles_only = {k: v for k, v in bundle.items() if k not in C.TRADABLE}
+        if viewer is None or giver.id == viewer:
+            err = delivery_problem(giver.id, giver.resources, bundle, info)
             if err:
-                return err
-    return None
+                return err, giver.id, delivery_problem(giver.id, giver.resources, tiles_only, info) is None
+        else:
+            err = delivery_problem(giver.id, {}, tiles_only, info)
+            if err:
+                return err, giver.id, False
+        if bundle.get("tiles"):
+            back_tiles = back.get("tiles", ())
+            received = tiles_received(g.deal_log, g.turn, receiver.id)
+            err = land_problem(receiver.id, bundle["tiles"], owner_at, units_at, back_tiles, received)
+            if err:
+                hidden = land_problem(receiver.id, bundle["tiles"], owner_at, None, back_tiles, received) is None
+                return err, giver.id, hidden
+    return None, None, False
+
+
+def settle_problem(g: "Game", d: dict, viewer: str | None = None) -> str | None:
+    """Why deal ``d`` cannot be settled right now (None = it can). With
+    ``viewer``: judged only on what that player may see (fog games; see
+    :func:`_settle_detail`)."""
+    return _settle_detail(g, d, viewer)[0]
 
 
 def _do_accept(g, pid, a):
     d = g.deals[a["deal"]]
-    problem = settle_problem(g, d)
+    problem, giver, hidden = _settle_detail(g, d)
     if problem:
-        _close(g, d, "failed", problem)
-        _emit(g, "deal_failed", [d["from"], d["to"]], by=pid, deal=d["id"], reason=problem,
+        reason = error = problem
+        if g.fog and hidden:
+            # fog games: a failure caused by hidden state is not described
+            reason = f"{giver} cannot deliver the agreed terms"
+            if giver != pid:
+                error = reason
+        _close(g, d, "failed", reason)
+        _emit(g, "deal_failed", [d["from"], d["to"]], by=pid, deal=d["id"], reason=reason,
               **{"from": d["from"], "to": d["to"]})
-        return {"ok": False, "error": f"deal {d['id']} failed: {problem}", "deal": d["id"], "status": "failed"}
+        return {"ok": False, "error": f"deal {d['id']} failed: {error}", "deal": d["id"], "status": "failed"}
     _execute(g, d)
     return {"ok": True, "deal": d["id"], "status": "accepted"}
 
@@ -804,8 +845,11 @@ def on_eliminated(g: "Game", pid: str) -> None:
 
 
 # --------------------------------------------------------------- views
-def view_part(g: "Game", viewer: str | None, omniscient: bool) -> dict:
-    """``deals``, ``contracts`` and ``diplomacy_seq`` for a state view."""
+def view_part(g: "Game", viewer: str | None, omniscient: bool, fogged: bool = False) -> dict:
+    """``deals``, ``contracts`` and ``diplomacy_seq`` for a state view.
+    ``fogged`` (running fog game, not omniscient): open deals are judged on
+    what ``viewer`` may see, and the bundles of executed deals and the
+    instalments of contracts are shown only to their parties."""
     if omniscient:
         open_ = list(g.open_deals.values())
         recent = list(g._recent_all)
@@ -817,16 +861,26 @@ def view_part(g: "Game", viewer: str | None, omniscient: bool) -> dict:
     opened = []
     for d in open_:
         v = deal_view(d)
-        v["problem"] = settle_problem(g, d)
+        v["problem"] = settle_problem(g, d, viewer if fogged else None)
         v["deliverable"] = v["problem"] is None
         opened.append(v)
+    log = jcopy(g.deal_log[-C.DEALS_LOG_IN_VIEW:])
+    contracts = [jcopy(c) for c in g.contracts]
+    if fogged:
+        for e in log:
+            if viewer is None or viewer not in (e["from"], e["to"]):
+                e.pop("give", None)
+                e.pop("get", None)
+        for c in contracts:
+            if viewer is None or viewer not in (c["payer"], c["payee"]):
+                c.pop("per_turn", None)
     return {
         "deals": {
             "open": opened,
             "recent": [deal_view(d, reason=True) for d in reversed(recent)],
-            "log": jcopy(g.deal_log[-C.DEALS_LOG_IN_VIEW:]),
+            "log": log,
         },
-        "contracts": [jcopy(c) for c in g.contracts],
+        "contracts": contracts,
         # the token-less spectator of a running game must not learn how much
         # private negotiation is going on (§12): the counter is withheld
         "diplomacy_seq": g.diplomacy_seq if (omniscient or viewer is not None) else None,
@@ -851,6 +905,7 @@ def inbox(g: "Game", pid: str, since: int = 0) -> dict:
     """Diplomacy events visible to ``pid`` with ``seq > since`` that were not
     caused by ``pid`` itself (for long-polling agents)."""
     items = []
+    fogged = g.fog
     for ev in g._dip_feed:
         if ev["seq"] <= since:
             continue
@@ -859,5 +914,9 @@ def inbox(g: "Game", pid: str, since: int = 0) -> dict:
             continue
         if ev.get("by") == pid:
             continue
-        items.append({k: jcopy(v) for k, v in ev.items() if k != "_vis"})
+        if fogged:
+            if F.event_visible(ev, pid):
+                items.append(jcopy(F.redact_event(ev, pid)))
+            continue
+        items.append({k: jcopy(v) for k, v in ev.items() if k not in ("_vis", "_fog")})
     return {"seq": g.diplomacy_seq, "items": items}

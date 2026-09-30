@@ -6,9 +6,10 @@ from . import constants as C
 from .game import Game, GameConfig
 
 
-def new_game(n: int = 2, seed: int = 1, max_turns: int = C.DEFAULT_MAX_TURNS, start: bool = True) -> Game:
-    """A normal game with ``n`` players named P1..Pn."""
-    g = Game(GameConfig(seed=seed, max_turns=max_turns, game_id=f"test{seed}"))
+def new_game(n: int = 2, seed: int = 1, max_turns: int = C.DEFAULT_MAX_TURNS, start: bool = True,
+             fog: bool = False) -> Game:
+    """A normal game with ``n`` players named P1..Pn (``fog``: a fog-of-war game)."""
+    g = Game(GameConfig(seed=seed, max_turns=max_turns, game_id=f"test{seed}", fog=fog))
     for i in range(n):
         g.add_player(f"P{i + 1}")
     if start:
@@ -16,13 +17,14 @@ def new_game(n: int = 2, seed: int = 1, max_turns: int = C.DEFAULT_MAX_TURNS, st
     return g
 
 
-def sandbox(n: int = 2, seed: int = 1, max_turns: int = C.DEFAULT_MAX_TURNS, terrain: str = ".") -> Game:
+def sandbox(n: int = 2, seed: int = 1, max_turns: int = C.DEFAULT_MAX_TURNS, terrain: str = ".",
+            fog: bool = False) -> Game:
     """A started game whose map is wiped: uniform ``terrain``, no owners,
     cities or armies (relic positions are kept). Add what you need with
     :meth:`Game.add_city`, :meth:`Game.place_units`, :meth:`Game.set_owner`
     and :func:`set_terrain`. Players without a city are eliminated at the end
     of the next step, so give every player a city."""
-    g = new_game(n, seed, max_turns)
+    g = new_game(n, seed, max_turns, fog=fog)
     size = g.width * g.height
     g.terrain = [terrain] * size
     g.owner = [None] * size

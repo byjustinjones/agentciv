@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from . import combat
 from . import constants as C
 from . import deals as D
+from . import fog as F
 from . import market as M
 from . import views
 from .mapgen import generate_map
@@ -40,6 +41,7 @@ class GameConfig:
     game_id: str = "g1"
     name: str | None = None
     max_players: int = C.MAX_PLAYERS
+    fog: bool = False          # fog of war and espionage (docs/RULES.md §14)
 
 
 class _Group:
@@ -124,6 +126,10 @@ class Game:
         self.last_events: list = []
         self.result: dict | None = None
         self._stats: dict | None = None
+        # fog of war (config.fog only; agentciv.engine.fog)
+        self.sightings: dict[str, dict[int, dict]] = {}   # pid -> {tile: {"turn", "armies": {owner: units}}}
+        self.intel_reports: dict[str, list] = {}           # pid -> espionage reports
+        self._pending_intel: list = []                     # (spy, target, mission, outcome) this turn
 
     # ==================================================================
     # public API
@@ -131,6 +137,11 @@ class Game:
     @property
     def finished(self) -> bool:
         return self.status == "finished"
+
+    @property
+    def fog(self) -> bool:
+        """True while a fog game is running (views hide part of the state)."""
+        return self.config.fog and self.status == "running"
 
     def add_player(self, name: str) -> str:
         if self.status != "lobby":
@@ -406,6 +417,10 @@ class Game:
         # self._events already holds the events of diplomacy actions sent
         # through the channel during this turn (they belong to this turn)
         orders = {p.id: list(self._orders.get(p.id, [])) for p in self.players if p.alive}
+        fog = self.config.fog
+        if fog:
+            pre = F.vision_all(self)
+            F.record_sightings(self, pre)
         self._phase_diplomacy(orders)
         self._phase_treaties(orders)
         self._phase_market(orders)
@@ -413,10 +428,14 @@ class Game:
         self._phase_movement(orders)
         self._phase_spawn()
         self._phase_economy()
+        if fog:
+            self._phase_intel(orders)
         self._phase_bookkeeping()
+        if fog:
+            F.after_step(self, pre)
         self.last_events = self._events
         self._events = []
-        return [{k: v for k, v in e.items() if k != "_vis"} for e in self.last_events]
+        return [{k: v for k, v in e.items() if k not in ("_vis", "_fog")} for e in self.last_events]
 
     # ---------------------------------------------------------------- 1
     def _rotated(self) -> list:
@@ -1094,6 +1113,60 @@ class Game:
             lost[u] = lost.get(u, 0) + 1
         self._clean_armies()
         return lost
+
+    # ---------------------------------------------------------------- 7½
+    def _phase_intel(self, orders: dict) -> None:
+        """Espionage (fog games): counterintel purchases, then spy payments,
+        then every mission is compared with its target's counter-intelligence
+        rating (the same for all missions this turn), then pools decay."""
+        for p in self._rotated():
+            for o in orders.get(p.id, ()):
+                if o["type"] != "counterintel":
+                    continue
+                inv = o["invest"]
+                if p.resources["gold"] < inv:
+                    self._fail(p.id, o, f"cannot afford counterintel ({inv} gold)")
+                    continue
+                p.resources["gold"] -= inv
+                p.ci_pool += inv
+                self._emit("counterintel", vis=[p.id], player=p.id, invest=inv, pool=p.ci_pool)
+        missions = []
+        for p in self._rotated():
+            for o in orders.get(p.id, ()):
+                if o["type"] != "spy":
+                    continue
+                tgt = self._by_id.get(o["target"])
+                inv = o["invest"]
+                if tgt is None or not tgt.alive:
+                    self._fail(p.id, o, "target eliminated; nothing spent")
+                elif p.resources["gold"] < inv:
+                    self._fail(p.id, o, f"cannot afford spy ({inv} gold)")
+                else:
+                    p.resources["gold"] -= inv
+                    missions.append((p, tgt, o))
+        ci = {q.id: F.ci_rating(self, q.id) for q in self.players}
+        for p, tgt, o in missions:
+            inv, rating, mission = o["invest"], ci[tgt.id], o["mission"]
+            if inv >= 2 * rating:
+                outcome = "success"
+            elif inv >= rating:
+                outcome = "detected"
+            else:
+                outcome = "failed"
+            self._emit("spy_report", vis=[p.id], player=p.id, target=tgt.id, mission=mission,
+                       invest=inv, outcome=outcome)
+            if outcome != "success":
+                self._emit("spy_detected", vis=[tgt.id], player=tgt.id, spy=p.id, mission=mission,
+                           outcome=outcome)
+            if outcome == "failed":
+                p.spy_incidents += 1
+                self._emit("spy_incident", spy=p.id, target=tgt.id)
+            else:
+                self._pending_intel.append((p.id, tgt.id, mission, outcome))
+        num, den = C.CI_DECAY
+        for q in self.players:
+            q.ci_pool = q.ci_pool * num // den
+        self._invalidate()
 
     # ---------------------------------------------------------------- 8
     def _phase_bookkeeping(self) -> None:

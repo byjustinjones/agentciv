@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from . import constants as C
 from . import deals as D
+from . import fog as F
 
 if TYPE_CHECKING:  # pragma: no cover
     from .game import Game
@@ -26,6 +27,8 @@ ORDER_TYPES = (
     # above (offer_trade, accept_trade, message) are aliases of these
     "propose", "counter", "accept", "reject", "withdraw", "say",
 )
+# accepted only in games created with fog: true (docs/RULES.md §14)
+FOG_ORDER_TYPES = C.FOG_ORDER_TYPES
 
 
 class OrderError(Exception):
@@ -91,6 +94,8 @@ class _Ctx:
         self.treaty_targets: set = set()
         self.accepted_treaties: set = set()
         self.broken: set = set()
+        self.spies: set = set()         # (target, mission) of earlier spy orders
+        self.counterintel = False
 
 
 class Validator:
@@ -100,6 +105,21 @@ class Validator:
         self.g = game
         self.pid = pid
         self.ctx = _Ctx()
+        self._sight: frozenset | None = None
+
+    @property
+    def sight(self) -> frozenset:
+        """The player's sight (fog games only; computed on first use)."""
+        if self._sight is None:
+            self._sight = F.vision(self.g, self.pid)
+        return self._sight
+
+    def armies_at(self, i: int) -> dict:
+        """Armies on tile ``i`` as far as pre-validation may look: in a fog
+        game only tiles in sight (resolution still applies every rule)."""
+        if self.g.fog and i not in self.sight:
+            return {}
+        return self.g.armies.get(i, {})
 
     # ---------------------------------------------------------------- helpers
     def tile(self, v, what: str = "coordinate") -> int:
@@ -183,8 +203,10 @@ class Validator:
         if not isinstance(raw, dict):
             raise OrderError("order must be an object")
         t = raw.get("type")
-        if t not in ORDER_TYPES:
-            raise OrderError(f"unknown order type {t!r}; valid: {', '.join(ORDER_TYPES)}")
+        fog = self.g.config.fog
+        if t not in ORDER_TYPES and not (fog and t in FOG_ORDER_TYPES):
+            valid = ORDER_TYPES + FOG_ORDER_TYPES if fog else ORDER_TYPES
+            raise OrderError(f"unknown order type {t!r}; valid: {', '.join(valid)}")
         return getattr(self, "v_" + t)(raw)
 
     def v_move(self, o: dict) -> dict:
@@ -225,11 +247,11 @@ class Validator:
             owner = g.owner[step]
             if owner is not None and owner != self.pid and g.treaty(self.pid, owner):
                 raise OrderError(f"{self.xy(step)} belongs to treaty partner {owner}")
-            for other in g.armies.get(step, {}):
+            for other in self.armies_at(step):
                 if other != self.pid and g.treaty(self.pid, other):
                     raise OrderError(f"{self.xy(step)} holds an army of treaty partner {other}")
             if len(path) == 2 and k == 0:
-                if any(other != self.pid and g.hostile(self.pid, other) for other in g.armies.get(step, {})):
+                if any(other != self.pid and g.hostile(self.pid, other) for other in self.armies_at(step)):
                     raise OrderError(f"cannot move through {self.xy(step)}: hostile army there")
                 city = g.cities.get(step)
                 if city is not None and city.owner != self.pid and g.hostile(self.pid, city.owner):
@@ -426,6 +448,32 @@ class Validator:
             raise OrderError("duplicate break_treaty")
         self.ctx.broken.add(w)
         return {"type": "break_treaty", "with": w}
+
+
+    # ------------------------------------------------------ fog games (§14)
+    def v_spy(self, o: dict) -> dict:
+        target = self.other_player(o.get("target"), "target")
+        mission = o.get("mission")
+        if mission not in C.SPY_MISSIONS:
+            raise OrderError(f"mission must be one of {', '.join(C.SPY_MISSIONS)}")
+        invest = as_int(o.get("invest"), "invest")
+        if not C.SPY_MIN_INVEST <= invest <= C.SPY_MAX_INVEST:
+            raise OrderError(f"invest must be {C.SPY_MIN_INVEST}..{C.SPY_MAX_INVEST} gold")
+        if len(self.ctx.spies) >= C.SPY_ORDERS_PER_TURN:
+            raise OrderError(f"at most {C.SPY_ORDERS_PER_TURN} spy orders per turn")
+        if (target, mission) in self.ctx.spies:
+            raise OrderError(f"duplicate spy order ({target}, {mission})")
+        self.ctx.spies.add((target, mission))
+        return {"type": "spy", "target": target, "mission": mission, "invest": invest}
+
+    def v_counterintel(self, o: dict) -> dict:
+        invest = as_int(o.get("invest"), "invest")
+        if not 1 <= invest <= C.CI_MAX_INVEST:
+            raise OrderError(f"invest must be 1..{C.CI_MAX_INVEST} gold")
+        if self.ctx.counterintel:
+            raise OrderError("at most one counterintel order per turn")
+        self.ctx.counterintel = True
+        return {"type": "counterintel", "invest": invest}
 
 
 def prevalidate(game: "Game", pid: str, raw_orders) -> tuple[list, list]:

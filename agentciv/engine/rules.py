@@ -226,6 +226,20 @@ def _build_rules() -> dict:
             "default_max_turns": C.DEFAULT_MAX_TURNS,
         },
         "score": {"weights": dict(C.SCORE_WEIGHTS), "divisors": dict(C.SCORE_DIVISORS)},
+        "fog": {
+            "applies_to": "games created with fog: true",
+            "vision": {"territory": C.FOG_VISION_TERRITORY, "city": C.FOG_VISION_CITY,
+                       "units": C.FOG_VISION_UNITS, "cavalry": C.FOG_VISION_CAVALRY},
+            "progress_step": C.FOG_PROGRESS_STEP,
+            "hidden_fields": list(C.FOG_HIDDEN_FIELDS),
+            "sighting_turns": C.FOG_SIGHTING_TURNS,
+            "orders": list(C.FOG_ORDER_TYPES),
+            "spy": {"missions": list(C.SPY_MISSIONS), "min_invest": C.SPY_MIN_INVEST,
+                    "max_invest": C.SPY_MAX_INVEST, "orders_per_turn": C.SPY_ORDERS_PER_TURN,
+                    "report_turns": C.SPY_REPORT_TURNS},
+            "counterintel": {"base": C.CI_BASE, "per_city": C.CI_PER_CITY, "max_invest": C.CI_MAX_INVEST,
+                             "decay": list(C.CI_DECAY)},
+        },
     }
 
 

@@ -224,3 +224,24 @@ SCORE_DIVISORS = {"influence": 6, "gold": 25, "military_power": 20}
 
 # Order in which conditions are reported when a player meets several at once.
 VICTORY_CONDITIONS = ("conquest", "wonder", "relics", "influence", "economic")
+
+# --------------------------------------------------------------------------
+# Fog of war and espionage (games created with ``fog: true``; docs/RULES.md §14)
+# --------------------------------------------------------------------------
+FOG_VISION_TERRITORY = 1   # Chebyshev sight radius around every owned tile
+FOG_VISION_CITY = 2        # ... around every owned city
+FOG_VISION_UNITS = 1       # ... around every tile where the player has units
+FOG_VISION_CAVALRY = 2     # ... if those units include cavalry
+FOG_PROGRESS_STEP = 0.1    # other players' economic/influence progress is floored to this step
+FOG_SIGHTING_TURNS = 5     # remembered rival stacks older than this many turns are dropped
+FOG_HIDDEN_FIELDS = ("resources", "units", "military_power", "upkeep", "score")
+FOG_ORDER_TYPES = ("spy", "counterintel")
+SPY_MISSIONS = ("military", "treasury")
+SPY_MIN_INVEST = 20        # gold
+SPY_MAX_INVEST = 1000      # gold
+SPY_ORDERS_PER_TURN = 2
+SPY_REPORT_TURNS = 3       # a report stays in the spy's view for this many turns
+CI_BASE = 10               # counter-intelligence rating = CI_BASE + CI_PER_CITY * cities + pool
+CI_PER_CITY = 5
+CI_MAX_INVEST = 500        # gold per counterintel order (one per turn)
+CI_DECAY = (3, 4)          # pool = pool * 3 // 4 at the end of every turn

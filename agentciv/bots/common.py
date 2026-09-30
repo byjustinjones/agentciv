@@ -951,7 +951,7 @@ class DealValuer:
     def stock(self, q: str) -> dict:
         if q == self.me:
             return self.w.res
-        return (self.w.players.get(q) or {}).get("resources", {}) or {}
+        return (self.w.players.get(q) or {}).get("resources") or {}
 
     def income(self, q: str) -> dict:
         if q == self.me:
@@ -1196,7 +1196,7 @@ class DealValuer:
             mult = 1 + 0.5 * cc["buildings"].get("walls", 0)
             units = w.armies.get(c, {}).get(q, {})
             own = max(own, (raw_strength(units) + float(cc.get("garrison", 0))) * mult)
-        return own + 0.3 * raw_strength(w.players.get(q, {}).get("units"))
+        return own + 0.3 * raw_strength((w.players.get(q) or {}).get("units"))
 
     def peace_value(self, q: str, other: str, turns: int) -> float:
         """Value for ``q`` of ``turns`` turns of peace with ``other``."""
@@ -1310,6 +1310,12 @@ class DealValuer:
 # ---------------------------------------------------------------------------
 # Safe bot base
 # ---------------------------------------------------------------------------
+def _fogfill(view: dict) -> dict:
+    """Estimates for the fields hidden in fog games (no-op otherwise)."""
+    from .fogfill import fill
+    return fill(view)
+
+
 class SafeBot(Bot):
     """Bot whose :meth:`act` never raises: subclasses implement
     :meth:`decide`; any exception yields the orders gathered so far (or an
@@ -1332,7 +1338,7 @@ class SafeBot(Bot):
                 return []
             if view.get("status") not in (None, "running"):
                 return []
-            out = self.decide(view)
+            out = self.decide(_fogfill(view))
             return list(out or [])[:C.MAX_ORDERS_PER_TURN]
         except Exception as e:  # never let a bot crash the game
             self.last_error = f"{type(e).__name__}: {e}"
@@ -1350,7 +1356,7 @@ class SafeBot(Bot):
                 return []
             if view.get("status") not in (None, "running"):
                 return []
-            out = self.decide_deals(view)
+            out = self.decide_deals(_fogfill(view))
             return list(out or [])[:C.DIPLOMACY_ACTIONS_PER_TURN]
         except Exception as e:  # never let a bot crash the game
             self.last_error = f"negotiate: {type(e).__name__}: {e}"

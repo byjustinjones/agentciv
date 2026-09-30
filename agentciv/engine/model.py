@@ -11,7 +11,7 @@ class Player:
         "id", "name", "index", "color", "resources", "alive", "eliminated_turn",
         "capital", "betrayals", "relic_streak", "wonder_city", "city_counter",
         "tiles", "final_score", "deals", "contracts_honoured", "defaults",
-        "influence_debt",
+        "influence_debt", "ci_pool", "spy_incidents",
     )
 
     def __init__(self, pid: str, name: str, index: int, color: str):
@@ -34,6 +34,9 @@ class Player:
         self.contracts_honoured = 0          # contracts paid in full as payer
         self.defaults = 0                    # contracts defaulted on as payer
         self.influence_debt = 0              # unpaid default penalties (taken from future influence)
+        # fog games only (docs/RULES.md §14)
+        self.ci_pool = 0                     # hidden counter-intelligence pool (gold), decays each turn
+        self.spy_incidents = 0               # public count of failed spy missions by this player
 
 
 class City:
