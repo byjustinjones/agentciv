@@ -367,7 +367,13 @@ from its original owner moves floor(bank·0.5) to the captor as gold
 (`plunder.bank`) and lowers the victim's legacy by floor(legacy·0.25)
 (`legacy_lost`). A contract default moves min(bank, gold value of the remaining
 obligation) from the payer's bank to the payee's gold (`seized`) and resets the
-payer's `economic_streak`. B = 3600 and L = 3000 at max_turns 150, scaled by
+payer's `economic_streak`; the default turn's own turn end does not count toward
+it. The gold value uses the fixed start prices of §6 (`deals.REFERENCE_PRICES`,
+pool_init gold/resource), not the spot price, so neither party can move the
+seizure with same-turn market orders. Because the seizure is paid as gold on
+hand, a default with a cooperating payee is the one way banked gold leaves the
+bank; the fine (1 influence per 2 gold of that value) is what prices it.
+Elimination ends every streak (`streak_ended` with `reason: "eliminated"`). B = 3600 and L = 3000 at max_turns 150, scaled by
 min(1, max(0.5, max_turns/150)) and floored to a multiple of 10. Streaks
 (`economic_streak`, `influence_streak`) update in phase 8 after relic streaks;
 `streak_started` / `streak_ended` are public events. Bank, legacy and streaks
@@ -764,10 +770,11 @@ twice) and checked again when applied.
 A contract `{id, payer, payee, per_turn:{...}, turns_left, deal}` pays during
 phase 7 (Economy) **after yields, before upkeep**. If the payer cannot pay the
 full instalment the contract **defaults**: nothing is paid that turn, the
-contract is cancelled, the payer is fined `max(25, ceil(owed / 5))`
-influence (`owed` = the sum of all units of the remaining instalments,
-`turns_left × Σ per_turn`; `CONTRACT_DEFAULT_PENALTY`,
-`CONTRACT_DEFAULT_OWED_PER_INFLUENCE`) and its public `defaults` counter
+contract is cancelled, the payer is fined `max(25, ceil(value / 2))`
+influence (`value` = the gold value of the remaining instalments, gold at
+face value and food/wood/stone at their fixed start prices, see
+`obligation_value`; `CONTRACT_DEFAULT_PENALTY`,
+`CONTRACT_DEFAULT_GOLD_PER_INFLUENCE`) and its public `defaults` counter
 increments. The part of the fine its influence stock cannot cover becomes
 public `influence_debt`, taken from its influence at the start of every
 later contract payment step (phase 7, after yields) until paid — so
@@ -858,7 +865,7 @@ spectator view lists every open deal and the last 100 closed ones.
   `parse_action` (canonical action), `view_delivery_problem(view, pid,
   bundle, receiver=None, leaving=())` / `view_deal_problem(view, deal)` (can
   it settle now? includes the land rules), `land_problem`, `tiles_received`,
-  `default_penalty(per_turn, turns_left)`,
+  `obligation_value(per_turn, turns_left)`, `default_penalty(value)`,
   `bundle_value(bundle, prices, tile_value, discount)` (rough gold value).
 * Server: `POST /api/games/{id}/diplomacy {"actions":[...]}` (auth; also a
   bare list or one action object; optional `"turn"` → 409 if stale; 409 in

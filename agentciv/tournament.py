@@ -140,8 +140,14 @@ def _count_events(g: Game, trade: dict, kinds: Counter, events: list) -> None:
                 trade[payee]["gold_received"] += int(paid.get("gold", 0))
                 trade[payee]["net_value"] += val
         elif t == "contract_default":
-            if e.get("payer") in trade:
-                trade[e["payer"]]["defaults"] += 1
+            payer, payee, seized = e.get("payer"), e.get("payee"), int(e.get("seized", 0) or 0)
+            if payer in trade:        # the seized bank gold counts as gold paid by the payer
+                trade[payer]["defaults"] += 1
+                trade[payer]["gold_paid"] += seized
+                trade[payer]["net_value"] -= seized
+            if payee in trade:
+                trade[payee]["gold_received"] += seized
+                trade[payee]["net_value"] += seized
 
 
 def run_game(bot_specs: list, seed: int, max_turns: int = C.DEFAULT_MAX_TURNS,

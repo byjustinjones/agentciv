@@ -101,15 +101,16 @@ You may also put them in your turn's orders; then they are applied in phase 1 of
 A bundle with `per_turn` + `turns` creates a **contract** when the deal is accepted: the bundle's giver (the *payer*)
 pays the other side the full instalment every turn in phase 7 (after that turn's yields, before upkeep), starting on
 the turn of acceptance. If the payer cannot pay the **whole** instalment, the contract **defaults**: nothing is paid
-that turn, the contract is cancelled, the payer is fined influence and its public `defaults` counter goes up. The fine
-is 1 influence per {C.CONTRACT_DEFAULT_OWED_PER_INFLUENCE} units still owed (all remaining instalments, every resource
-counted 1:1), at least {C.CONTRACT_DEFAULT_PENALTY}. What the payer cannot pay from its influence stock becomes public
-`influence_debt`, taken from its influence first thing in every later phase 7 until paid — spending your influence
-before defaulting does not help. A default also takes the **gold value of the remaining obligation** from the payer's
-bank (§5): gold still owed, plus every other resource still owed valued at its market spot price after that turn's
-market step (1 gold per unit for a resource without a price), each resource rounded down, with the same "still owed" as
-the fine. That value, or the whole bank if the bank holds less, moves from the payer's bank to the payee's gold
-(`seized` on the `contract_default` event). A default sets the payer's `economic_streak` to 0 (§11); legacy is
+that turn, the contract is cancelled, the payer is fined influence and its public `defaults` counter goes up. The
+**gold value of the remaining obligation** is all remaining instalments valued in gold: gold at face value, food, wood
+and stone at their start price in §7 (fixed for the whole game; market orders do not change it), any other resource at
+1 gold per unit, each resource rounded down. The fine is 1 influence per {C.CONTRACT_DEFAULT_GOLD_PER_INFLUENCE} gold
+of that value, rounded up, at least {C.CONTRACT_DEFAULT_PENALTY}. What the payer cannot pay from its influence stock
+becomes public `influence_debt`, taken from its influence first thing in every later phase 7 until paid — spending
+your influence before defaulting does not help. A default also takes that value from the payer's bank (§5): the value,
+or the whole bank if the bank holds less, moves from the payer's bank to the payee's gold (`seized` on the
+`contract_default` event). A default sets the payer's `economic_streak` to 0 (§11) and the turn end of the default
+turn does not count toward it, so the streak can restart at 1 at the next turn end at the earliest; legacy is
 unchanged. A contract paid in full increments the payer's `contracts_honoured`. Contracts are **public**
 (`contracts` in every view) and end if either party is eliminated.
 
@@ -281,7 +282,9 @@ sightings of that player's stacks (with `turn` = `as_of_turn`).
 * Rated fog games have their own leaderboard: `GET /api/leaderboard?mode=fog`.
 * Still observable in fog games: aggregate market pool movements; deposit `remaining`;
   `influence_debt`; that an owner guards a relic (`guarded`, `relics_guarded`); that a capturer had units on a
-  captured tile or city; that deals and contracts exist and when; contract defaults; order failures on contact; a failed
+  captured tile or city; that deals and contracts exist and when; contract defaults; changes in a player's public
+  `bank`, which show `seized` of a contract default and `plunder.bank` of a capture (and, with `turns_left`, the value
+  of a defaulted contract); order failures on contact; a failed
   `accept` (one bit: which side could not deliver); espionage outcomes (they bound the target's rating); `diplomacy_seq`.
   The seed determines only the map, relics and starting positions.
 """
@@ -535,9 +538,10 @@ B = {C.BANK_VICTORY} and L = {C.LEGACY_VICTORY} apply to max_turns = {ref}; for 
 min(1, max({C.VICTORY_MIN_SCALE:g}, max_turns/{ref})) and rounded down to a multiple of 10 (`victory.thresholds.bank`,
 `.legacy`). `players[].economic_streak` / `influence_streak` count the consecutive turn ends; a turn end at which the
 requirement is not met sets the streak to 0. A contract default by you moves the gold value of the remaining obligation
-from your bank to the payee (up to the whole bank) and sets your `economic_streak` to 0 (§10). `streak_started` and
-`streak_ended` events {{player, condition}} are shown to everyone (`streak_ended` from a default also has
-`"reason": "contract_default"`).
+from your bank to the payee (up to the whole bank) and sets your `economic_streak` to 0 (§10); the turn end of that
+turn does not count, so the streak is still 0 after it. Elimination sets all of a player's streaks to 0.
+`streak_started` and `streak_ended` events {{player, condition}} are shown to everyone (`streak_ended` also has
+`"reason": "contract_default"` after a default and `"reason": "eliminated"` on elimination).
 """)
     add(_table(["max_turns", "B (bank)", "L (legacy)"],
                [[t, bank_target(t), legacy_target(t)] for t in (60, 90, 120, ref)]))

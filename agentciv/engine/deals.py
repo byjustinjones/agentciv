@@ -791,18 +791,24 @@ _PERFORM = {"propose": _do_propose, "counter": _do_counter, "accept": _do_accept
 
 
 # --------------------------------------------------------------- turn hooks
-def default_penalty(per_turn: dict, turns_left: int) -> int:
-    """Influence penalty for defaulting with ``turns_left`` instalments of
-    ``per_turn`` unpaid: ``CONTRACT_DEFAULT_PENALTY``, or 1 per
-    ``CONTRACT_DEFAULT_OWED_PER_INFLUENCE`` units still owed if that is more."""
-    owed = sum(per_turn.values()) * max(0, turns_left)
-    return max(C.CONTRACT_DEFAULT_PENALTY, -(-owed // C.CONTRACT_DEFAULT_OWED_PER_INFLUENCE))
+# start price of every market resource (§7): the price a default is valued at,
+# fixed for the game so neither party can move it with market orders
+REFERENCE_PRICES = {r: g / a for r, (a, g) in C.MARKET_POOLS_PER_PLAYER.items()}
 
 
-def obligation_value(per_turn: dict, turns_left: int, prices: dict) -> int:
+def default_penalty(value: int) -> int:
+    """Influence penalty for defaulting on an obligation worth ``value`` gold
+    (``obligation_value``): 1 per ``CONTRACT_DEFAULT_GOLD_PER_INFLUENCE``
+    gold, rounded up, at least ``CONTRACT_DEFAULT_PENALTY``."""
+    return max(C.CONTRACT_DEFAULT_PENALTY, -(-max(0, value) // C.CONTRACT_DEFAULT_GOLD_PER_INFLUENCE))
+
+
+def obligation_value(per_turn: dict, turns_left: int, prices: dict | None = None) -> int:
     """Gold value of ``turns_left`` unpaid instalments of ``per_turn``: gold
-    at face value, every other resource at ``prices[r]`` gold per unit (1 if
-    it has no market price), each resource rounded down."""
+    at face value, every other resource at ``prices[r]`` gold per unit
+    (default: ``REFERENCE_PRICES``; 1 if it has none), each resource
+    rounded down."""
+    prices = REFERENCE_PRICES if prices is None else prices
     n = max(0, turns_left)
     total = 0
     for r, v in per_turn.items():
@@ -839,19 +845,21 @@ def pay_contracts(g: "Game") -> None:
                 continue
             keep.append(c)
         else:
-            penalty = default_penalty(per, c["turns_left"])
+            value = obligation_value(per, c["turns_left"])
+            penalty = default_penalty(value)
             taken = min(penalty, max(0, payer.resources["influence"]))
             payer.resources["influence"] -= taken
             payer.influence_debt += penalty - taken      # paid from future influence
             payer.defaults += 1
             # the remaining obligation is taken from the payer's bank (up to all of it)
-            seized = min(payer.bank, obligation_value(per, c["turns_left"], g._prices()))
+            seized = min(payer.bank, value)
             payer.bank -= seized
             payee.resources["gold"] += seized
             _emit(g, "contract_default", None, contract=c["id"], payer=payer.id, payee=payee.id,
                   per_turn=per, turns_left=c["turns_left"], penalty=penalty, debt=penalty - taken,
                   seized=seized, deal=c["deal"])
             g._end_streak(payer, "economic", reason="contract_default")
+            g.defaulted_this_turn.add(payer.id)   # this turn end does not count (§11)
     g.contracts = keep
     g._invalidate()
 

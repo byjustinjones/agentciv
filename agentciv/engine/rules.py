@@ -227,7 +227,7 @@ def _build_rules() -> dict:
                 "max_open_per_player": C.DEAL_MAX_OPEN_PER_PLAYER,
                 "message_max_length": C.DEAL_MESSAGE_MAX_LENGTH,
                 "contract_default_penalty": C.CONTRACT_DEFAULT_PENALTY,
-                "contract_default_owed_per_influence": C.CONTRACT_DEFAULT_OWED_PER_INFLUENCE,
+                "contract_default_gold_per_influence": C.CONTRACT_DEFAULT_GOLD_PER_INFLUENCE,
                 "actions_per_turn": C.DIPLOMACY_ACTIONS_PER_TURN,
                 "say_per_turn": C.SAY_PER_TURN,
                 "max_actions_per_call": C.MAX_ACTIONS_PER_CALL,

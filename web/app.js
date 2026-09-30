@@ -2376,7 +2376,7 @@
         case 'streak_started':
           return { icon: 'clock', color: '#f3c969', major: true, html: `${P(who)} started a <b>${esc(COND_LABEL[e.condition] || human(e.condition))}</b> victory streak` };
         case 'streak_ended':
-          return { icon: 'clock', color: '#94a3b8', major: true, html: `${P(who)}'s ${esc(COND_LABEL[e.condition] || human(e.condition))} victory streak ended${e.reason === 'contract_default' ? ' <span class="muted">(contract default)</span>' : ''}` };
+          return { icon: 'clock', color: '#94a3b8', major: true, html: `${P(who)}'s ${esc(COND_LABEL[e.condition] || human(e.condition))} victory streak ended${e.reason === 'contract_default' ? ' <span class="muted">(contract default)</span>' : e.reason === 'eliminated' ? ' <span class="muted">(eliminated)</span>' : ''}` };
         case 'say':
           return { icon: 'chat', color: e.to === 'all' ? '#60a5fa' : '#c084fc', html: `${P(e.from ?? e.by)} → ${e.to === 'all' || e.to == null ? 'everyone' : P(e.to)}: <span class="quote">“${esc(e.text)}”</span>` };
         case 'trade_offered':
@@ -2656,7 +2656,7 @@
       const defaultRows = defaults.map((e) => `<div class="crow default">
           <div class="crow-top">${icon('contract', '#f87171')} ${P(e.payer)} <span class="betray">defaulted</span> <span class="muted">on</span> ${esc(e.contract ?? '')} <span class="muted">to</span> ${P(e.payee)}
             <span class="left">T${esc(e.turn)}</span></div>
-          <div class="small muted">owed ${esc(bagText(e.per_turn) || '?')}/turn with ${esc(e.turns_left ?? '?')} turns left${e.penalty != null ? ` · payer lost ${esc(e.penalty)} influence` : ''}${e.deal ? ` · deal ${esc(e.deal)}` : ''}</div>
+          <div class="small muted">owed ${esc(bagText(e.per_turn) || '?')}/turn with ${esc(e.turns_left ?? '?')} turns left${e.penalty != null ? ` · payer lost ${esc(e.penalty)} influence` : ''}${num(e.seized) ? ` · ${fmt(e.seized)} gold moved from the payer's bank to the payee` : ''}${e.deal ? ` · deal ${esc(e.deal)}` : ''}</div>
         </div>`).join('');
 
       // reputation

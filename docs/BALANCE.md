@@ -308,8 +308,11 @@ influence, owed as debt if the payer spent its influence first. With the
 bots' credit limit a first-time borrower gets at most ~125 gold from a bot,
 so a deliberate default nets about 100 gold for 25–40 influence and a
 public default that ends further credit. If loans become an exploit again,
-lower `CONTRACT_DEFAULT_OWED_PER_INFLUENCE` (engine) or `CREDIT_BASE`
-(bots/common.py).
+lower the fine's divisor (engine) or `CREDIT_BASE` (bots/common.py).
+Since the bank (section 7 below) the fine is `max(25, ceil(value/2))`, where
+`value` is the remaining obligation in gold at fixed start prices
+(`CONTRACT_DEFAULT_GOLD_PER_INFLUENCE` = 2): that same 100-gold default now
+costs 50–63 influence.
 
 ### Field B — `strategist,economist,rusher,turtle,economist,turtle`
 
@@ -479,4 +482,12 @@ six-field mix is the balance reference.
 * Wonder's share fell from 20% to 14–15%; watch it in LLM games (fixes: a
   larger bank target or cheaper wonder stages).
 * The strategist rarely picks the economic path; strategist_lite does bank.
+* A default is the one way gold leaves a bank: the seizure is paid to the
+  payee as gold on hand, so a payee that gifts it back returns the bank to
+  the payer as spendable gold (or keeps it out of a captor's plunder). The
+  fine prices this at 1 influence per 2 gold moved (a 3000-gold bank costs
+  1500 influence, mostly as `influence_debt`), and the seizure is valued at
+  fixed start prices so neither side can inflate or shrink it with
+  same-turn market orders. If it is still used, burn the seizure instead of
+  paying it out.
 

@@ -131,6 +131,7 @@ class Game:
         self._recruit_queue: list = []
         self._events: list = []
         self._move_restricted: set = set()
+        self.defaulted_this_turn: set = set()   # payers that defaulted in this turn's phase 7
         self.last_events: list = []
         self.result: dict | None = None
         self._stats: dict | None = None
@@ -425,6 +426,7 @@ class Game:
         # self._events already holds the events of diplomacy actions sent
         # through the channel during this turn (they belong to this turn)
         orders = {p.id: list(self._orders.get(p.id, [])) for p in self.players if p.alive}
+        self.defaulted_this_turn = set()
         fog = self.config.fog
         if fog:
             pre = F.vision_all(self)
@@ -1241,7 +1243,8 @@ class Game:
         home_of = {c.owner for c in self.cities.values() if c.capital and c.original_owner == c.owner}
         for p in self._alive_in_order():
             home = p.id in home_of
-            for condition, ok in (("economic", home and p.bank >= bt),
+            # a contract default this turn keeps the economic streak at 0 (§10)
+            for condition, ok in (("economic", home and p.bank >= bt and p.id not in self.defaulted_this_turn),
                                   ("influence", home and p.legacy >= lt)):
                 if ok:
                     attr = condition + "_streak"
@@ -1280,6 +1283,9 @@ class Game:
                 self._set_owner(i, None)
         for key in [k for k in self.treaties if p.id in k]:
             del self.treaties[key]
+        self._end_streak(p, "economic", reason="eliminated")
+        self._end_streak(p, "influence", reason="eliminated")
+        p.relic_streak = 0
         self.treaty_proposals = [pr for pr in self.treaty_proposals if p.id not in (pr["from"], pr["to"])]
         D.on_eliminated(self, p.id)
         p.wonder_city = None

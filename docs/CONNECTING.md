@@ -211,6 +211,7 @@ Orders cheat sheet (coordinates are `[x, y]`, x = column, origin top-left):
 {"type":"settle","at":[9,9]}
 {"type":"disband","at":[3,4],"units":{"infantry":1}}
 {"type":"market","side":"buy","resource":"stone","qty":40,"limit":2.5}
+{"type":"bank","gold":60}
 {"type":"propose_treaty","to":"p3","turns":20}
 {"type":"accept_treaty","from":"p3"}
 {"type":"break_treaty","with":"p3"}

@@ -477,29 +477,37 @@ def test_contract_default():
     ok(g, "p1", {"type": "propose", "to": "p2", "give": {"per_turn": {"gold": 500, "wood": 1}, "turns": 5}})
     ok(g, "p2", {"type": "accept", "deal": "d1"})
     p1, p2 = g.player("p1"), g.player("p2")
-    p1.resources["influence"] = 900
+    p1.resources["influence"] = 2000
     g1, g2, w2 = p1.resources["gold"], p2.resources["gold"], p2.resources["wood"]
     ev = run_turn(g)
     dflt = events_of(ev, "contract_default")[0]
-    # 5 x 501 units still owed -> 1 influence per CONTRACT_DEFAULT_OWED_PER_INFLUENCE units
-    assert dflt["penalty"] == D.default_penalty({"gold": 500, "wood": 1}, 5) == 501
+    # 5 x (500 gold + 1 wood at its start price 1.5) = 2507 gold still owed
+    # -> 1 influence per CONTRACT_DEFAULT_GOLD_PER_INFLUENCE gold, rounded up
+    assert D.obligation_value({"gold": 500, "wood": 1}, 5) == 2507
+    assert dflt["penalty"] == D.default_penalty(2507) == 1254
     assert dflt["payer"] == "p1" and dflt["debt"] == 0 and dflt["contract"] == "c1"
     assert not events_of(ev, "contract_paid")
     st = g.stats()
     assert p1.resources["gold"] == g1 + st["p1"]["income"]["gold"]        # nothing paid, not even partially
     assert p2.resources["gold"] == g2 + st["p2"]["income"]["gold"]
     assert p2.resources["wood"] == w2 + st["p2"]["income"]["wood"]
-    assert p1.resources["influence"] == 900 - 501 + st["p1"]["income"]["influence"]
+    assert p1.resources["influence"] == 2000 - 1254 + st["p1"]["income"]["influence"]
     assert p1.defaults == 1 and g.contracts == [] and p1.influence_debt == 0
     assert "contract_default" in {e["type"] for e in g.spectator_view()["events"]}     # public
     assert g.spectator_view()["players"][0]["reputation"]["defaults"] == 1
 
 
 def test_default_penalty_scale():
-    assert D.default_penalty({"gold": 1}, 1) == C.CONTRACT_DEFAULT_PENALTY == 25     # minimum
-    assert D.default_penalty({"gold": 5}, 10) == 25
-    assert D.default_penalty({"gold": 30}, 30) == 900 // C.CONTRACT_DEFAULT_OWED_PER_INFLUENCE == 180
-    assert D.default_penalty({"gold": 13, "food": 1}, 10) == 28                       # rounded up
+    assert C.CONTRACT_DEFAULT_GOLD_PER_INFLUENCE == 2
+    assert D.default_penalty(1) == C.CONTRACT_DEFAULT_PENALTY == 25     # minimum
+    assert D.default_penalty(0) == 25
+    assert D.default_penalty(50) == 25
+    assert D.default_penalty(51) == 26                                  # rounded up
+    assert D.default_penalty(D.obligation_value({"gold": 30}, 30)) == 900 // 2 == 450
+    # the fine follows the gold value, not the unit count: stone (start price 2)
+    # costs twice as much per unit as gold
+    assert D.default_penalty(D.obligation_value({"stone": 50}, 30)) == 1500
+    assert D.default_penalty(D.obligation_value({"gold": 50}, 30)) == 750
 
 
 def test_contract_default_penalty_beyond_influence_becomes_debt():
@@ -509,8 +517,8 @@ def test_contract_default_penalty_beyond_influence_becomes_debt():
     p1 = g.player("p1")
     p1.resources["influence"] = 3
     inc = g.stats()["p1"]["income"]["influence"]      # influence income arrives before the instalment
-    pen = D.default_penalty({"gold": 900}, 1)
-    assert pen == 180 and 3 + inc < pen
+    pen = D.default_penalty(D.obligation_value({"gold": 900}, 1))
+    assert pen == 450 and 3 + inc < pen
     ev = run_turn(g)
     d = events_of(ev, "contract_default")[0]
     assert d["penalty"] == pen and d["debt"] == pen - 3 - inc
@@ -540,7 +548,7 @@ def test_default_cannot_be_dodged_by_spending_influence_first():
                              {"type": "claim", "at": [4, 1]}]})
     assert len(events_of(ev, "claim")) == 3 and not events_of(ev, "order_failed")
     d = events_of(ev, "contract_default")[0]
-    assert d["penalty"] == 180 and p1.influence_debt == 180 - (d["penalty"] - d["debt"]) > 150
+    assert d["penalty"] == 450 and p1.influence_debt == 450 - (d["penalty"] - d["debt"]) > 420
 
 
 def test_loan_both_directions_and_contract_order():
@@ -829,6 +837,7 @@ def test_rules_json_exposes_deal_constants():
     r = rules_json()["diplomacy"]["deals"]
     assert r["max_open_per_player"] == C.DEAL_MAX_OPEN_PER_PLAYER == 8
     assert r["contract_default_penalty"] == C.CONTRACT_DEFAULT_PENALTY == 25
+    assert r["contract_default_gold_per_influence"] == C.CONTRACT_DEFAULT_GOLD_PER_INFLUENCE == 2
     assert r["default_expires_in"] == C.DEAL_DEFAULT_EXPIRES_IN == 2
     assert r["actions_per_turn"] == 30 and r["say_per_turn"] == 10
     assert r["contract_turns"] == [1, 30] and r["peace_turns"] == [10, 50] and r["max_tiles_per_bundle"] == 5

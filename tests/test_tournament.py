@@ -90,3 +90,13 @@ def test_summary_reports_median_seats_and_start_slots():
     for r in s["results"]:
         assert sorted(seat["slot"] for seat in r["seats"]) == [0, 1, 2]
     assert "by start slot" in T.format_summary(s)
+
+
+def test_count_events_includes_seized_bank_gold():
+    from collections import Counter
+    trade = {pid: dict.fromkeys(T.TRADE_KEYS, 0) for pid in ("p1", "p2")}
+    T._count_events(None, trade, Counter(), [
+        {"type": "contract_default", "payer": "p1", "payee": "p2", "per_turn": {"gold": 50},
+         "turns_left": 5, "seized": 250}])
+    assert trade["p1"]["defaults"] == 1 and trade["p1"]["gold_paid"] == 250 and trade["p1"]["net_value"] == -250
+    assert trade["p2"]["gold_received"] == 250 and trade["p2"]["net_value"] == 250

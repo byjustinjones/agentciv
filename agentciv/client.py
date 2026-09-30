@@ -940,8 +940,9 @@ def describe_event(ev: dict, pid: str | None = None) -> str:
         return f"contract {ev.get('contract')} completed ({who(ev.get('payer'))} → {who(ev.get('payee'))})"
     if t == "contract_default":
         pen = f" (penalty {ev.get('penalty')} influence)" if "penalty" in ev else ""
+        seized = f", {ev['seized']} gold moved from the payer's bank to the payee" if ev.get("seized") else ""
         return (f"contract {ev.get('contract')} DEFAULTED: {who(ev.get('payer'))} could not pay "
-                f"{who(ev.get('payee'))}{pen}")
+                f"{who(ev.get('payee'))}{pen}{seized}")
     if t == "spy_report":
         return (f"your {ev.get('mission')} mission against {ev.get('target')} ({ev.get('invest')} gold): "
                 f"{ev.get('outcome')}")

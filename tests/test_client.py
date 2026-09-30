@@ -311,3 +311,14 @@ def test_order_warnings_limits_all_resources_and_open_offers():
     w = order_warnings(v, [{"type": "recruit", "at": [x, y], "unit": "infantry", "count": 1}])
     assert any("open offers" in s for s in w)
     assert "Promised in your open offers" in summarize_view(v)
+
+
+def test_describe_contract_default_shows_the_seized_bank_gold():
+    from agentciv.client import describe_event
+    ev = {"type": "contract_default", "turn": 4, "contract": "c3", "payer": "p1", "payee": "p2",
+          "per_turn": {"gold": 50}, "turns_left": 5, "penalty": 125, "debt": 0, "seized": 250, "deal": "d2"}
+    line = describe_event(ev, "p2")
+    assert line == ("contract c3 DEFAULTED: p1 could not pay you (penalty 125 influence), "
+                    "250 gold moved from the payer's bank to the payee")
+    fogged = {k: v for k, v in ev.items() if k not in ("per_turn", "penalty", "debt", "seized")}
+    assert describe_event(fogged, "p3") == "contract c3 DEFAULTED: p1 could not pay p2"

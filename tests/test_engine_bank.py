@@ -211,16 +211,19 @@ def test_default_takes_the_remaining_obligation_from_the_bank(bank, seized):
     assert p1.bank == bank - seized
     assert p2.resources["gold"] == gold2 + seized + g.stats()["p2"]["income"]["gold"]
     assert p2.bank == 0                                     # paid as gold on hand
-    assert p1.defaults == 1 and d["penalty"] == D.default_penalty({"gold": 50}, 5)
+    assert p1.defaults == 1 and d["penalty"] == D.default_penalty(250) == 125
 
 
-def test_obligation_value_uses_market_prices():
-    assert D.obligation_value({"gold": 2, "stone": 4}, 3, {"stone": 2.49}) == 6 + 29
-    assert D.obligation_value({"wood": 1}, 3, {}) == 3                  # no price: 1 gold per unit
-    assert D.obligation_value({"food": 3}, 0, {"food": 1.0}) == 0
+def test_obligation_value_uses_fixed_start_prices():
+    assert D.REFERENCE_PRICES == {"food": 1.0, "wood": 1.5, "stone": 2.0}
+    assert D.obligation_value({"gold": 2, "stone": 4}, 3) == 6 + 24
+    assert D.obligation_value({"wood": 1}, 3) == 4                     # 4.5 rounded down
+    assert D.obligation_value({"influence": 5}, 2) == 10               # no price: 1 gold per unit
+    assert D.obligation_value({"food": 3}, 0) == 0
+    assert D.obligation_value({"gold": 2, "stone": 4}, 3, {"stone": 2.49}) == 6 + 29   # explicit prices
 
 
-def test_default_values_non_gold_resources_at_the_market_price():
+def test_default_values_non_gold_resources_at_the_start_price():
     g = world()
     p1 = g.player("p1")
     contract(g, {"stone": 40, "gold": 2}, 3)
@@ -228,9 +231,33 @@ def test_default_values_non_gold_resources_at_the_market_price():
     p1.bank = 5000
     ev = run_turn(g)
     d = events_of(ev, "contract_default")[0]
-    price = g._prices()["stone"]            # no trades, reversion only at the end of the economy step
-    assert d["seized"] == 6 + int(120 * price) == D.obligation_value({"stone": 40, "gold": 2}, 3, g._prices())
+    assert d["seized"] == 6 + 120 * 2 == D.obligation_value({"stone": 40, "gold": 2}, 3)
+    assert d["penalty"] == D.default_penalty(246) == 123
     assert p1.bank == 5000 - d["seized"]
+
+
+@pytest.mark.parametrize("side", ["buy", "sell"])
+def test_same_turn_market_orders_do_not_move_the_seizure(side):
+    """Review finding: the payee buying (or the payer selling) the owed
+    resource in the defaulting turn must not change what is seized."""
+    g = world()
+    p1, p2 = g.player("p1"), g.player("p2")
+    contract(g, {"stone": 50}, 30)
+    p1.resources["stone"] = 0
+    p1.bank = 6000
+    cap = int(g.pools["stone"][0] * C.MARKET_MAX_ORDER_FRACTION)
+    if side == "buy":
+        p2.resources["gold"] = 5000
+        orders = {"p2": [{"type": "market", "side": "buy", "resource": "stone", "qty": cap}]}
+    else:
+        p1.resources["stone"] = 49                   # still short of the instalment after selling
+        orders = {"p1": [{"type": "market", "side": "sell", "resource": "stone", "qty": 49}]}
+    ev = run_turn(g, orders)
+    assert events_of(ev, "market")                   # the trade happened and moved the spot price
+    assert g._prices()["stone"] != 2.0
+    d = events_of(ev, "contract_default")[0]
+    assert d["seized"] == 50 * 30 * 2 == 3000 and p1.bank == 3000
+    assert d["penalty"] == 1500
 
 
 def test_default_ends_the_economic_streak_but_not_the_legacy():
@@ -252,18 +279,43 @@ def test_default_ends_the_economic_streak_but_not_the_legacy():
     assert p1.legacy == 700 + 3 * g.stats()["p1"]["income"]["influence"]
 
 
-def test_default_restarts_a_streak_that_still_meets_the_target():
+def test_default_turn_does_not_count_toward_a_new_streak():
     g = world()
     p1 = g.player("p1")
     p1.bank = C.BANK_VICTORY + 1000
+    p1.resources["influence"] = 500
     for _ in range(5):
         run_turn(g)
     assert p1.economic_streak == 5
     contract(g, {"gold": 100}, 2)                          # more than income + interest
     p1.resources["gold"] = 0
     ev = run_turn(g)
-    assert [e["type"] for e in ev if e["type"].startswith("streak")] == ["streak_ended", "streak_started"]
+    assert p1.bank >= C.BANK_VICTORY                       # still above the target after the seizure
+    assert [e["type"] for e in ev if e["type"].startswith("streak")] == ["streak_ended"]
+    assert p1.economic_streak == 0
+    assert g.player_view("p2")["players"][0]["economic_streak"] == 0
+    ev = run_turn(g)                                       # the next turn end counts again
+    assert [e["type"] for e in ev if e["type"].startswith("streak")] == ["streak_started"]
     assert p1.economic_streak == 1
+
+
+def test_elimination_ends_running_streaks():
+    g = world()
+    p2 = g.player("p2")
+    p2.bank, p2.legacy = C.BANK_VICTORY + 400, C.LEGACY_VICTORY + 100
+    for _ in range(4):
+        run_turn(g)
+    assert p2.economic_streak == 4 and p2.influence_streak == 4
+    p2.relic_streak = 3
+    g.place_units(11, 2, "p1", {"infantry": 5})
+    ev = run_turn(g, {"p1": [{"type": "move", "from": [11, 2], "to": [12, 2]}]})
+    assert not p2.alive
+    ended = [(e["condition"], e.get("reason")) for e in events_of(ev, "streak_ended") if e["player"] == "p2"]
+    assert ended == [("economic", "eliminated"), ("influence", "eliminated")]
+    types = [e["type"] for e in ev]
+    assert types.index("streak_ended") < types.index("eliminated")
+    row = g.spectator_view()["players"][1]
+    assert (row["economic_streak"], row["influence_streak"], row["relic_streak"]) == (0, 0, 0)
 
 
 def test_seized_visibility():
