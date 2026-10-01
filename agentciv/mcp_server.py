@@ -17,6 +17,10 @@ agent never has to handle it.
 Typical loop: ``get_rules`` → ``quickmatch`` → repeat { ``get_state`` →
 (barter: ``propose_deal`` / ``respond_to_deal`` / ``say`` / ``wait_for_inbox``) →
 ``submit_orders`` → ``wait_for_turn`` } until the game is over → ``get_result``.
+In a synchronous game (``sync: true``) the deal tools queue their action for
+the end of the negotiation round and ``end_round`` (also ``wait_for_inbox`` /
+``wait_for_turn`` while negotiating) ends the round, waits for every seat and
+returns what the round produced.
 """
 from __future__ import annotations
 
@@ -28,7 +32,7 @@ from typing import Any
 
 from .engine import constants as C
 from .client import (AgentCivClient, ApiError, _deals_lines, agent_from_env, ascii_map, deal_warnings, describe_event,
-                     order_warnings, peace_deal_notes, summarize_view)
+                     order_warnings, peace_deal_notes, phase_result_lines, summarize_view)
 
 PROTOCOL_VERSION = "2025-06-18"
 SUPPORTED_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
@@ -43,7 +47,11 @@ Barter live during a turn: propose_deal (resources, tiles, per-turn contracts, p
 the reply and respond_to_deal (accept | reject | counter | withdraw); say sends messages; list_deals shows your
 open deals, contracts and the public deal log. An accepted deal settles at once. The turn resolves as soon as
 every player has submitted; diplomacy sent after that applies to the next turn.
-Games created with fog: true hide parts of other players' state (rules §14)."""
+Games created with fog: true hide parts of other players' state (rules §14).
+Games created with sync: true are synchronous (get_state shows a SYNCHRONOUS TURN line): each turn is a few
+negotiation rounds, then an orders phase. In a round, propose_deal / respond_to_deal / say are queued, not applied;
+end_round ends your round, waits until every player has ended it (all queued actions are then applied in the turn's
+rotating seat order) and returns the results. After the last round diplomacy is closed and submit_orders opens."""
 
 ORDER_HELP = (
     "Order objects (coordinates [x,y]): "
@@ -92,6 +100,10 @@ DEAL_PROPS = {
 
 FOG_SCHEMA = {"type": "boolean", "description": "hide other players' armies outside your sight, their stockpiles, units "
                            "and exact score; enables spy and counterintel orders (rules §14)"}
+SYNC_SCHEMA = {"type": "boolean", "description": "synchronous turns: negotiation rounds whose diplomacy is applied "
+                                               "together at the end of each round, then an orders phase"}
+ROUNDS_SCHEMA = {"type": "integer", "minimum": 0, "maximum": 10,
+                 "description": "with sync: negotiation rounds per turn (default 3)"}
 AGENT_SCHEMA = {
     "type": "object",
     "description": "optional: what plays this seat, shown in the game summary and replay (never used for "
@@ -132,7 +144,9 @@ TOOLS = [
          "max_turns": {"type": "integer", "minimum": 1, "maximum": 1000},
          "lobby_timeout": {"type": "number", "description": "auto-start after this many seconds"},
          "seed": {"type": "integer"},
-         "fog": FOG_SCHEMA})},
+         "fog": FOG_SCHEMA,
+         "sync": SYNC_SCHEMA,
+         "negotiation_rounds": ROUNDS_SCHEMA})},
     {"name": "join_game",
      "description": "Join a game lobby by id. Remembers your player id and token for the other tools.",
      "inputSchema": _schema({"game_id": {"type": "string"}, "name": {"type": "string"}, "agent": AGENT_SCHEMA},
@@ -145,6 +159,7 @@ TOOLS = [
                              "turn_timeout": {"type": "number", "description": "seconds per turn (default 30)"},
                              "lobby_timeout": {"type": "number"},
                              "fog": FOG_SCHEMA,
+                             "sync": SYNC_SCHEMA,
                              "agent": AGENT_SCHEMA}, ["name"])},
     {"name": "start_game",
      "description": "Start your game now (fills empty seats with bots if the game was created with fill_with_bots).",
@@ -201,6 +216,12 @@ TOOLS = [
                     "a message...) or the turn changes, then list it. Use while haggling, before submit_orders.",
      "inputSchema": _schema({"timeout": {"type": "number", "default": 20,
                                          "description": "max seconds to wait (<= 110)"}})},
+    {"name": "end_round",
+     "description": "Synchronous games only: end your current negotiation round, wait until every player has "
+                    "ended it (queued diplomacy is then applied in the turn's rotating seat order), and return the "
+                    "results of your actions, new offers/messages and what is open now.",
+     "inputSchema": _schema({"timeout": {"type": "number", "default": 60,
+                                         "description": "max seconds to wait (<= 110)"}})},
     {"name": "get_result",
      "description": "Final result of a game (winner, condition, placements, scores) or its current status.",
      "inputSchema": _schema({"game_id": {"type": "string"}})},
@@ -223,6 +244,7 @@ class AgentCivMCP:
         self.key = os.environ.get("AGENTCIV_KEY") or None  # name key (registers / proves your player name)
         self.last_turn = -1
         self.submitted_turn = -1  # last turn we submitted orders for (to notice orders lost in a server crash)
+        self.phase_id: int | None = None  # synchronous games: the phase our last get_state showed
 
     # ------------------------------------------------------------ helpers
     def _need_game(self) -> None:
@@ -231,6 +253,7 @@ class AgentCivMCP:
 
     def _joined(self, res: dict) -> str:
         self.last_turn = self.submitted_turn = -1
+        self.phase_id = None
         return (f"Joined game {res['game_id']} as {res['player_id']} (status: {res.get('status')}). "
                 f"Next: call wait_for_turn (it returns when the game starts), then get_state.")
 
@@ -248,12 +271,20 @@ class AgentCivMCP:
 
     def _send_diplomacy(self, action: dict) -> str:
         try:
-            res = self.client.diplomacy([action])
+            if self.phase_id is not None:
+                res = self.client.diplomacy([action], phase=self.phase_id)
+            else:
+                res = self.client.diplomacy([action])
         except ApiError as e:
             if e.status == 409:
                 raise ToolError(f"{e.message}. Call get_state to see the current turn.") from None
             raise
         r = (res.get("results") or [{}])[0]
+        if r.get("ok") and r.get("status") == "queued":
+            ph = res.get("phase") or {}
+            return (f"Queued for the end of negotiation round {ph.get('round')} of {ph.get('of')} "
+                    f"({res.get('queued')} action(s) queued). Nothing is applied until every player has ended "
+                    "the round; call end_round when you have nothing more to send.")
         if not r.get("ok") and r.get("status") == "failed":  # accepted, but settlement failed: deal is closed
             raise ToolError(f"Deal {r.get('deal')} FAILED to settle (now closed; nothing moved): {r.get('error')}. "
                             f"Retrying accept will not work; propose new terms if you still want a deal.")
@@ -329,8 +360,69 @@ class AgentCivMCP:
                          f"{rep.get('betrayals', p.get('betrayals', 0))}")
         return "\n".join(line.lstrip("\n") for line in lines)
 
+    def end_round(self, timeout: float = 60) -> str:
+        self._need_game()
+        timeout = max(0.0, min(float(timeout), 110.0))
+        view = self.client.state()
+        ph = view.get("phase") if view.get("status") == "running" else None
+        if not ph:
+            raise ToolError("end_round is for synchronous games; this game is live (use wait_for_inbox and "
+                            "submit_orders)." if view.get("status") == "running" else
+                            f"The game is {view.get('status')}.")
+        if ph.get("id") != self.phase_id:  # a phase this agent has not seen yet: show it instead
+            return "A new phase is open.\n\n" + self.get_state()
+        if ph.get("kind") != "negotiate":
+            return "Negotiation is over for this turn (orders phase): call submit_orders, then wait_for_turn."
+        turn0 = view.get("turn")
+        seq = max(self.client.inbox_seq, 0)
+        if not ph.get("you_done"):
+            try:
+                self.client.end_round(phase=ph["id"])
+            except ApiError as e:
+                if e.status != 409:
+                    raise
+        w = self.client.wait_phase(ph["id"], timeout=timeout)
+        if w.get("status") == "running" and (w.get("phase") or {}).get("id") == ph["id"]:
+            waiting = ", ".join((w.get("phase") or {}).get("waiting") or []) or "nobody"
+            return (f"You ended negotiation round {ph.get('round')}; it is still open (waiting for: {waiting}). "
+                    "Call end_round again to keep waiting.")
+        view = self.client.state()
+        if view.get("status") != "running" or view.get("turn") != turn0:
+            return self.get_state()
+        lines = [f"Negotiation round {ph.get('round')} of {ph.get('of')} closed."]
+        mine = phase_result_lines(view.get("phase") or {}, {ph.get("round")})
+        if mine:
+            lines += ["Your actions:"] + mine
+        box = self.client.inbox(since=seq, timeout=0)
+        news = [describe_event(ev, self.client.player_id) for ev in box.get("items") or []]
+        if news:
+            lines += ["New diplomacy:"] + [f"  {x}" for x in news]
+        nxt = view.get("phase") or {}
+        self.phase_id = nxt.get("id")
+        self.last_turn = max(self.last_turn, view.get("turn", -1))
+        if nxt.get("kind") == "negotiate":
+            lines.append(f"Now: negotiation round {nxt.get('round')} of {nxt.get('of')}. Queue deals or messages, "
+                         "then end_round (list_deals shows everything open).")
+        else:
+            lines.append("Negotiation is over for this turn: call submit_orders, then wait_for_turn.")
+        return "\n".join(lines)
+
+    def _sync_phase(self) -> dict | None:
+        """The open phase of a running synchronous game (None: live game or not running)."""
+        if self.phase_id is None:
+            return None
+        view = self.client.state()
+        return view.get("phase") if view.get("status") == "running" else None
+
     def wait_for_inbox(self, timeout: float = 20) -> str:
         self._need_game()
+        ph = self._sync_phase()
+        if ph is not None:
+            if ph.get("id") != self.phase_id:
+                return "A new phase is open.\n\n" + self.get_state()
+            if ph.get("kind") == "negotiate":
+                return self.end_round(max(float(timeout), 60.0))
+            return "Diplomacy is closed in the orders phase of this synchronous turn: call submit_orders."
         timeout = max(0.0, min(float(timeout), 110.0))
         box = self.client.inbox(timeout=timeout, turn=self.last_turn if self.last_turn >= 0 else None)
         pid = self.client.player_id
@@ -377,10 +469,13 @@ class AgentCivMCP:
         return self._joined(self.client.join(game_id, name, key=self.key, agent=self._agent(agent)))
 
     def quickmatch(self, name: str, players: int = 6, turn_timeout: float | None = None,
-                   lobby_timeout: float | None = None, fog: bool | None = None, agent: dict | None = None) -> str:
+                   lobby_timeout: float | None = None, fog: bool | None = None, agent: dict | None = None,
+                   sync: bool | None = None) -> str:
         opts = {} if lobby_timeout is None else {"lobby_timeout": lobby_timeout}
         if fog is not None:
             opts["fog"] = fog
+        if sync:
+            opts["sync"] = True
         return self._joined(self.client.quickmatch(name, players=players, turn_timeout=turn_timeout,
                                                    key=self.key, agent=self._agent(agent), **opts))
 
@@ -401,15 +496,25 @@ class AgentCivMCP:
             self.submitted_turn = self.last_turn = view["turn"] - 1
         if view.get("status") == "running":
             self.last_turn = max(self.last_turn, view["turn"])  # wait_for_turn waits for the next one
+            if view.get("phase"):
+                self.phase_id = view["phase"].get("id")
         text = note + summarize_view(view, self.client.player_id)
         self.client.inbox_seq = max(self.client.inbox_seq, int(view.get("diplomacy_seq") or 0))
-        if view.get("status") == "running":
+        ph = view.get("phase") if view.get("status") == "running" else None
+        if ph and ph.get("kind") == "orders":
+            text += (f"\n\nOrders phase: submit orders for turn {view['turn']} with submit_orders and call "
+                     "wait_for_turn.")
+        elif view.get("status") == "running":
             incoming = [d for d in (view.get("deals") or {}).get("open") or [] if d.get("to") == self.client.player_id]
             if incoming:
                 text += (f"\n\n{len(incoming)} deal(s) await your answer: respond_to_deal (accept | reject | "
                          "counter).")
-            text += (f"\n\nBarter now if useful (propose_deal, respond_to_deal, say, wait_for_inbox), then submit "
-                     f"orders for turn {view['turn']} with submit_orders and call wait_for_turn.")
+            if ph:
+                text += ("\n\nNegotiation round: queue deals or messages (propose_deal, respond_to_deal, say) if "
+                         "useful, then call end_round. Orders open after the last round.")
+            else:
+                text += (f"\n\nBarter now if useful (propose_deal, respond_to_deal, say, wait_for_inbox), then "
+                         f"submit orders for turn {view['turn']} with submit_orders and call wait_for_turn.")
         if include_map:
             text += "\n\n" + ascii_map(view, self.client.player_id)
         if full:
@@ -458,6 +563,17 @@ class AgentCivMCP:
 
     def wait_for_turn(self, timeout: float = 50) -> str:
         self._need_game()
+        ph = self._sync_phase()
+        if ph is not None:
+            timeout = max(0.0, min(float(timeout), 110.0))
+            if ph.get("id") != self.phase_id:
+                return self.get_state()
+            if ph.get("kind") == "negotiate" and not ph.get("you_done"):
+                return self.end_round(timeout)
+            w = self.client.wait_phase(ph["id"], timeout=timeout)
+            if w.get("status") == "running" and (w.get("phase") or {}).get("id") == ph["id"]:
+                return (f"Still waiting (turn {w['turn']}, {ph.get('kind')} phase). Call wait_for_turn again.")
+            return self.get_state()
         timeout = max(0.0, min(float(timeout), 110.0))
         w = self.client.wait(since_turn=self.last_turn, timeout=timeout)
         if w.get("timed_out"):
