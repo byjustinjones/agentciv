@@ -257,3 +257,21 @@ def test_barter_through_tools(mcp, server):
     mcp.tool("submit_orders", orders=[])
     text, err = mcp.tool("wait_for_inbox", timeout=10)
     assert not err and "NEW TURN" in text
+
+
+def test_puzzle_and_track_through_tools(mcp):
+    """create_game takes a puzzle or a track; quickmatch takes a track (and its manifest)."""
+    text, err = mcp.tool("create_game", puzzle="market")
+    assert not err
+    gid = text.split()[2].rstrip(".")
+    text, err = mcp.tool("join_game", game_id=gid, name="Solver")
+    assert not err and "Joined game" in text
+    text, err = mcp.tool("get_state")
+    assert not err and "market" in text.lower()
+    text, err = mcp.tool("create_game", track="eval-6p-fog-v1", fog=False)
+    assert err and "conflicts with track" in text
+    text, err = mcp.tool("quickmatch", name="Tracked", track="eval-6p-fog-v1")
+    assert err and "manifest" in text
+    text, err = mcp.tool("quickmatch", name="Tracked", track="eval-6p-fog-v1",
+                         agent={"model": "m", "harness": "pytest"})
+    assert not err and "Joined game" in text

@@ -104,6 +104,9 @@ SYNC_SCHEMA = {"type": "boolean", "description": "synchronous turns: negotiation
                                                "together at the end of each round, then an orders phase"}
 ROUNDS_SCHEMA = {"type": "integer", "minimum": 0, "maximum": 10,
                  "description": "with sync: negotiation rounds per turn (default 3)"}
+TRACK_SCHEMA = {"type": "string", "description": "a frozen evaluation track, e.g. eval-6p-fog-v1 (GET /api/tracks, "
+                                               "docs/EVALUATION.md): fixes every other option, seats are anonymous "
+                                               "while the game is live and joining needs an agent manifest"}
 AGENT_SCHEMA = {
     "type": "object",
     "description": "optional: what plays this seat, shown in the game summary and replay (never used for "
@@ -146,7 +149,11 @@ TOOLS = [
          "seed": {"type": "integer"},
          "fog": FOG_SCHEMA,
          "sync": SYNC_SCHEMA,
-         "negotiation_rounds": ROUNDS_SCHEMA})},
+         "negotiation_rounds": ROUNDS_SCHEMA,
+         "track": TRACK_SCHEMA,
+         "puzzle": {"type": "string",
+                    "description": "a diagnostic position (docs/PUZZLES.md): winter, market, contracts or "
+                                   "stop-victory. The puzzle fixes everything else; join it to start."}})},
     {"name": "join_game",
      "description": "Join a game lobby by id. Remembers your player id and token for the other tools.",
      "inputSchema": _schema({"game_id": {"type": "string"}, "name": {"type": "string"}, "agent": AGENT_SCHEMA},
@@ -160,6 +167,7 @@ TOOLS = [
                              "lobby_timeout": {"type": "number"},
                              "fog": FOG_SCHEMA,
                              "sync": SYNC_SCHEMA,
+                             "track": TRACK_SCHEMA,
                              "agent": AGENT_SCHEMA}, ["name"])},
     {"name": "start_game",
      "description": "Start your game now (fills empty seats with bots if the game was created with fill_with_bots).",
@@ -470,12 +478,14 @@ class AgentCivMCP:
 
     def quickmatch(self, name: str, players: int = 6, turn_timeout: float | None = None,
                    lobby_timeout: float | None = None, fog: bool | None = None, agent: dict | None = None,
-                   sync: bool | None = None) -> str:
+                   sync: bool | None = None, track: str | None = None) -> str:
         opts = {} if lobby_timeout is None else {"lobby_timeout": lobby_timeout}
         if fog is not None:
             opts["fog"] = fog
         if sync:
             opts["sync"] = True
+        if track:
+            opts["track"] = track
         return self._joined(self.client.quickmatch(name, players=players, turn_timeout=turn_timeout,
                                                    key=self.key, agent=self._agent(agent), **opts))
 
