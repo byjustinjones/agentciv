@@ -153,3 +153,59 @@ def test_summarize_accepts_results_without_ranks():
     s = T.summarize([r])
     by = {b["bot"]: b for b in s["bots"]}
     assert by["a"]["avg_place"] == 1.0 and by["b"]["avg_place"] == 2.0
+
+
+def test_replan_tracker_streaks_breaks_leads_and_attacks():
+    """ReplanTracker on hand-made turns: streak events by reason, a city
+    capture credited to its capturer, lead changes in victory progress,
+    the target-to-win time and attacks after turn 30."""
+    from agentciv.engine import constants as C
+    from agentciv.engine.testing import sandbox
+    g = sandbox(3)
+    for pid, xy in zip(("p1", "p2", "p3"), ((2, 2), (12, 2), (2, 12))):
+        g.add_city(*xy, pid, capital=True)
+    label = {"p1": "banker", "p2": "spoiler", "p3": "other"}
+    tr = T.ReplanTracker(g, label)
+
+    def turn(t, events=(), bank=None):
+        if bank:
+            for pid, b in bank.items():
+                g.player(pid).bank = b
+            g._invalidate()
+        tr.before_step()
+        tr.after_step(t, list(events))
+
+    turn(10, bank={"p1": 2000})                       # p1 leads (0.8 * 2000/3600 >= 0.25)
+    turn(20, bank={"p2": 2500})                       # p2 overtakes: one lead change
+    turn(25, [{"type": "streak_started", "player": "p1", "condition": "economic"}], bank={"p1": C.BANK_VICTORY})
+    turn(26, [{"type": "streak_paused", "player": "p1", "condition": "economic", "reason": "deposit"}])
+    x, y = 2, 2
+    turn(31, [{"type": "battle", "x": x, "y": y, "clash": False, "sides": ["p2", "p1"], "winner": "p2"},
+              {"type": "city_captured", "x": x, "y": y, "from": "p1", "to": "p2"},
+              {"type": "streak_ended", "player": "p1", "condition": "economic", "reason": "city_lost"},
+              {"type": "streak_ended", "player": "p3", "condition": "influence"}])
+    out = tr.result({"winner": "p1", "condition": "economic", "turn": 45})
+    assert out["streaks"]["economic"] == {"started": 1, "paused": {"deposit": 1}, "ended": {"city_lost": 1}}
+    assert out["streaks"]["influence"]["ended"] == {"unmet": 1}
+    assert out["streak_breaks"] == [{"turn": 31, "victim": "banker", "conditions": ["economic"], "by": ["spoiler"]}]
+    assert out["lead_changes"] == 2                   # p1 -> p2 -> p1 (at the bank target)
+    assert out["first_target"] == {"banker": {"bank": 25}}
+    assert out["target_to_win"] == 20 and out["winner_streak_ends"] == {"city_lost": 1}
+    assert out["attacked_after_30"] == {"banker": 1}  # the battle on its city; the capturer was not attacked
+    json.dumps(out)
+
+
+def test_replanning_summary_and_format():
+    s = T.run_tournament(["banker", "economist", "idle"], games=3, players=3, seed=2, max_turns=150)
+    rp = s["replanning"]
+    assert rp["games"] == 3 and set(rp["streaks_per_game"]) == {"economic", "influence"}
+    assert list(rp["fields"]) == ["banker, economist, idle"] and rp["fields"]["banker, economist, idle"]["games"] == 3
+    assert rp["streak_wins"] == sum(1 for r in s["results"] if r["condition"] in ("economic", "influence"))
+    if rp["target_to_win"].get("economic"):
+        assert rp["target_to_win"]["economic"]["min"] >= T.C.VICTORY_STREAK_TURNS - 1
+    assert all("streak_breaks_by_per_game" in b and "streak_resets_per_game" in b for b in s["bots"])
+    text = T.format_summary(s)
+    assert "forced replanning (per game):" in text and "field [banker, economist, idle] (3 games)" in text
+    assert "lead changes in victory progress" in text and "winners never attacked after turn 30" in text
+    json.dumps(s)
+    assert T.field_key({"seats": [{"bot": "b"}, {"bot": "a"}, {"bot": "b"}]}) == "a, b x2"

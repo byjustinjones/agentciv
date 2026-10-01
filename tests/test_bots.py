@@ -280,3 +280,126 @@ def test_bots_play_without_relic_thresholds():
         for pid, bot in bots.items():
             assert not g.submit_orders(pid, bot.act(g.player_view(pid)))
         g.step()
+
+
+# ---------------------------------------------------------------------------
+# counterplay baselines: banker, zealot, spoiler (docs/BOTS.md)
+# ---------------------------------------------------------------------------
+COUNTERPLAY = ("banker", "zealot", "spoiler")
+
+
+@pytest.mark.parametrize("fog", [False, True], ids=["std", "fog"])
+@pytest.mark.parametrize("name", COUNTERPLAY)
+def test_counterplay_bot_plays_a_full_game_cleanly(name, fog):
+    """A whole game (to a victory or turn 150) in a mixed field, standard and
+    fog: no exception, no internal error, no pre-validation error."""
+    from agentciv import tournament as T
+    r = T.run_game([name, "strategist", "economist", "rusher", "turtle", "random"], seed=4, fog=fog)
+    assert r["condition"] and r["turns"] > 40
+    assert not r["bot_exceptions"], r["bot_exceptions"]
+    assert name not in r["last_errors"], r["last_errors"]
+    assert r["prevalidation_errors"].get(name, 0) == 0
+    assert r["orders"][name] > 0
+
+
+def test_counterplay_bots_stay_out_of_house_fill_and_ratings():
+    from agentciv.server.manager import DEFAULT_FILL_BOTS, UNRATED_BOTS, unrated_reason
+    for name in COUNTERPLAY:
+        assert name in BOT_NAMES and name not in DEFAULT_FILL_BOTS and name in UNRATED_BOTS
+    opts = {"max_turns": C.DEFAULT_MAX_TURNS, "turn_timeout": 60.0, "bots": ["strategist", "spoiler"]}
+    assert "spoiler" in unrated_reason(opts)
+
+
+def _solo(name, seed=1):
+    """``name`` against three idle bots; returns (game, per-turn banks of p1)."""
+    g = Game(GameConfig(seed=seed, max_turns=150))
+    bots = {}
+    for k, n in enumerate((name, "idle", "idle", "idle")):
+        bots[g.add_player(f"{n}{k}")] = get_bot(n, seed=k)
+    g.start()
+    banks = []
+    while not g.finished:
+        for pid in g.alive_players():
+            assert not g.submit_orders(pid, bots[pid].act(g.player_view(pid)))
+        g.step()
+        banks.append((g.player("p1").bank, g.player_view("p1")["you"]["bank_limit"]))
+    assert bots["p1"].last_error is None, bots["p1"].last_error
+    return g, banks
+
+
+def test_banker_reaches_the_bank_target_unopposed_and_banks_only_the_deposit():
+    from agentciv.engine.rules import bank_target, streak_deposit
+    g, banks = _solo("banker")
+    assert g.result["winner"] == "p1" and g.result["condition"] == "economic"
+    target = bank_target(150)
+    first = next(k for k, (b, _) in enumerate(banks) if b >= target)
+    assert first < 70
+    # once at the target it banks exactly the streak deposit (half the allowance)
+    for (b0, _), (b1, lim) in zip(banks[first:], banks[first + 1:]):
+        assert b1 - b0 == streak_deposit(lim)
+    # a market hall in every city: the allowance is 50 + 10 per city
+    cities = [c for c in g.cities.values() if c.owner == "p1"]
+    assert all(c.market_hall for c in cities) and banks[-1][1] == 50 + 10 * len(cities)
+    # the capital holds an archer stack
+    cap = next(c for c in cities if c.capital)
+    assert g.armies[cap.idx]["p1"].get("archer", 0) >= 10
+
+
+def test_zealot_wins_the_influence_race_unopposed():
+    g, _ = _solo("zealot")
+    assert g.result["winner"] == "p1" and g.result["condition"] == "influence"
+    temples = sum(1 for i, b in enumerate(g.improvement) if b == "temple" and g.owner[i] == "p1")
+    assert temples >= 15
+
+
+def test_spoiler_breaks_a_bankers_streak():
+    from agentciv import tournament as T
+    r = T.run_game(["banker", "spoiler", "idle"], seed=3)
+    breaks = [b for b in r["replan"]["streak_breaks"] if b["victim"] == "banker"]
+    assert breaks and all("spoiler" in b["by"] and b["conditions"] == ["economic"] for b in breaks)
+    assert r["replan"]["streaks"]["economic"]["ended"].get("city_lost", 0) >= len(breaks)
+
+
+def _spoiler_setup(streak=3):
+    """p2 is on an economic streak with a walled, crowded city next to p1
+    and an open one a little further away; p3 is harmless."""
+    g = sandbox(3)
+    g.add_city(2, 2, "p1", capital=True)
+    g.add_city(16, 16, "p2", capital=True)
+    strong = g.add_city(7, 2, "p2")
+    g.add_city(2, 8, "p2")
+    g.add_city(2, 16, "p3", capital=True)
+    strong.walls = 3
+    g.place_units(7, 2, "p2", {"archer": 60})
+    g.player("p1").resources.update(gold=3000, food=2000, wood=1000, stone=500, influence=200)
+    g.player("p2").bank, g.player("p2").economic_streak = C.BANK_VICTORY, streak
+    g._invalidate()
+    bot = get_bot("spoiler")
+    bot.SPOIL_START = 0
+    bot.trade_setup(World(g.player_view("p1")))
+    bot.etas, bot.my_eta = {"p2": {"economic": 7}, "p3": {}}, 60
+    return g, bot
+
+
+def test_spoiler_raids_the_weakest_city_of_the_streak_holder():
+    g, bot = _spoiler_setup()
+    assert [q for _, _, q in bot.spoil_candidates()] == ["p2"]
+    raid = bot.choose_raid({})
+    assert raid and raid["owner"] == "p2" and g.xy(raid["tgt"]) == (2, 8)
+    # the walled city with 60 archers needs far more than the open one
+    w = bot.w
+    weak, strong = bot.raid_force(g.idx(2, 8), "p2"), bot.raid_force(g.idx(7, 2), "p2")
+    assert not strong or bot.force_cost(strong) > 3 * bot.force_cost(weak)
+    assert not strong or strong.get("siege", 0) >= 9            # walls 3: three siege per level
+    assert w.at_peace("p1", "p2") is False
+
+
+def test_spoiler_leaves_a_rival_alone_that_is_not_close_to_winning():
+    g, bot = _spoiler_setup(streak=0)
+    g.player("p2").bank = 0
+    g._invalidate()
+    bot.trade_setup(World(g.player_view("p1")))
+    bot.etas, bot.my_eta = {"p2": {"economic": 90}, "p3": {}}, 60
+    assert bot.spoil_candidates() == []
+    raid = bot.choose_raid({})
+    assert raid is None or g.xy(raid["tgt"]) != (2, 8)

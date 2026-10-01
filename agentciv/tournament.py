@@ -191,6 +191,127 @@ def _treaty_totals(tally: Counter) -> dict:
                 peak_live=round(sum(peaks) / max(1, len(peaks)), 3), peak_max=max(peaks, default=0))
 
 
+# "Forced replanning" measures (docs/BOTS.md, Tournament runner): how often a
+# race is interrupted, the lead changes hands and a winner is ever under attack
+STREAK_CONDITIONS = ("economic", "influence")
+PROGRESS_CONDITIONS = ("economic", "influence", "wonder", "conquest")
+LEAD_MIN_PROGRESS = 0.25     # lead changes are counted once the top progress reaches this
+ATTACK_AFTER = 30            # "never attacked after turn 30"
+STREAK_TARGET = {"economic": "bank", "influence": "legacy"}
+
+
+class ReplanTracker:
+    """Per-game counters, fed after every ``Game.step()``:
+
+    * streaks started, paused and ended per condition and reason
+      (``streak_ended`` without a reason: the requirement was no longer met);
+    * streak resets by a city capture, with the capturers (``streak_breaks``);
+    * the leader in victory progress (best of economic, influence, wonder and
+      conquest progress, from ``Game.stats``) and how often the lead changed
+      hands: counted from the first turn the top progress reaches
+      ``LEAD_MIN_PROGRESS``; a new leader must be strictly ahead;
+    * the first turn each player's bank / legacy reached the target;
+    * turns after ``ATTACK_AFTER`` in which a player was attacked: a battle
+      it fought on (or, for a border clash, next to) a tile it owned at the
+      start of the turn, or a city captured from it (armies walking onto
+      undefended land, ``tile_captured``, do not count).
+
+    Read-only: it never changes the game."""
+
+    def __init__(self, g: Game, label: dict):
+        from agentciv.engine.rules import bank_target, legacy_target
+        self.g, self.label = g, label
+        self.streaks = {c: {"started": 0, "paused": Counter(), "ended": Counter()} for c in STREAK_CONDITIONS}
+        self.ended: dict = defaultdict(list)          # pid -> [(turn, condition, reason)]
+        self.breaks: list = []
+        self.leader = None
+        self.lead_changes = 0
+        self.leader_turns: Counter = Counter()
+        self.first: dict = defaultdict(dict)          # pid -> {"bank"|"legacy": turn}
+        self.attacked: Counter = Counter()            # pid -> turns attacked after ATTACK_AFTER
+        self.targets = {"bank": bank_target(g.max_turns), "legacy": legacy_target(g.max_turns)}
+        self.owner: list = []
+
+    def before_step(self) -> None:
+        self.owner = list(self.g.owner)
+
+    def after_step(self, turn: int, events: list) -> None:
+        g = self.g
+        attacked = set()
+        captors: dict = defaultdict(set)
+        reset: dict = defaultdict(list)
+        for e in events:
+            t = e.get("type")
+            if t == "streak_started" and e.get("condition") in self.streaks:
+                self.streaks[e["condition"]]["started"] += 1
+            elif t == "streak_paused" and e.get("condition") in self.streaks:
+                self.streaks[e["condition"]]["paused"][e.get("reason") or "other"] += 1
+            elif t == "streak_ended" and e.get("condition") in self.streaks:
+                reason = e.get("reason") or "unmet"
+                self.streaks[e["condition"]]["ended"][reason] += 1
+                self.ended[e.get("player")].append((turn, e["condition"], reason))
+                if reason == "city_lost":
+                    reset[e.get("player")].append(e["condition"])
+            elif t == "city_captured":
+                captors[e.get("from")].add(e.get("to"))
+                attacked.add(e.get("from"))
+            elif t == "battle" and self.owner:
+                tiles = [g.idx(e["x"], e["y"])]
+                if e.get("to"):
+                    tiles.append(g.idx(*e["to"]))
+                for q in e.get("sides") or ():
+                    if any(self.owner[i] == q for i in tiles):
+                        attacked.add(q)
+        for victim, conds in reset.items():
+            self.breaks.append({"turn": turn, "victim": self.label.get(victim, victim), "conditions": sorted(conds),
+                                "by": sorted(self.label.get(q, q) for q in captors.get(victim, ()))})
+        if turn >= ATTACK_AFTER:
+            for q in attacked:
+                if q in self.label:
+                    self.attacked[q] += 1
+        st = g.stats()
+        prog = {}
+        for p in g.players:
+            if not p.alive:
+                continue
+            vp = st[p.id].get("victory_progress") or {}
+            prog[p.id] = max((float(vp.get(k, 0) or 0) for k in PROGRESS_CONDITIONS), default=0.0)
+            for key, have in (("bank", p.bank), ("legacy", p.legacy)):
+                if key not in self.first[p.id] and have >= self.targets[key]:
+                    self.first[p.id][key] = turn
+        top = max(prog.values(), default=0.0)
+        if top >= LEAD_MIN_PROGRESS:
+            cur = self.leader
+            if cur not in prog or prog[cur] < top:
+                new = next(p.id for p in g.players if prog.get(p.id) == top)
+                if cur is not None and new != cur:
+                    self.lead_changes += 1
+                self.leader = new
+            self.leader_turns[self.leader] += 1
+
+    def result(self, res: dict) -> dict:
+        lab = self.label
+        winner, cond = res.get("winner"), res.get("condition")
+        out = {
+            "streaks": {c: {"started": s["started"], "paused": dict(s["paused"]), "ended": dict(s["ended"])}
+                        for c, s in self.streaks.items()},
+            "streak_breaks": self.breaks,
+            "lead_changes": self.lead_changes,
+            "leader_turns": {lab[q]: n for q, n in self.leader_turns.items() if q in lab},
+            "first_target": {lab[q]: dict(v) for q, v in self.first.items() if v and q in lab},
+            "attacked_after_30": {lab[q]: n for q, n in self.attacked.items()},
+            "winner_streak_ends": None,
+            "target_to_win": None,
+        }
+        if winner in lab and cond in STREAK_CONDITIONS:
+            ends = Counter(r for _, c, r in self.ended.get(winner, ()) if c == cond)
+            out["winner_streak_ends"] = dict(ends)
+            first = self.first.get(winner, {}).get(STREAK_TARGET[cond])
+            if first is not None:
+                out["target_to_win"] = res.get("turn", 0) - first
+        return out
+
+
 def run_game(bot_specs: list, seed: int, max_turns: int = C.DEFAULT_MAX_TURNS,
              game_id: str | None = None, record_views: bool = False,
              rounds: int = NEGOTIATION_ROUNDS, fog: bool = False) -> dict:
@@ -230,6 +351,7 @@ def run_game(bot_specs: list, seed: int, max_turns: int = C.DEFAULT_MAX_TURNS,
     kinds: Counter = Counter()
     fog_events: Counter = Counter()
     tally: Counter = Counter()
+    replan = ReplanTracker(g, pid_label)
     while not g.finished:
         alive = g.alive_players()
         for rnd in range(max(0, int(rounds))):
@@ -266,7 +388,10 @@ def run_game(bot_specs: list, seed: int, max_turns: int = C.DEFAULT_MAX_TURNS,
             errs = g.submit_orders(pid, orders)
             errors[lab] += len(errs)
             orders_n[lab] += len(orders) if isinstance(orders, list) else 0
+        turn = g.turn
+        replan.before_step()
         step_events = g.step()
+        replan.after_step(turn, step_events)
         _count_events(g, trade, kinds, step_events)
         _count_treaties(g, tally, step_events)
         if fog:
@@ -302,6 +427,7 @@ def run_game(bot_specs: list, seed: int, max_turns: int = C.DEFAULT_MAX_TURNS,
         "deal_kinds": dict(kinds),
         "treaties": _treaty_totals(tally),
         "deals_executed": len(g.deal_log),
+        "replan": replan.result(res),
         "bot_exceptions": bot_errors,
         "last_errors": {lab[pid]: b.last_error for pid, b in bots.items() if getattr(b, "last_error", None)},
         "seconds": round(time.perf_counter() - t_start, 3),
@@ -379,7 +505,7 @@ def summarize(results: list, wall_seconds: float = 0.0) -> dict:
     per = defaultdict(lambda: {"games": 0, "wins": 0, "place_sum": 0, "conditions": Counter(),
                                "errors": 0, "orders": 0, "think_ms": 0.0, "think_ms_max": 0.0,
                                "score_sum": 0, "exceptions": 0, "neg_ms": 0.0, "neg_call_ms": 0.0,
-                               "neg_ms_max": 0.0, "trade": Counter()})
+                               "neg_ms_max": 0.0, "trade": Counter(), "breaks_by": 0, "resets": 0})
     kinds: Counter = Counter()
     deals_total = 0
     conds: Counter = Counter()
@@ -425,6 +551,9 @@ def summarize(results: list, wall_seconds: float = 0.0) -> dict:
             s["neg_call_ms"] += r.get("negotiate_ms_per_call", {}).get(lab, 0.0)
             s["neg_ms_max"] = max(s["neg_ms_max"], r.get("negotiate_ms_max", {}).get(lab, 0.0))
             s["trade"].update(r.get("trade", {}).get(lab, {}))
+            for b in (r.get("replan") or {}).get("streak_breaks", ()):
+                s["breaks_by"] += lab in b.get("by", ())
+                s["resets"] += b.get("victim") == lab
         kinds.update(r.get("deal_kinds", {}))
         deals_total += r.get("deals_executed", 0)
     rating_rows = {row["name"]: row for row in ratings.leaderboard(table)}
@@ -453,6 +582,8 @@ def summarize(results: list, wall_seconds: float = 0.0) -> dict:
             "exceptions": s["exceptions"],
             "trade_per_game": {k: round(s["trade"].get(k, 0) / g, 2) if g else 0
                                for k in TRADE_KEYS + ("betrayals", "contracts_honoured")},
+            "streak_breaks_by_per_game": round(s["breaks_by"] / g, 3) if g else 0,
+            "streak_resets_per_game": round(s["resets"] / g, 3) if g else 0,
         })
     bots.sort(key=lambda b: (-(b["rating"] if b["rating"] is not None else -1e9), b["avg_place"] or 99))
     n = len(results)
@@ -490,8 +621,113 @@ def summarize(results: list, wall_seconds: float = 0.0) -> dict:
         "deal_kinds_per_game": {k: round(v / n, 2) for k, v in sorted(kinds.items(), key=lambda kv: -kv[1])} if n else {},
         "treaties_per_game": {k: round(treaty_total.get(k, 0) / n, 2)
                               for k in TREATY_KEYS + ("avg_live", "peak_live", "peak_max")} if n else {},
+        "replanning": replan_summary(results),
         "results": [{k: v for k, v in r.items() if k != "frames"} for r in results],
     }
+
+
+def _median(xs: list):
+    xs = sorted(xs)
+    n = len(xs)
+    if not n:
+        return None
+    return xs[n // 2] if n % 2 else (xs[n // 2 - 1] + xs[n // 2]) / 2
+
+
+def field_key(r: dict) -> str:
+    """The bots of a game as a sorted multiset: "banker, spoiler, strategist x4"."""
+    names = Counter(seat.get("bot") or str(seat.get("label", "")).split("#")[0] for seat in r.get("seats", []))
+    return ", ".join(f"{b} x{k}" if k > 1 else b for b, k in sorted(names.items()))
+
+
+def replan_summary(results: list) -> dict:
+    """The forced-replanning measures over all games (see ReplanTracker)."""
+    rs = [r for r in results if r.get("replan")]
+    n = len(rs)
+    if not n:
+        return {}
+    streaks = {}
+    for c in STREAK_CONDITIONS:
+        paused, ended = Counter(), Counter()
+        started = 0
+        for r in rs:
+            sc = r["replan"]["streaks"].get(c) or {}
+            started += sc.get("started", 0)
+            paused.update(sc.get("paused") or {})
+            ended.update(sc.get("ended") or {})
+        streaks[c] = {"started": round(started / n, 2),
+                      "paused": {k: round(v / n, 2) for k, v in sorted(paused.items())},
+                      "ended": {k: round(v / n, 2) for k, v in sorted(ended.items())}}
+    swins = [r for r in rs if r.get("condition") in STREAK_CONDITIONS and r["replan"].get("winner_streak_ends") is not None]
+    broken = sum(1 for r in swins if r["replan"]["winner_streak_ends"])
+    by_capture = sum(1 for r in swins if r["replan"]["winner_streak_ends"].get("city_lost"))
+    ttw = {}
+    for c in STREAK_CONDITIONS:
+        xs = [r["replan"]["target_to_win"] for r in swins
+              if r["condition"] == c and r["replan"].get("target_to_win") is not None]
+        if xs:
+            ttw[c] = {"games": len(xs), "median": _median(xs), "avg": round(sum(xs) / len(xs), 1),
+                      "min": min(xs), "max": max(xs)}
+    late = [r for r in rs if r.get("winner") and r.get("turns", 0) > ATTACK_AFTER]
+    calm = sum(1 for r in late if not r["replan"].get("attacked_after_30", {}).get(r["winner"]))
+    leads = [r["replan"].get("lead_changes", 0) for r in rs]
+    fields: dict = {}
+    for r in rs:
+        f = fields.setdefault(field_key(r), {"games": 0, "conditions": Counter()})
+        f["games"] += 1
+        f["conditions"][r.get("condition")] += 1
+    return {
+        "games": n,
+        "streaks_per_game": streaks,
+        "streak_breaks_per_game": round(sum(len(r["replan"].get("streak_breaks") or ()) for r in rs) / n, 2),
+        "streak_wins": len(swins),
+        "streak_winners_broken": round(broken / len(swins), 3) if swins else None,
+        "streak_winners_reset_by_capture": round(by_capture / len(swins), 3) if swins else None,
+        "target_to_win": ttw,
+        "lead_changes_per_game": round(sum(leads) / n, 2),
+        "lead_changes_median": _median(leads),
+        "lead_changes_max": max(leads),
+        "winners_after_30": len(late),
+        "winners_unattacked_after_30": round(calm / len(late), 3) if late else None,
+        "fields": {k: {"games": v["games"], "conditions": {c: v["conditions"][c] for c in CONDITIONS
+                                                            if v["conditions"].get(c)}}
+                   for k, v in sorted(fields.items())},
+    }
+
+
+def format_replanning(rp: dict, bots: list) -> list:
+    """Text lines for the forced-replanning block of :func:`format_summary`."""
+    if not rp:
+        return []
+
+    def reasons(d: dict) -> str:
+        return ", ".join(f"{k} {v}" for k, v in d.items()) or "none"
+
+    def pct(x) -> str:
+        return "-" if x is None else f"{100 * x:.0f}%"
+    lines = ["", "forced replanning (per game):"]
+    for c, sc in rp["streaks_per_game"].items():
+        lines.append(f"  {c} streaks: started {sc['started']}, paused ({reasons(sc['paused'])}), "
+                     f"ended ({reasons(sc['ended'])})")
+    lines.append(f"  streak resets by a city capture: {rp['streak_breaks_per_game']}; by capturer: "
+                 + (", ".join(f"{b['bot']} {b['streak_breaks_by_per_game']}" for b in bots
+                              if b.get("streak_breaks_by_per_game")) or "none")
+                 + "; suffered: "
+                 + (", ".join(f"{b['bot']} {b['streak_resets_per_game']}" for b in bots
+                              if b.get("streak_resets_per_game")) or "none"))
+    ttw = "; ".join(f"{c} median {v['median']} (avg {v['avg']}, {v['min']}-{v['max']}, n={v['games']})"
+                    for c, v in rp["target_to_win"].items()) or "-"
+    lines.append(f"  streak wins {rp['streak_wins']}: streak broken before the win {pct(rp['streak_winners_broken'])}"
+                 f" (by a city capture {pct(rp['streak_winners_reset_by_capture'])}); "
+                 f"turns from reaching the target to the win: {ttw}")
+    lines.append(f"  lead changes in victory progress: avg {rp['lead_changes_per_game']}, median "
+                 f"{rp['lead_changes_median']}, max {rp['lead_changes_max']}; winners never attacked after turn "
+                 f"{ATTACK_AFTER}: {pct(rp['winners_unattacked_after_30'])} of {rp['winners_after_30']}")
+    for k, f in rp["fields"].items():
+        g = f["games"]
+        lines.append(f"  field [{k}] ({g} games): " + ", ".join(
+            f"{c} {100 * v / g:.0f}%" for c, v in sorted(f["conditions"].items(), key=lambda kv: -kv[1])))
+    return lines
 
 
 def format_summary(s: dict) -> str:
@@ -540,6 +776,7 @@ def format_summary(s: dict) -> str:
             lines.append("treaty breaks per game: " + ", ".join(
                 f"{k} {tp[k]}" for k in ("break_influence", "legacy_lost", "bank_share", "bond_paid", "refunds",
                                          "break_paid", "break_debt", "contracts_cancelled")))
+    lines.extend(format_replanning(s.get("replanning") or {}, s["bots"]))
     if "fog_events_per_game" in s:
         lines.append("fog games; per game: " + (", ".join(f"{k} {v}" for k, v in s["fog_events_per_game"].items())
                                                 or "no battles or espionage"))

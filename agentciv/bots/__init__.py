@@ -18,6 +18,10 @@ REGISTRY: dict[str, str] = {
     "strategist": "agentciv.bots.strategist:StrategistBot",
     "strategist_lite": "agentciv.bots.strategist:StrategistLiteBot",
     "strategist_notrade": "agentciv.bots.strategist:StrategistNoTradeBot",
+    # counterplay baselines (docs/BOTS.md): not house-bot fill, unrated
+    "banker": "agentciv.bots.banker:BankerBot",
+    "zealot": "agentciv.bots.zealot:ZealotBot",
+    "spoiler": "agentciv.bots.spoiler:SpoilerBot",
 }
 
 BOT_NAMES = list(REGISTRY)
