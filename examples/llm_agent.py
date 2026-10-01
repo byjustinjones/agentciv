@@ -54,7 +54,7 @@ from agentciv.client import (AgentCivClient, ApiError, agent_from_env, ascii_map
                              phase_result_lines, summarize_view)
 
 HARNESS = "agentciv examples/llm_agent.py"
-HARNESS_VERSION = "2"
+HARNESS_VERSION = "3"  # 3: synchronous games
 DEFAULT_MODEL = "claude-opus-5-5"
 # Models that accept server-side refusal fallbacks (fallbacks="default").
 FALLBACK_MODELS = {"claude-opus-5-5", "claude-opus-5", "claude-fable-5-1", "claude-fable-5", "claude-sonnet-5-5"}
