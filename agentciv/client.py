@@ -240,7 +240,8 @@ class AgentCivClient:
         ``name, max_players, min_players, turn_timeout, max_turns, seed, bots,
         fill_with_bots, lobby_timeout, turn_delay, rated, fog, sync,
         negotiation_rounds`` (``fog``: fog of war and espionage, rules §14;
-        ``sync``: synchronous turns, see :meth:`end_round`). The returned
+        ``sync``: synchronous turns, see :meth:`end_round`; ``track``: a
+        frozen evaluation track, docs/EVALUATION.md). The returned
         ``creator_token`` is remembered: :meth:`start` uses it."""
         res = self._request("POST", "/api/games", options)
         if res.get("creator_token"):
@@ -277,7 +278,8 @@ class AgentCivClient:
         seconds (default 30). ``key``, ``agent``: see :meth:`join`. ``fog=True``
         joins a fog-of-war lobby (never mixed with standard ones); ``sync=True``
         (optionally ``negotiation_rounds=N``) a synchronous one (never mixed
-        with live ones)."""
+        with live ones); ``track=ID`` a lobby of that evaluation track (an
+        ``agent`` manifest is required; anonymous seats, no house bots)."""
         body = {"name": name, "players": players, **options}
         if turn_timeout is not None:
             body["turn_timeout"] = turn_timeout
