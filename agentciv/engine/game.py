@@ -1645,6 +1645,27 @@ class Game:
         out = [q.id for q in alive + dead]
         return ([winner] + out) if winner is not None else out
 
+    def placement_ranks(self) -> list[int]:
+        """Ranks (1 = best) aligned with ``result["placements"]`` of a finished
+        game; ``[]`` before that. Players with the same alive state, elimination
+        turn and score share a rank, so the seat-order tie-break in
+        :meth:`placements` never decides a rating; a winner by a victory
+        condition (anything but ``score``) ranks alone."""
+        res = self.result
+        if not res:
+            return []
+        scores = res.get("scores") or {}
+        out: list[int] = []
+        prev, rank = None, 0
+        for i, pid in enumerate(res.get("placements", [])):
+            p = self.player(pid)
+            key = (bool(p and p.alive), getattr(p, "eliminated_turn", None), scores.get(pid))
+            if i == 0 or key != prev or (i == 1 and res.get("condition") != "score"):
+                rank = i + 1
+            prev = key
+            out.append(rank)
+        return out
+
     def _finish(self, winner: str | None, condition: str) -> None:
         places = self.placements(winner)
         if winner is None and places:

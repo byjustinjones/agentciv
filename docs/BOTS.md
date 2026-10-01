@@ -536,6 +536,9 @@ python -m agentciv.tournament --bots strategist,economist,rusher,turtle,random,r
 The report lists per bot:
 * games, wins, win rate, average placement and average score;
 * OpenSkill rating (`agentciv.ratings`, displayed as mu − 3σ);
+  bots tied on score share a rank (`Game.placement_ranks()`, the server's
+  rule), so ties count as draws in the rating and as shared places and wins
+  in the other columns, never by seat order;
 * wins by condition;
 * pre-validation errors per game and think time per turn (`act`), plus
   `negotiate` time per turn, per call and the maximum;
@@ -556,6 +559,6 @@ the full summary, including per-game results (seats with their start slot,
 placements, scores, errors, timings).
 
 For programmatic use: `run_game(bot_specs, seed, max_turns, rounds=3)`
-returns one game's result dict (with `trade`, `deal_kinds`,
+returns one game's result dict (with `ranks` aligned with `placements`, `trade`, `deal_kinds`,
 `deals_executed`, `negotiate_ms_*`). `run_tournament(...)` returns the summary, and
 `format_summary(...)` renders it.

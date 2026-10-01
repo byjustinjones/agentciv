@@ -60,7 +60,14 @@ def update(table: dict, placements: list[str], ranks: list[int] | None = None) -
     placement list (winner first) and return it. ``ranks`` (optional, same
     length, non-decreasing, 1 = best) marks ties: equal ranks are rated as a
     draw (e.g. players tied on score). Extra bookkeeping keys (games, wins,
-    total_place) are maintained; everyone ranked 1 counts a win."""
+    total_place) are maintained; everyone ranked 1 counts a win.
+
+    A name may hold several seats (the same house bot twice). Every seat is
+    rated as its own player starting from the name's current rating; the
+    name then moves by the mean of its seats' mu changes and its variance by
+    the mean of their variance factors. Bookkeeping counts seats (``games``
+    += seats, ``wins`` += seats ranked 1, ``total_place`` += their ranks),
+    so ``avg_place`` and the win rate stay per-seat figures."""
     if ranks is None:
         ranks = list(range(1, len(placements) + 1))
     if len(ranks) != len(placements):
@@ -69,9 +76,22 @@ def update(table: dict, placements: list[str], ranks: list[int] | None = None) -
         table.setdefault(name, {**new_rating(), "games": 0, "wins": 0, "total_place": 0})
     olds = [table[name] for name in placements]
     news = rate(olds, list(ranks))
-    for name, rank, new in zip(placements, ranks, news):
+    seats: dict[str, list[tuple[dict, dict]]] = {}
+    for name, old, new in zip(placements, olds, news):
+        seats.setdefault(name, []).append((old, new))
+    for name, pairs in seats.items():
         entry = table[name]
-        entry["mu"], entry["sigma"] = new["mu"], new["sigma"]
+        if len(pairs) == 1:  # the common case: exactly the single-seat update
+            new = pairs[0][1]
+            entry["mu"], entry["sigma"] = new["mu"], new["sigma"]
+            continue
+        k = len(pairs)
+        mu, var = entry["mu"], entry["sigma"] ** 2
+        d_mu = sum(n["mu"] - mu for _, n in pairs) / k
+        f_var = sum(n["sigma"] ** 2 / var for _, n in pairs) / k
+        entry["mu"], entry["sigma"] = mu + d_mu, math.sqrt(var * f_var)
+    for name, rank in zip(placements, ranks):
+        entry = table[name]
         entry["games"] = entry.get("games", 0) + 1
         entry["wins"] = entry.get("wins", 0) + (1 if rank == 1 else 0)
         entry["total_place"] = entry.get("total_place", 0) + rank

@@ -121,3 +121,35 @@ def test_treaty_counters_per_game_and_in_the_summary():
     s = T.run_tournament(["rusher", "turtle", "economist"], games=2, players=3, seed=2, max_turns=25)
     assert set(T.TREATY_KEYS) <= set(s["treaties_per_game"]) and "treaties per game: signed" in T.format_summary(s)
     assert all("treaties" in r for r in s["results"])
+
+
+def test_placement_ranks_share_ties_and_a_victory_winner_ranks_alone():
+    from agentciv.engine.testing import new_game
+    g = new_game(3)
+    assert g.placement_ranks() == []          # not finished
+    g._finish("p2", "wonder")                  # equal scores at the start
+    assert g.result["placements"][0] == "p2" and g.placement_ranks() == [1, 2, 2]
+    assert "ranks" not in g.result             # recorded views stay as they were
+    g = new_game(3)
+    g._finish("p3", "score")
+    assert g.placement_ranks() == [1, 1, 1]
+
+
+def test_tied_idle_bots_rate_identically_in_either_seat_order():
+    rows = []
+    for specs in ([("a", "idle"), ("b", "idle")], [("b", "idle"), ("a", "idle")]):
+        r = T.run_game(specs, seed=1, max_turns=12, rounds=0)
+        assert r["scores"]["a"] == r["scores"]["b"] and r["ranks"] == [1, 1]
+        s = T.summarize([r])
+        rows.append({b["bot"]: (b["mu"], b["sigma"], b["wins"], b["avg_place"]) for b in s["bots"]})
+        assert rows[-1]["a"] == rows[-1]["b"]
+        assert [x["avg_place"] for x in s["seats"]] == [1.0, 1.0]
+    assert rows[0] == rows[1]
+
+
+def test_summarize_accepts_results_without_ranks():
+    r = T.run_game([("a", "idle"), ("b", "idle")], seed=1, max_turns=5, rounds=0)
+    del r["ranks"]
+    s = T.summarize([r])
+    by = {b["bot"]: b for b in s["bots"]}
+    assert by["a"]["avg_place"] == 1.0 and by["b"]["avg_place"] == 2.0
