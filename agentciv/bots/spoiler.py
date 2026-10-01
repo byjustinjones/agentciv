@@ -35,7 +35,7 @@ from __future__ import annotations
 
 from agentciv.engine import constants as C
 
-from .common import add_units
+from .common import add_units, base_price, buy_price
 from .strategist import INF, StrategistBot
 
 
@@ -49,7 +49,8 @@ class SpoilerBot(StrategistBot):
     SPOIL_RIVALS = 2              # look at this many of the most dangerous rivals
     SPOIL_VALUE = 3000.0          # value of a capture that resets a near-winner
     SPOIL_SLACK = 6               # turns of lateness still worth a strike
-    RAID_RATIO = 1.2
+    RAID_RATIO = 1.3
+    APPROACH_TURNS = 2            # turns the target sees the strike force coming and recruits
     RAID_PATIENCE = 25
     RAID_COOLDOWN = 8
     SCOUT_EVERY = 4               # fog: a fresh military report on the target this often
@@ -89,13 +90,35 @@ class SpoilerBot(StrategistBot):
         pl = w.players.get(q) or {}
         _, _, path = self.danger_of(q)
         mine = w.cities_of(q)
-        if w.streaking(q) or path in ("economic", "influence"):
+        if w.streaking(q):
             return mine                       # any city resets both streaks
+        if path in ("economic", "influence"):
+            # before the streak only the original capital sets the race back:
+            # half the bank is plundered, a quarter of the legacy lost (rules §8)
+            home = w.capital_of(q)
+            return [home] if home is not None else mine
         if path == "wonder" or int(pl.get("wonder_stage") or 0) >= self.SPOIL_WONDER_STAGE:
             return [c for c in mine if w.cities[c].get("wonder_stage", 0) > 0]
         if path == "conquest":
             return [c for c in mine if w.cities[c].get("capital")]
         return mine
+
+    def spoiling(self) -> bool:
+        """Does a rival look set to win before us? Then our own race waits."""
+        if self.w.turn < self.SPOIL_START:
+            return False
+        cands = self.spoil_candidates()
+        return bool(cands) and cands[0][0] < self.my_eta
+
+    def plan_goal_spending(self) -> None:
+        """As the strategist's, but while :meth:`spoiling` nothing is held
+        back for our own race (wonder stages, temples): the strike force
+        gets the resources."""
+        before = dict(self.reserved)
+        super().plan_goal_spending()
+        if self.spoiling():
+            self.goal = "grow"
+            self.reserved = before
 
     # ---- raid hooks (see StrategistBot.plan_raid / execute_raid) ---------
     def choose_raid(self, cool: dict):
@@ -107,6 +130,8 @@ class SpoilerBot(StrategistBot):
             return super().choose_raid(cool)
         dist = w.bfs(list(w.my_cities), max_dist=30)
         prod = max(1.0, self.potential_gold_rate())
+        # half of what we hold goes into the force at once (buy_force)
+        stock = 0.5 * sum(w.res.get(r, 0) * (1.0 if r == "gold" else self.price(r)) for r in C.TRADABLE)
         have: dict = {}
         for i in w.my_armies:
             have = add_units(have, self.free_units(i))
@@ -123,7 +148,8 @@ class SpoilerBot(StrategistBot):
                 if not force:
                     continue                  # cannot be taken with a sane force
                 miss = {t: k - have.get(t, 0) for t, k in force.items() if k > have.get(t, 0)}
-                t_ready = self.force_cost(miss) * (1 + dist[c] / 20.0) / prod + dist[c] + 2
+                build = max(0.0, self.force_cost(miss) * (1 + dist[c] / 20.0) - stock)
+                t_ready = build / prod + dist[c] + 2
                 if eta < INF and t_ready > eta + self.SPOIL_SLACK:
                     continue                  # it would win before we get there
                 key = (t_ready, c)
@@ -138,6 +164,18 @@ class SpoilerBot(StrategistBot):
         if any(q == owner for _, _, q in self.spoil_candidates()):
             v += self.SPOIL_VALUE
         return v
+
+    def reinforcement(self, q: str, vs: dict) -> dict:
+        """What ``q`` can add while it watches us approach: the strategist's
+        one turn of recruiting from stock (and part of its gold), plus
+        APPROACH_TURNS turns of recruiting from its income."""
+        out = dict(super().reinforcement(q, vs))
+        inc = (self.w.players.get(q) or {}).get("income") or {}
+        t = next(iter(out), "infantry")
+        cost = C.UNITS[t]["cost"]
+        per_turn = min(int(max(0, inc.get(r, 0)) // v) for r, v in cost.items() if v)
+        out[t] = out.get(t, 0) + self.APPROACH_TURNS * per_turn
+        return out
 
     RETARGET_EVERY = 3            # gather phase: compare the rival's cities this often
 
@@ -212,16 +250,69 @@ class SpoilerBot(StrategistBot):
             if switch is not None:
                 mem["tgt"] = switch
                 mem["force"] = self.raid_force(switch, owner)
+        if any(q == owner for _, _, q in self.spoil_candidates()):
+            self.buy_force(mem["tgt"], mem.get("force") or {})
         super().execute_raid()
+
+    SPOIL_GOLD_SHARE = 0.5        # share of our gold a turn may spend on the strike force
+    SPOIL_RECRUIT_MAX = 20        # units per turn
+
+    def buy_force(self, tgt: int, force: dict) -> None:
+        """Recruit what the force still lacks in the city nearest the target,
+        buying the food/wood/stone on the market: the strategist recruits only
+        within its food income, which leaves a rich spoiler's gold idle while
+        the leader runs out the clock (food_safety buys the upkeep later)."""
+        w, p = self.w, self.p
+        if not force or not w.my_cities:
+            return
+        near = self.near_units(tgt)
+        plain = w.bfs([tgt])
+        city = min(w.my_cities, key=lambda c: (plain.get(c, 999), c))
+        for c, units in p.recruited.items():
+            near = add_units(near, units)
+        miss = {t: k - near.get(t, 0) for t, k in force.items() if k > near.get(t, 0)}
+        spend = int(w.res.get("gold", 0) * self.SPOIL_GOLD_SHARE)
+        left = self.SPOIL_RECRUIT_MAX
+        for t in sorted(miss, key=lambda t: (t != "siege", t)):
+            k = min(miss[t], left)
+            if k <= 0 or spend <= 0:
+                break
+            cost = C.UNITS[t]["cost"]
+            for r, v in cost.items():
+                if r not in C.MARKET_RESOURCES:
+                    continue
+                short = v * k - (p.budget.get(r, 0) - (30 if r == "food" else 0))
+                if short > 0:
+                    price = buy_price(w, r, short + p.bought.get(r, 0))
+                    if price > 2.0 * base_price(r):
+                        continue
+                    short = min(short, int(spend / (price * (1 + w.fee) * 1.1)))
+                    if short > 0:
+                        got = p.buy(r, short, max_price=2.0 * base_price(r))
+                        spend -= int(got * price * (1 + w.fee) * 1.1) + 1
+            got = p.recruit(city, t, k, {"food": 30})
+            spend -= got * cost.get("gold", 0)
+            left -= got
 
     GATHER_REACH = 40             # march units from this far to the gathering point
 
     def gather_near(self, tgt: int, plain: dict, enter, gather: int | None = None) -> None:
         """As the strategist's, but the whole army marches (the strategist
-        only moves units within 16 steps of the target)."""
+        only moves units within 16 steps of the target), around the rival's
+        other cities and armies (a step into one is refused by ``safe_move``
+        and the units were then sent home), and blocked units wait."""
         w = self.w
         gather = self.RAID_GATHER if gather is None else gather
-        dist = w.bfs([tgt], enter)
+
+        def around(i: int) -> bool:
+            # march around the rival's other cities and armies, not into them
+            if i == tgt or not enter(i):
+                return i == tgt
+            c = w.cities.get(i)
+            if c is not None and w.hostile(w.me, c["owner"]):
+                return False
+            return not w.hostile_units_on(w.me, i)
+        dist = w.bfs([tgt], around)
         for i in sorted(w.my_armies):
             d = dist.get(i)
             free = self.free_units(i)
@@ -238,9 +329,10 @@ class SpoilerBot(StrategistBot):
                         continue
                 self.locked[i] = add_units(self.locked.get(i, {}), free)
                 continue
-            nxt = w.step_towards(i, dist, enter)
-            if nxt is not None:
-                self.safe_move(i, nxt, free, allow_fight=False)
+            nxt = w.step_towards(i, dist, around)
+            if nxt is None or not self.safe_move(i, nxt, free, allow_fight=False):
+                # blocked this turn: wait here rather than be sent home
+                self.locked[i] = add_units(self.locked.get(i, {}), free)
 
     # ---- fog: scout the target before relying on what we see -------------
     def espionage(self) -> None:
