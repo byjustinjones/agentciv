@@ -662,20 +662,46 @@ and again when executed (e.g. resources are only checked then) — execution fai
 _HASH_CACHE: str | None = None
 
 
+def _canonical(value):
+    """A JSON-safe, order-independent form of a constant."""
+    if isinstance(value, dict):
+        return {str(k): _canonical(v) for k, v in sorted(value.items(), key=lambda kv: str(kv[0]))}
+    if isinstance(value, (set, frozenset)):
+        return sorted((_canonical(v) for v in value), key=repr)
+    if isinstance(value, (list, tuple)):
+        return [_canonical(v) for v in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return repr(value)
+
+
+def engine_constants() -> dict:
+    """Every constant of :mod:`agentciv.engine.constants`, canonical: the
+    numbers agents are told about and the ones they are not (map generation,
+    limits), plus ``ENGINE_VERSION`` and ``PROTOCOL_VERSION``."""
+    return {k: _canonical(v) for k, v in sorted(vars(C).items()) if k.isupper()}
+
+
 def rules_sha256() -> str:
-    """sha256 (hex) identifying the rules a game is played under: the rules
-    text agents are served (:func:`render`, identical to docs/RULES.md) and
-    the constants block (``rules_json()``, canonical JSON with sorted keys),
-    joined by a NUL byte. Computed once per process; any rules or constants
-    change gives a new value."""
+    """sha256 (hex) identifying the rules a game is played under. Three
+    blocks joined by NUL bytes: the rules text agents are served
+    (:func:`render`, identical to docs/RULES.md); the constants block agents
+    are served (``rules_json()``); and every engine constant
+    (:func:`engine_constants`), which adds what the first two leave out: map
+    generation settings, limits, and the engine and protocol versions. JSON
+    blocks are compact with sorted keys. Computed once per process; a change
+    to the rules text, to any constant, or a version bump gives a new value."""
     global _HASH_CACHE
     if _HASH_CACHE is None:
         import hashlib
         import json
 
         from .rules import rules_json
-        consts = json.dumps(rules_json(), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-        _HASH_CACHE = hashlib.sha256(render().encode("utf-8") + b"\0" + consts.encode("ascii")).hexdigest()
+
+        def block(obj) -> bytes:
+            return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+        _HASH_CACHE = hashlib.sha256(render().encode("utf-8") + b"\0" + block(rules_json())
+                                     + b"\0" + block(engine_constants())).hexdigest()
     return _HASH_CACHE
 
 

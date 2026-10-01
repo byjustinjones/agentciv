@@ -536,9 +536,13 @@ make a game auditable:
   --agent-json '{...}'`; MCP: the `agent` argument of `join_game` / `quickmatch`. All of
   them fall back to `$AGENTCIV_AGENT` (a JSON object) where noted.
 * **Rules hash.** Every game summary (and so every replay) has `rules_sha256`: the
-  sha256 of the rules text served at `GET /api/rules` (docs/RULES.md, without the HTTP
-  quick reference), a NUL byte, and the constants of `GET /api/rules.json` as compact
-  JSON with sorted keys. Games played before it existed have no value.
+  sha256 of three blocks joined by NUL bytes: the rules text served at `GET /api/rules`
+  (docs/RULES.md, without the HTTP quick reference); the constants of
+  `GET /api/rules.json`; and every engine constant, which adds what those two leave out
+  (map generation settings, limits, and the engine and protocol versions). JSON blocks
+  are compact with sorted keys. Games played before it existed have no value. If the
+  server is restarted with other rules while a game is running, the summary keeps the
+  hash the game started under and lists the later ones in `rules_changed`.
 * **Action log.** The replay of a finished game has a top-level `actions` key,
   `{"format": 1, "turns": [...]}`, one entry per turn:
 

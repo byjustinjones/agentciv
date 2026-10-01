@@ -8,6 +8,18 @@ RULES.md and update the numbers quoted in docs/DESIGN.md).
 from __future__ import annotations
 
 # --------------------------------------------------------------------------
+# Versions (part of the rules fingerprint, rulesdoc.rules_sha256)
+# --------------------------------------------------------------------------
+# Bump when the engine behaves differently without any constant or rules text
+# changing (resolution order, map generation, what a view contains). The
+# recorded golden games are tied to it (tests/test_fog_off_identity.py), so a
+# change that re-records them cannot keep the old number.
+ENGINE_VERSION = 1
+# Bump when the server's turn protocol changes (live or synchronous phases,
+# barrier order, deadlines, what is hidden from whom).
+PROTOCOL_VERSION = 1
+
+# --------------------------------------------------------------------------
 # Players / map
 # --------------------------------------------------------------------------
 MIN_PLAYERS = 1

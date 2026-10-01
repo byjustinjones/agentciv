@@ -107,9 +107,11 @@ def test_join_and_quickmatch_store_the_manifest(server):
 
 # ---------------------------------------------------------------- rules hash
 def test_rules_hash_is_stable_and_covers_text_and_constants(monkeypatch):
+    def block(obj):
+        return json.dumps(obj, sort_keys=True, separators=(",", ":")).encode()
     text = (ROOT / "docs" / "RULES.md").read_bytes()
-    consts = json.dumps(rules_json(), sort_keys=True, separators=(",", ":")).encode()
-    want = hashlib.sha256(text + b"\0" + consts).hexdigest()
+    want = hashlib.sha256(text + b"\0" + block(rules_json()) + b"\0"
+                          + block(rulesdoc.engine_constants())).hexdigest()
     assert rulesdoc.rules_sha256() == want == rulesdoc.rules_sha256()
     # a changed constant (or rules text) gives a new hash
     monkeypatch.setattr(rulesdoc, "_HASH_CACHE", None)
@@ -117,6 +119,35 @@ def test_rules_hash_is_stable_and_covers_text_and_constants(monkeypatch):
     monkeypatch.setattr("agentciv.engine.rules.rules_json", lambda: {**real, "_probe": 1})
     assert rulesdoc.rules_sha256() != want
     monkeypatch.setattr(rulesdoc, "_HASH_CACHE", None)
+
+
+@pytest.mark.parametrize("name,value", [("MAPGEN_WATER_FRACTION", 0.4), ("ENGINE_VERSION", 10 ** 6),
+                                        ("PROTOCOL_VERSION", 10 ** 6), ("MAX_ORDERS_PER_TURN", 7)])
+def test_rules_hash_covers_what_the_served_rules_leave_out(monkeypatch, name, value):
+    """Map generation settings, limits and the engine/protocol versions are
+    not in the rules text or ``rules_json()``, but they change the game."""
+    from agentciv.engine import constants as C
+    before = rulesdoc.rules_sha256()
+    served = (rulesdoc.render(), json.dumps(rules_json(), sort_keys=True))
+    assert getattr(C, name) != value
+    monkeypatch.setattr(C, name, value)
+    monkeypatch.setattr(rulesdoc, "_HASH_CACHE", None)
+    assert rulesdoc.rules_sha256() != before
+    if name != "MAX_ORDERS_PER_TURN":   # (that one is quoted in the rules text)
+        assert (rulesdoc.render(), json.dumps(rules_json(), sort_keys=True)) == served
+    monkeypatch.setattr(rulesdoc, "_HASH_CACHE", None)
+
+
+def test_engine_version_is_tied_to_the_recorded_games():
+    """Re-recording the golden games (engine behaviour changed on purpose)
+    needs a new ENGINE_VERSION, so the rules hash and with it every track pin
+    change too: add the new version and the new file's sha256 here."""
+    from agentciv.engine import constants as C
+    golden = hashlib.sha256((ROOT / "tests" / "data" / "nofog_golden.json").read_bytes()).hexdigest()
+    recorded = {1: "17062bceefd9c92f7714c2522c6174ed8a77b3f6aab8d515981c77406a77d0a5"}
+    assert recorded.get(C.ENGINE_VERSION) == golden, (
+        "tests/data/nofog_golden.json changed: bump ENGINE_VERSION in agentciv/engine/constants.py and record "
+        f"{{{C.ENGINE_VERSION}: {golden!r}}} here")
 
 
 def test_rules_hash_in_summary_and_replay(tmp_path, no_workers):
