@@ -213,7 +213,8 @@ class ReplanTracker:
     * the first turn each player's bank / legacy reached the target;
     * turns after ``ATTACK_AFTER`` in which a player was attacked: a battle
       it fought on (or, for a border clash, next to) a tile it owned at the
-      start of the turn, or a city or tile captured from it.
+      start of the turn, or a city captured from it (armies walking onto
+      undefended land, ``tile_captured``, do not count).
 
     Read-only: it never changes the game."""
 
@@ -253,8 +254,6 @@ class ReplanTracker:
                     reset[e.get("player")].append(e["condition"])
             elif t == "city_captured":
                 captors[e.get("from")].add(e.get("to"))
-                attacked.add(e.get("from"))
-            elif t == "tile_captured" and e.get("from"):
                 attacked.add(e.get("from"))
             elif t == "battle" and self.owner:
                 tiles = [g.idx(e["x"], e["y"])]
