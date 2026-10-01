@@ -26,6 +26,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from ..engine import rules_json
 from .guide import api_index, api_quickref_markdown
 from .manager import MAX_WAIT, ApiError, GameManager, _player_key, available_bots, parse_agent
+from .tracks import get_track
 
 log = logging.getLogger("agentciv.server")
 
@@ -368,12 +369,22 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(rules_json())
         if p == "/api/games":
             limit = self._int_query(query, "limit", None)
-            return self._json(mgr.list_games(None if limit is None else min(max(limit, 0), 10_000)))
+            return self._json(mgr.list_games(None if limit is None else min(max(limit, 0), 10_000),
+                                             operator=self.full_spectator))
         if p == "/api/leaderboard":
+            track = (query.get("track") or [None])[-1]
+            if track is not None:
+                if query.get("mode"):
+                    raise ApiError(400, "give either mode or track, not both")
+                if get_track(track) is None:
+                    raise ApiError(404, f"no track {track!r} (GET /api/tracks lists them)")
+                return self._json(mgr.leaderboard(track))
             mode = (query.get("mode") or ["standard"])[-1]
             if mode not in ("standard", "fog"):
-                raise ApiError(400, "mode must be 'standard' or 'fog'")
+                raise ApiError(400, "mode must be 'standard' or 'fog' (or ?track=ID for a track's pool)")
             return self._json(mgr.leaderboard(mode))
+        if p == "/api/tracks":
+            return self._json(mgr.tracks())
         if p == "/api/bots":
             return self._json(available_bots())
         game_id, action = self._route(p)
@@ -381,7 +392,7 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError(404, f"no such endpoint: GET {path} (GET /api lists the endpoints)")
         game = mgr.get(game_id)
         if action == "":
-            return self._json(game.summary())
+            return self._json(game.summary(operator=self.full_spectator))
         if action == "state":
             pid = self._player(game_id, query, required=False)
             return self._send(200, game.state_bytes(pid, full=self.full_spectator and pid is None))
@@ -481,15 +492,14 @@ class Handler(BaseHTTPRequestHandler):
         mgr = self.server.manager
         p = path.rstrip("/")
         if p == "/api/games":
-            session = mgr.create_game(body)
+            session = mgr.create_game(body, operator=self.full_spectator)
             return self._json({"game_id": session.game_id, "status": session.status,
                                "creator_token": session.creator_token, "rated": session.opts["rated"],
                                "unrated_reason": session.opts.get("unrated_reason"),
-                               "fog": session.opts.get("fog", False)})
+                               "fog": session.opts.get("fog", False), "track": session.track_id})
         if p == "/api/quickmatch":
             session, seat = mgr.quickmatch(body)
-            return self._json({"game_id": session.game_id, "player_id": seat.pid, "token": seat.token,
-                               "status": session.status})
+            return self._json(self._seated(session.game_id, seat, session.status))
         game_id, action = self._route(p)
         if game_id is None:
             raise ApiError(404, f"no such endpoint: POST {path} (GET /api lists the endpoints)")
@@ -498,8 +508,7 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(body, dict):
                 raise ApiError(400, "body must be {\"name\": ...}")
             seat = game.join(body.get("name"), _player_key(body), parse_agent(body))
-            return self._json({"game_id": game_id, "player_id": seat.pid, "token": seat.token,
-                               "status": game.status})
+            return self._json(self._seated(game_id, seat, game.status))
         if action == "start":
             started = game.start(authorized=self._may_start(game, query))
             return self._json({"ok": True, "started": started, "status": game.status})
@@ -510,6 +519,15 @@ class Handler(BaseHTTPRequestHandler):
             pid = self._player(game_id, query, required=True)
             return self._json(game.diplomacy(pid, body))
         raise ApiError(404, f"no such endpoint: POST {path} (GET /api lists the endpoints)")
+
+    @staticmethod
+    def _seated(game_id: str, seat, status: str) -> dict:
+        """The join/quickmatch answer. Track games add the seat's neutral name
+        (what every live view calls you); nothing about other seats."""
+        out = {"game_id": game_id, "player_id": seat.pid, "token": seat.token, "status": status}
+        if seat.seat_name:
+            out["seat_name"] = seat.seat_name
+        return out
 
     def _may_start(self, game, query: dict) -> bool:
         """A seated player's token or the creator token authorises POST /start."""

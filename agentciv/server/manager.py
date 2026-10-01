@@ -47,7 +47,8 @@ from .persist import FORMAT as CHECKPOINT_FORMAT
 from .persist import LiveStore
 from .provenance import ActionLog, ManifestError, validate_agent
 from .replay import ArchivedReplay, FrameStore, envelope, slice_full_replay
-from .storage import Storage
+from .storage import RulesChanged, Storage
+from .tracks import SEAT_NAME, TRACKS, Track, get_track, seat_name
 
 log = logging.getLogger("agentciv.server")
 
@@ -228,10 +229,16 @@ def validate_player_name(name) -> str:
     return name
 
 
-def parse_game_options(body: dict) -> dict:
-    """Validate a ``POST /api/games`` body into a normalised options dict."""
+def parse_game_options(body: dict, operator: bool = False) -> dict:
+    """Validate a ``POST /api/games`` body into a normalised options dict.
+    ``operator``: the request carried the spectator key (``seed`` and
+    ``seats`` of track games are operator-only)."""
     if not isinstance(body, dict):
         raise ApiError(400, "body must be a JSON object")
+    if body.get("track") is not None:
+        return _track_options(body, operator)
+    if body.get("seats") is not None:
+        raise ApiError(400, "seats is only valid with a track (operator-only paired play, see docs/EVALUATION.md)")
     max_players = _number(body, "max_players", 6, 1, C.MAX_PLAYERS, integer=True)
     min_players = _number(body, "min_players", min(2, max_players), 1, C.MAX_PLAYERS, integer=True)
     if min_players > max_players:
@@ -289,12 +296,84 @@ def _sync_options(body: dict) -> tuple[bool, int | None]:
     return True, _number(body, "negotiation_rounds", NEGOTIATION_ROUNDS, 0, MAX_NEGOTIATION_ROUNDS, integer=True)
 
 
+# ---------------------------------------------------------------- tracks (tracks.py)
+def _same(value, want) -> bool:
+    """Is a body value the frozen value (``true`` is not ``1``; ``600`` is ``600.0``)?"""
+    if isinstance(want, bool) or isinstance(value, bool):
+        return type(value) is bool and value is want
+    if isinstance(want, (int, float)):
+        return isinstance(value, (int, float)) and value == want
+    return value == want
+
+
+def _check_frozen(body: dict, frozen: dict, track: Track, free: tuple[str, ...]) -> None:
+    """400 for a body option that a track fixes to another value, or that it doesn't allow at all."""
+    for key, value in body.items():
+        if key in free or value is None:
+            continue
+        if key not in frozen:
+            raise ApiError(400, f"option {key} is not allowed with track {track.id} (allowed: "
+                                f"{', '.join(free)}; everything else is frozen, see GET /api/tracks)")
+        if not _same(value, frozen[key]):
+            raise ApiError(400, f"option {key} conflicts with track {track.id}, which fixes it at "
+                                f"{json.dumps(frozen[key])} (omit it, or see GET /api/tracks)")
+
+
+def _track(track_id) -> Track:
+    track = get_track(track_id)
+    if track is None:
+        raise ApiError(400, f"unknown track {track_id!r}; choose from {sorted(TRACKS)} (GET /api/tracks)")
+    return track
+
+
+def _track_seats(seats, n: int) -> list[str] | None:
+    """The operator's ``seats`` (real names in seat order) of a track game."""
+    if seats is None:
+        return None
+    if not isinstance(seats, list) or len(seats) != n:
+        raise ApiError(400, f"seats must be a list of {n} player names (seat 1 first)")
+    out = [validate_player_name(x) for x in seats]
+    for x in out:
+        if SEAT_NAME.match(x):
+            raise ApiError(400, f"seats: {x!r} looks like an anonymous seat name ('Player N'); use real names")
+    if len({x.lower() for x in out}) != n:
+        raise ApiError(400, "seats must not repeat a name")
+    return out
+
+
+def _track_options(body: dict, operator: bool) -> dict:
+    """``POST /api/games {"track": id, ...}``: the track's frozen options.
+    ``name`` is free; ``seed`` and ``seats`` need the operator key."""
+    track = _track(body.get("track"))
+    _check_frozen(body, track.create_options(), track, ("track", "name", "seed", "seats"))
+    for key in ("seed", "seats"):
+        if body.get(key) is not None and not operator:
+            raise ApiError(403, f"{key} on a track game is for the operator only (send the spectator key as "
+                                "X-Spectator-Key); without it the server picks the seed and seats go in join order")
+    name = body.get("name")
+    if name is not None:
+        if not isinstance(name, str):
+            raise ApiError(400, "name must be a string")
+        name = " ".join(name.split())[:80] or None
+    seed_given = body.get("seed") is not None
+    seed = (_number(body, "seed", 0, -(2 ** 63), 2 ** 63, integer=True) if seed_given
+            else random.randrange(1, 2 ** 31))
+    frozen = track.create_options()
+    return {**frozen, "name": name, "turn_timeout": float(frozen["turn_timeout"]), "bots": [],
+            "seed": seed, "seed_given": seed_given, "quickmatch": False, "track": track.id,
+            "seats": _track_seats(body.get("seats"), track.players)}
+
+
 def unrated_reason(opts: dict) -> str | None:
     """Why a game can't be rated (None = it can). Rated games must be played
     under standard conditions nobody can tailor: a server-chosen seed, the
-    full turn limit, a real deadline, and no creator-picked baseline bots."""
+    full turn limit, a real deadline, and no creator-picked baseline bots.
+    Track games are rated in their track's pool: their conditions are frozen
+    by the track, and only the operator may pick their seed and seats."""
     if not opts.get("rated", True):
         return "created with rated: false"
+    if opts.get("track"):
+        return None
     if opts.get("seed_given"):
         return "custom seed"
     if opts["max_turns"] < C.DEFAULT_MAX_TURNS:
@@ -346,6 +425,8 @@ class Seat:
     bot_blob: bytes | None = field(default=None, repr=False)  # house bot: pickled state at the last checkpoint
     bot_pickle_failed: bool = False
     agent: dict | None = None        # remote player: the agent manifest given at join (provenance.py)
+    seat_name: str | None = None     # track game: the neutral name every live view shows ("Player 3");
+                                     # ``name`` is the real one (ratings, uniqueness, registered names)
 
     def snapshot(self) -> dict:
         """Plain data for a checkpoint (no bot object, no monotonic times)."""
@@ -353,7 +434,7 @@ class Seat:
                 "token": self.token, "bot_errors": self.bot_errors, "draft": self.draft,
                 "verified": self.verified, "reactive": self.reactive, "acted_seq": self.acted_seq,
                 "bot_seed": self.bot_seed, "bot_blob": self.bot_blob,
-                "nudge_pending": self.nudge_due is not None, "agent": self.agent}
+                "nudge_pending": self.nudge_due is not None, "agent": self.agent, "seat_name": self.seat_name}
 
 
 class GameSession:
@@ -368,6 +449,12 @@ class GameSession:
         self.frames: FrameStore | None = FrameStore()  # zlib-compressed, freed once saved to disk
         self.actions = ActionLog()  # what each seat did per turn (replay key "actions")
         with self.cond:
+            if self._anon:
+                # every seat exists in the engine from the start under its neutral name, so nothing the
+                # engine shows (views, events, city names, frames) can carry a real name; joins bind to them
+                for k in range(self.max_players):
+                    self.game.add_player(seat_name(k))
+                self.game._stats = None
             for b in opts["bots"]:
                 self._add_bot(b)
 
@@ -377,6 +464,8 @@ class GameSession:
         self.game_id = game_id
         self.opts = opts
         self.name = opts["name"] or f"Game {game_id}"
+        self.track_id: str | None = opts.get("track")
+        self._anon = bool(self.track_id)  # track game: anonymous seats while live (docs/DESIGN.md §12)
         self._created_mono = time.monotonic()
         self.lock = threading.RLock()
         self.cond = threading.Condition(self.lock)
@@ -480,6 +569,8 @@ class GameSession:
         """Seat a remote player. ``agent``: an already validated manifest
         (:func:`parse_agent`), stored with the seat and shown in the summary."""
         name = validate_player_name(name)
+        if self._anon:
+            return self._join_track(name, key, agent)
         verified = self.manager.check_name(name, key)
         with self.cond:
             if self.closed:
@@ -500,6 +591,55 @@ class GameSession:
             if len(self.seats) >= self.max_players:
                 self._start()
             return seat
+
+    def _join_track(self, name: str, key: str | None, agent: dict | None) -> Seat:
+        """Seat a remote player in a track game: the manifest must satisfy the
+        track, and the seat is the operator's fixed one for ``name`` (``seats``)
+        or the first free one. Nothing in the answer, errors included, tells
+        who else is seated."""
+        if SEAT_NAME.match(name):
+            raise ApiError(400, "names of the form 'Player N' are reserved for the anonymous seats of track games; "
+                                "join under your own name (it stays hidden until the game ends)")
+        track = get_track(self.track_id)
+        if track is None:
+            raise ApiError(409, f"track {self.track_id} is not defined on this server any more")
+        why = track.check_agent(agent)
+        if why:
+            raise ApiError(400, why)
+        verified = self.manager.check_name(name, key)
+        with self.cond:
+            if self.closed:
+                raise ApiError(409, f"lobby {self.game_id} was closed")
+            self._check_stopping()
+            if self.status != "lobby":
+                raise ApiError(409, f"game {self.game_id} has already started" if self.status == "running"
+                               else f"game {self.game_id} is finished")
+            if len(self.seats) >= self.max_players:
+                raise ApiError(409, f"game {self.game_id} is full")
+            low = name.lower()
+            fixed = self.opts.get("seats")
+            if fixed:
+                idx = next((i for i, n in enumerate(fixed) if n.lower() == low), None)
+            else:
+                idx = next(i for i, p in enumerate(self.game.players) if p.id not in self.seats)
+            if idx is None or any(s.name.lower() == low for s in self.seats.values()):
+                raise ApiError(409, f"no open seat for that name in track game {self.game_id} (seats are anonymous: "
+                                    "the server does not say whether a name is seated or on the operator's seat "
+                                    "list); join under another name or ask the operator")
+            p = self.game.players[idx]
+            seat = Seat(p.id, name, False, None, secrets.token_urlsafe(24), verified=verified, agent=agent,
+                        seat_name=p.name)
+            self.seats[p.id] = seat
+            self.seats = {q.id: self.seats[q.id] for q in self.game.players if q.id in self.seats}  # seat order
+            self.manager._register_token(seat.token, self.game_id, p.id)
+            self._touch()
+            if len(self.seats) >= self.max_players:
+                self._start()
+            return seat
+
+    def pool(self) -> str:
+        """The rating pool of this game: its track, else ``fog`` or ``standard``."""
+        return self.track_id or ("fog" if self.opts.get("fog") else "standard")
 
     # ------------------------------------------------------------ lifecycle
     def start(self, authorized: bool = True) -> bool:
@@ -1196,7 +1336,7 @@ class GameSession:
                 if self._fin_done:
                     return True
                 ranked = self._rated_entries()
-                pool = "fog" if self.opts.get("fog") else "standard"
+                pool = self.pool()
                 for seat in self.seats.values():
                     seat.bot = None  # free the house bots (and their caches) now
             ok = True
@@ -1295,7 +1435,7 @@ class GameSession:
         with self.cond:
             fs = self.frames
             if fs is not None:
-                summary, result = self.summary(), self.game.result
+                summary, result = self.summary(operator=full), self.game.result
                 public = not full and self.status != "finished"
                 if compact:  # the GUI's format: frames only, no action log
                     return envelope(self.game_id, summary, result, fs.compact(lo, hi, public=public),
@@ -1310,17 +1450,25 @@ class GameSession:
                                 lo=a, actions=None if public else self.actions.to_bytes(a, b))
         return self.manager.archived_replay_bytes(self.game_id, compact, lo, hi)
 
-    def summary(self) -> dict:
+    def summary(self, operator: bool = False) -> dict:
+        """The game summary. Track games (anonymous seats) show each seat's
+        neutral name, no manifests and no seed while live, except to the
+        ``operator``; once finished, ``players[].name`` is the real name and
+        ``players[].seat_name`` the neutral one the frames show."""
         with self.cond:
             g = self.game
+            reveal = not self._anon or operator or g.status == "finished"
             players = []
             for pid, s in self.seats.items():
                 p = g.player(pid)
-                entry = {"id": pid, "name": s.name, "is_bot": s.is_bot, "alive": bool(p and p.alive),
+                entry = {"id": pid, "name": s.name if reveal else (s.seat_name or pid), "is_bot": s.is_bot,
+                         "alive": bool(p and p.alive),
                          "submitted": bool(g.status == "running" and g.has_submitted(pid))}
+                if self._anon:
+                    entry["seat_name"] = s.seat_name
                 if s.is_bot:
                     entry["bot"] = s.bot_name
-                if s.agent:
+                if s.agent and reveal:
                     entry["agent"] = dict(s.agent)
                 players.append(entry)
             out = {
@@ -1334,7 +1482,7 @@ class GameSession:
                 "created": round(self.created, 3),
                 "turn_timeout": self.opts["turn_timeout"],
                 "max_turns": self.opts["max_turns"],
-                "seed": self.opts["seed"],
+                "seed": self.opts["seed"] if reveal else None,  # a fog map is derivable from the seed
                 "fill_with_bots": self.opts["fill_with_bots"],
                 "lobby_timeout": self.opts["lobby_timeout"],
                 "quickmatch": self.opts["quickmatch"],
@@ -1344,16 +1492,19 @@ class GameSession:
                 "rules_sha256": self.opts.get("rules_sha256"),
                 "sync": self._sync,
                 "negotiation_rounds": self._rounds if self._sync else None,
+                "track": self.track_id,
                 "deadline": g.deadline,
                 "result": dict(g.result) if g.result else None,
                 "frames": len(self.frames) if self.frames is not None else g.turn + 1,
             }
+            if self._anon:
+                out["seats_fixed"] = bool(self.opts.get("seats"))  # the operator assigned the seats
             if self._sync and g.status == "running":
                 out["phase"] = self._phase_view()
             if g.status == "finished":
                 # the same summary whether the replay is served from memory or from the saved file
                 ranked = self._rated_entries()
-                out["rating"] = ({"pool": "fog" if self.opts.get("fog") else "standard",
+                out["rating"] = ({"pool": self.pool(),
                                   "entries": [[n, r] for n, r in ranked]} if ranked else None)
             if self.error:
                 out["error"] = self.error
@@ -1638,7 +1789,7 @@ class GameSession:
                         bot_errors=int(d.get("bot_errors", 0)), draft=bool(d.get("draft")),
                         verified=bool(d.get("verified")), reactive=int(d.get("reactive", 0)),
                         acted_seq=int(d.get("acted_seq", 0)), bot_seed=d.get("bot_seed"),
-                        bot_blob=d.get("bot_blob"), agent=d.get("agent"))
+                        bot_blob=d.get("bot_blob"), agent=d.get("agent"), seat_name=d.get("seat_name"))
             if seat.is_bot:
                 if seat.bot_blob:
                     try:
@@ -1689,8 +1840,8 @@ class ArchivedGame:
 
     status = "finished"
 
-    def summary(self) -> dict:
-        return dict(self._summary)
+    def summary(self, operator: bool = False) -> dict:
+        return dict(self._summary)  # finished: real names are public
 
     def replay_bytes(self, compact: bool = False, lo: int | None = None, hi: int | None = None,
                      *, full: bool = False) -> bytes:
@@ -1859,13 +2010,14 @@ class GameManager:
             return ArchivedGame(self, game_id, summary)
         raise ApiError(404, f"no game {game_id!r}")
 
-    def list_games(self, limit: int | None = None) -> list[dict]:
-        """Every live game plus the most recent archived ones (``limit`` in total, at least all live)."""
+    def list_games(self, limit: int | None = None, operator: bool = False) -> list[dict]:
+        """Every live game plus the most recent archived ones (``limit`` in total, at least all live).
+        ``operator``: live track games show real names (see :meth:`GameSession.summary`)."""
         limit = MAX_GAMES_LISTED if limit is None else limit
         self._sweep()
         with self.lock:
             live = list(self.sessions.values())
-        out = [s.summary() for s in live]
+        out = [s.summary(operator=operator) for s in live]
         ids = {s["game_id"] for s in out}
         out += self.storage.recent(max(0, limit - len(out)), exclude=ids)
         out.sort(key=lambda s: s.get("created", 0), reverse=True)
@@ -1954,8 +2106,9 @@ class GameManager:
                 self._retired_tokens.popitem(last=False)
 
     # ------------------------------------------------------------ creation
-    def create_game(self, body: dict) -> GameSession:
-        opts = parse_game_options(body)
+    def create_game(self, body: dict, operator: bool = False) -> GameSession:
+        """``POST /api/games``; ``operator``: the request carried the spectator key."""
+        opts = parse_game_options(body, operator)
         session, _ = self._create(opts)
         return session
 
@@ -1984,6 +2137,8 @@ class GameManager:
             reason = unrated_reason(opts)
         opts["rated"], opts["unrated_reason"] = reason is None, reason
         opts["rules_sha256"] = rules_sha256()  # the rules this game is played under (stored with it)
+        if opts.get("track"):
+            self._pin_track_rules(opts["track"], opts["rules_sha256"])
         gid = self._next_id()
         session = GameSession(self, gid, opts)
         if not opts["quickmatch"]:
@@ -1995,9 +2150,82 @@ class GameManager:
         log.info("created game %s (%s)", gid, session.name)
         return session, seat
 
+    def _pin_track_rules(self, track_id: str, sha: str) -> None:
+        """The first game of a track in this data dir pins the track pool to
+        the server's rules hash; a later game under other rules is refused."""
+        try:
+            self.storage.pin_rules(track_id, sha)
+        except RulesChanged as e:
+            m = re.fullmatch(r"(.*-v)(\d+)", track_id)
+            nxt = f"{m.group(1)}{int(m.group(2)) + 1}" if m else track_id + "-v2"
+            raise ApiError(409, f"track {track_id} was defined against rules {e.pinned[:12]}, but this server runs "
+                                f"rules {sha[:12]}: the rules changed, so its games would not be comparable. "
+                                f"The operator must define a new track version (e.g. {nxt}) in "
+                                "agentciv/server/tracks.py", track=track_id, pinned_rules_sha256=e.pinned,
+                           rules_sha256=sha) from None
+
+    def tracks(self) -> list[dict]:
+        """``GET /api/tracks``: every track with the rules hash its pool is pinned to."""
+        current = rules_sha256()
+        out = []
+        for track in TRACKS.values():
+            d = track.public()
+            pinned = self.storage.pinned_rules(track.id)
+            d["rules_sha256"] = pinned
+            d["current_rules_sha256"] = current
+            d["open"] = pinned is None or pinned == current
+            out.append(d)
+        return out
+
+    def _quickmatch_join(self, match: tuple, name: str, key, agent):
+        """Join the first open quickmatch lobby with this match key (None: none could take us)."""
+        with self.lock:
+            candidates = [s for s in self.sessions.values()
+                          if s.opts["quickmatch"] and s.status == "lobby" and not s.closed
+                          and s.opts.get("match") == match]
+        for s in candidates:
+            try:
+                return s, s.join(name, key, agent)
+            except ApiError as e:
+                if e.status in (400, 403):
+                    raise
+                continue  # full, started meanwhile, or name taken: try the next lobby
+        return None
+
+    def _quickmatch_track(self, body: dict) -> tuple[GameSession, Seat]:
+        """``POST /api/quickmatch {"track": id, "name", "agent", "key"?}``: the
+        open quickmatch lobby of that track (or a new one). Track lobbies never
+        fill with bots: they start when all seats are taken (and close after
+        ``lobby_max_age`` otherwise)."""
+        track = _track(body.get("track"))
+        _check_frozen(body, track.quickmatch_options(), track, ("track", "name", "key", "agent"))
+        name = validate_player_name(body.get("name"))
+        key = _player_key(body)
+        agent = parse_agent(body)
+        if SEAT_NAME.match(name):
+            raise ApiError(400, "names of the form 'Player N' are reserved for the anonymous seats of track games")
+        why = track.check_agent(agent)
+        if why:
+            raise ApiError(400, why)
+        self.check_name(name, key)
+        match = ("track", track.id)
+        with self._qm_lock:
+            found = self._quickmatch_join(match, name, key, agent)
+            if found is not None:
+                return found
+            with self.lock:
+                self._quickmatch_counter += 1
+                n = self._quickmatch_counter
+            opts = _track_options({"track": track.id, "name": f"{track.id} quickmatch #{n}"}, operator=False)
+            opts["quickmatch"] = True
+            opts["match"] = match
+            return self._create(opts, first_player=(name, key, agent))
+
     def quickmatch(self, body: dict) -> tuple[GameSession, Seat]:
         if not isinstance(body, dict):
             raise ApiError(400, "body must be a JSON object")
+        if body.get("track") is not None:
+            return self._quickmatch_track(body)
         name = validate_player_name(body.get("name"))
         key = _player_key(body)
         agent = parse_agent(body)  # provenance only: never part of the lobby match
@@ -2015,17 +2243,9 @@ class GameManager:
         if sync:  # synchronous and live players are never mixed (live lobbies keep their old key)
             match += ("sync", rounds)
         with self._qm_lock:  # one lobby choice at a time; the manager lock stays free for other requests
-            with self.lock:
-                candidates = [s for s in self.sessions.values()
-                              if s.opts["quickmatch"] and s.status == "lobby" and not s.closed
-                              and s.opts.get("match") == match]
-            for s in candidates:
-                try:
-                    return s, s.join(name, key, agent)
-                except ApiError as e:
-                    if e.status == 403:
-                        raise
-                    continue  # full, started meanwhile, or name taken: try the next lobby
+            found = self._quickmatch_join(match, name, key, agent)
+            if found is not None:
+                return found
             with self.lock:
                 self._quickmatch_counter += 1
                 n = self._quickmatch_counter
@@ -2082,7 +2302,7 @@ class GameManager:
 
     # ------------------------------------------------------------ misc
     def leaderboard(self, mode: str = "standard") -> list[dict]:
-        """Ratings of the ``standard`` pool or of the ``fog`` pool (fog-of-war games)."""
+        """Ratings of the ``standard`` pool, the ``fog`` pool (fog-of-war games) or a track's pool."""
         rows = self.storage.leaderboard(mode)
         for r in rows:  # house bots' names are reserved, so their entries are authentic too
             r["verified"] = r["verified"] or r["name"] in BOT_REGISTRY
