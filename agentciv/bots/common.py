@@ -383,14 +383,17 @@ def simulate_attack(world: World, attacker: str, att_units: dict, tile: int,
         return True, dict(att_units), float("inf")
     defensive = world.terrain[tile] in DEFENSIVE
     walls = city["buildings"].get("walls", 0) if city else 0
+    # equal-power sides queue in this turn's rotating player order, as in the engine
+    k0 = world.turn % len(world.alive) if world.alive else 0
+    rank = {q: k for k, q in enumerate(world.alive[k0:] + world.alive[:k0])}
     sides = []
-    for k, (q, u) in enumerate(sorted(defenders.items())):
+    for q, u in sorted(defenders.items()):
         is_owner = q == cown
         sides.append(CB.Side(pid=q, units={a: c for a, c in u.items() if c > 0}, defender=True,
                              city_owner=is_owner,
                              garrison=float(city.get("garrison", 0)) if is_owner and city else 0.0,
-                             terrain_bonus=defensive, order=(0, k)))
-    att = CB.Side(pid=attacker, units={a: c for a, c in att_units.items() if c > 0}, order=(1, 0))
+                             terrain_bonus=defensive, order=(0, rank.get(q, len(rank)))))
+    att = CB.Side(pid=attacker, units={a: c for a, c in att_units.items() if c > 0}, order=(1, rank.get(attacker, len(rank))))
     ratio = float("inf")
     for s in sides:
         if s.count() > 0 or s.garrison > 0:
