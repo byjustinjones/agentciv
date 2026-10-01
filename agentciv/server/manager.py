@@ -68,7 +68,7 @@ REACTIVE_PER_TURN = 10           # mid-turn (reactive) negotiations per house bo
 
 # Ratings: only games played under standard, server-controlled conditions feed the leaderboard.
 MAX_RATED_TURN_TIMEOUT = 300.0   # rated games need a real deadline, so a losing player can't stall forever
-UNRATED_BOTS = frozenset({"idle", "random"})  # creator-picked baseline bots make a game unrated
+UNRATED_BOTS = frozenset({"idle", "random", "banker", "zealot", "spoiler"})  # creator-picked baseline bots make a game unrated
 
 # Resource limits (attributes of GameManager, so embedders and tests can change them).
 MAX_LIVE_GAMES = 200             # lobbies + running games in memory; creation beyond this -> 503
