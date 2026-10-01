@@ -23,9 +23,19 @@ orders = bot.act(game.player_view("p1"))
 | `economist` | peaceful builder, sells surplus, banks gold, weak defence | economic | medium |
 | `rusher` | infantry/cavalry rush on the nearest weak capital | conquest | medium (feast or famine) |
 | `turtle` | walls, archers, treaties; wonder or temples | wonder / influence | medium |
-| `strategist` | adaptive: picks the fastest race, raids, relic control, threat response; the skilled trader | whatever is fastest | strongest |
+| `strategist` | adaptive: picks the fastest race, raids, relic control, threat response; the skilled trader | whatever is fastest | strongest of the house-fill bots |
 | `strategist_lite` | handicapped strategist (for the skill ladder) | economic | between |
 | `strategist_notrade` | the strategist with barter switched off (ablation baseline) | whatever is fastest | strong |
+| `banker` | counterplay baseline: the LLM bank race (market halls, the full allowance, archers in the capital) | economic | strong (see below) |
+| `zealot` | counterplay baseline: temple rush with a minimal army | influence | strong (see below) |
+| `spoiler` | counterplay baseline: strategist economy, then raids whoever is closest to winning | – | medium |
+
+`banker`, `zealot` and `spoiler` are **counterplay baselines** for balance
+experiments (docs/BALANCE.md): they imitate what the LLM players did in
+g8–g10, and the spoiler tests whether that can be stopped. They are not in
+the server's house-bot fill (`DEFAULT_FILL_BOTS`) and, like `idle` and
+`random`, a game whose creator picks one of them is unrated
+(`UNRATED_BOTS`), so the live ladders do not move.
 
 How they barter (details under each bot and in [Barter](#barter-13)):
 
@@ -36,6 +46,9 @@ How they barter (details under each bot and in [Barter](#barter-13)):
 | `turtle` | gold for **peace** with armies that threaten it; the stone/wood its wonder stage lacks, in the build turn | accepts above a margin (values peace ×1.5), one fair counter |
 | `rusher` | **tribute** (gold per turn + a 20-turn peace) from weaker neighbours its army threatens | greedy counters; peace with its target costs the spoils of conquest; honours contracts and treaties only while that pays |
 | `strategist` | exploits needs (sells overflow at a premium, buys what its race lacks), borrows to fund its race, buys peace from armies at its gates, probes for sloppy traders | haggles: anchors high, concedes step by step; refuses the leader and anything that feeds a rival's race |
+| `banker` | its surplus at a fair price (no loans) | accepts above a small margin, one fair counter |
+| `zealot` | gold for **peace** with armies that threaten it; surplus food/wood | accepts above a margin, one fair counter |
+| `spoiler` | as the strategist | as the strategist, but no peace with a rival it may have to stop |
 
 Every bot is deterministic for a given `seed` and sequence of views. None of
 them does I/O, none raises (see `SafeBot` below), and each takes a few
@@ -84,6 +97,40 @@ python -m agentciv.tournament --bots strategist,economist,rusher,turtle,economis
 python -m agentciv.tournament --bots strategist,strategist_notrade,economist,rusher,turtle,random --games 240 --seed 1 --jobs 4
 python -m agentciv.tournament --bots strategist,rusher,rusher,rusher,rusher,rusher --games 60 --seed 3 --jobs 4
 ```
+
+### Counterplay baselines
+
+`python -m agentciv.tournament --jobs 8 --seed 1`, 48 games per row, std and
+fog. Field A' is field A with the new bot in place of one `random`
+(`X,strategist,economist,rusher,turtle,random`); field CP is
+`banker,spoiler,strategist,strategist,economist,turtle`.
+
+| field | bot | std win% / place | fog win% / place | median win turn (std / fog) |
+|------|------|------|------|------|
+| A' | `banker` | 62.5% / 2.38 (strategist 18.8%) | 64.6% / 2.44 (strategist 12.5%) | t67 / t68 (earliest t62 / t61) |
+| A' | `zealot` | 56.2% / 2.06 (strategist 20.8%) | 64.6% / 1.81 (strategist 16.7%) | t69 / t70 (earliest t65 / t67) |
+| A' | `spoiler` | 18.8% / 2.90 (strategist 16.7%) | 12.5% / 3.33 (strategist 25.0%) | t97 / t96 |
+| CP | `banker` | 29.2% / 4.50 | 20.8% / 4.88 | t77 / t75 |
+| CP | `spoiler` | 8.3% / 3.25 | 18.8% / 2.85 | t95 / t98 |
+
+Like the LLM bankers, the banker wins from behind on score (in field A' std
+its median score rank in its wins is 3rd, in field CP 5th of 6) and on a
+fixed schedule: 9 turns after reaching the target in the median win; its
+streak had been broken before the win in 1 of its 30 wins (fog: 3 of 31).
+The zealot wins first on score and before t70 in 14 of its 27 wins (fog: 9
+of 31). Neither result was tuned away: they are what docs/BALANCE.md §9
+asks the balance experiments to measure.
+
+Counterplay in field CP (resets of the banker's economic streak by a city
+capture): std, the banker reached the target in 30 games, its streak was
+reset 7 times in total, 6 times by the spoiler in 5 games; fog, 35 games, 16
+resets, 13 by the spoiler in 8 games. The spoiler reset 10 (std) and 24
+(fog) streaks of all players. In small fields it does better: banker,
+spoiler (1v1), banker, spoiler, idle and banker, spoiler, economist, turtle,
+seeds 1–6: the spoiler broke a banker streak in 10 of 18 games. It is still a
+weak counter in six-player games: it must raise a force that beats a
+defender with a gold hoard, walls and an archer stack, and the banker often
+wins first.
 
 ## The bots
 
@@ -296,6 +343,79 @@ docs/BALANCE.md. `strategist_notrade` is the strategist with `TRADE = False`
 (it never negotiates; same random tie-breaks), the baseline for measuring
 what barter is worth.
 
+### banker (`banker.py`)
+Modelled on the LLM players of g8–g10, who reached the bank target while
+fourth on score, banked no more than the streak needed once there, stacked
+archers in the capital and held the 10-turn streak.
+* **Bank first:** from turn 6 the turn's allowance (50 + 10 per city with a
+  market hall, rules §5) is reserved before any other spending and banked
+  at the end of the turn. Once the bank holds B it banks exactly the streak
+  deposit (half the allowance) and keeps the rest.
+* **Market halls in every city**, the capital's first (buying the stone/wood
+  if needed): each adds 10 to the allowance. A warehouse when near the caps.
+* **Expansion:** up to 4 cities, no new site once the bank is at half of B.
+* **Holding the cities** (`garrison.py`, `GarrisonMixin`): an archer stack in
+  the capital growing with the bank (14 at B), walls there from 40% (level
+  1) and 80% (level 2) of B, 1 defender in every other city, 2 once near the
+  target (`STREAK_CITY_GARRISON`); threatened cities recruit counters and
+  raise walls as every planner bot does. A lost original capital is retaken
+  (no streak without it).
+* **Diplomacy and trade:** accepts every treaty and proposes 30-turn
+  treaties to everyone; sells its surplus at a fair price; lends nothing.
+
+### zealot (`zealot.py`)
+A temple rush for the influence victory, with the minimum army.
+* Influence is valued high from turn 0 (`INFLUENCE_WEIGHT` 6, temple ROI
+  ×3); temples go on every plains/forest/hills tile, and the stone they need
+  is bought on the market. Claims spend influence but not legacy, so it
+  claims freely; up to 6 cities.
+* **Relics:** occupies up to 2 relics within 6 steps of its cities with 2
+  infantry each (3 influence a turn guarded), only where no hostile army is
+  near.
+* **Army:** the `GarrisonMixin` again: a capital archer stack growing with
+  legacy (10 at L), capital walls from 60% / 90% of L, 1–2 defenders in other
+  cities, a lost capital retaken. Never breaks a treaty (that would end its
+  own influence streak); accepts and proposes 30-turn treaties.
+* **Trade:** buys peace from armies that threaten it, sells surplus
+  food/wood. No bank, no wonder, no raids.
+
+### spoiler (`spoiler.py`)
+The strategist's economy and opening, then stopping the leader becomes its
+main job. A `StrategistBot` subclass; everything not listed here is the
+strategist's.
+* **Whom:** from turn 20, every turn, the rivals ranked by their estimated
+  turns to win (the strategist's ETA model; conquest only counts one capital
+  short of it). A rival is a target when it is on a streak, has 45% progress
+  in economic, influence or wonder, a wonder at stage 3+, or an ETA within
+  30 turns. It looks at the two most dangerous.
+* **Where:** on a streak any city of the rival (its loss resets both
+  streaks); before the streak the original capital (half the bank is
+  plundered, a quarter of the legacy lost); against a wonder the wonder city;
+  against conquest a capital. Among those the city whose strike force is
+  cheapest to raise and bring, counting the units it already has and half
+  its stock; targets it cannot reach before the rival's expected win (+6
+  turns) are skipped.
+* **Sizing the force (no suicide into walls):** the force must win the
+  engine-exact simulation (`simulate_attack`) with a 1.3 margin against the
+  garrison, walls (3 siege per wall level), the defenders next door, one
+  turn of emergency recruiting from the target's stock and 20% of its gold,
+  and 2 turns of recruiting from its income (it sees the force coming). The
+  force is what is already within 12 steps plus the cheapest addition of
+  cavalry, infantry or both (archers only pay off defending a city); missing
+  units are bought with up to half its gold (food/wood/stone on the market)
+  in the city nearest the target.
+* **How:** it gathers 3 steps away (cavalry 5), marching around the rival's
+  other cities, and strikes when the gathered force wins. While gathering it
+  switches to another city of the same rival when the units near it would
+  win there now, or every 3 turns when that city is much cheaper (a target
+  that walls up leaves its other cities open). A raid on the most dangerous
+  rival never times out. In fog games it buys a military spy report on the
+  target every 4 turns before relying on the armies it can see.
+* **Its own race waits** while a rival would win first (no wonder or temple
+  reservations); it signs no treaty and no peace deal with a rival at 30%
+  progress, within 45 turns of winning or on a streak, and uses the free
+  treaty break against streak holders (rules §9).
+
 ## Barter (§13)
 
 All planner bots (economist, rusher, turtle, strategist) share the
@@ -408,6 +528,10 @@ Both modules are useful if you write your own in-process bot.
   returns the orders planned so far), nor does its `negotiate()` (it calls
   `decide_deals(view)`; `TRADE = False` switches barter off), and it
   provides a seeded `self.rng` and `self.memory` across turns.
+* `GarrisonMixin` (`garrison.py`), for planner bots on a streak:
+  `keep_garrisons(capital, others, walls)` recruits toward a capital stack,
+  a number of defenders in every other city and a capital wall level;
+  `retake_capital()` raises an army and retakes a lost original capital.
 * Barter (see [Barter](#barter-13)): `DealValuer(world, needs, gold_need,
   discount, horizon, peace_bias)` with `deal_gain(deal, pid)`,
   `recv_value`/`give_cost`, `contract_value`, `peace_value`, `threat`,
@@ -548,6 +672,9 @@ The report lists per bot:
   honoured, diplomacy actions rejected by the engine, and the net value
   received at base market prices (`trade_per_game`).
 
+* forced-replanning counters (below): streak resets by a city capture it
+  caused (`streak_breaks_by_per_game`) and suffered (`streak_resets_per_game`).
+
 It also shows overall stats: the distribution of ending conditions, game
 length (median and average) and time per game, and the win rate by **start
 slot** (the index of the start position in `mapgen.start_layout(n)`, i.e. the
@@ -558,7 +685,31 @@ Six identical bots measure positional fairness by start slot. `--json` writes
 the full summary, including per-game results (seats with their start slot,
 placements, scores, errors, timings).
 
+**Forced replanning** (`replan` per game, `replanning` in the summary,
+a block in the text report). These measure whether a race gets interrupted,
+not who wins:
+
+* **streaks** per condition: started, paused by reason (`deposit`), ended by
+  reason (`city_lost`, `treaty_broken`, `contract_default`, `eliminated`, or
+  `unmet` when the requirement simply stopped holding);
+* **streak_breaks**: every streak reset by a city capture, with the turn,
+  the victim, the conditions and the capturers;
+* **share of streak winners whose streak was broken** at least once before
+  the win (any `streak_ended` of the winning condition), and by a capture;
+* **lead changes** in victory progress: the leader is the player with the
+  best economic, influence, wonder or conquest progress (`Game.stats`),
+  counted from the first turn that progress reaches 0.25; a new leader must
+  be strictly ahead (mean, median, max per game);
+* **turns from first reaching the target to the win** (bank for economic,
+  legacy for influence wins; 9 is the minimum);
+* **winners never attacked after turn 30**: no battle on (or, for a border
+  clash, next to) a tile the winner owned at the start of the turn and no
+  city captured from it after turn 30 (armies walking onto undefended land
+  do not count);
+* **win conditions per field** (the multiset of bots in the game), so mixed
+  schedules are never only pooled.
+
 For programmatic use: `run_game(bot_specs, seed, max_turns, rounds=3)`
 returns one game's result dict (with `ranks` aligned with `placements`, `trade`, `deal_kinds`,
-`deals_executed`, `negotiate_ms_*`). `run_tournament(...)` returns the summary, and
+`deals_executed`, `replan`, `negotiate_ms_*`). `run_tournament(...)` returns the summary, and
 `format_summary(...)` renders it.
