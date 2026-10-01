@@ -16,20 +16,21 @@ randomness is the seeded map generator.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from . import combat
 from . import constants as C
 from . import deals as D
 from . import fog as F
 from . import market as M
+from . import variants as V
 from . import views
 from .mapgen import generate_map
 from .model import City, Player
 from .orders import prevalidate
-from .rules import (bank_limit, bank_target, building_cost, claim_cost, legacy_target,
-                    rules_json, season, settle_cost, storage_cap, streak_deposit, thresholds,
-                    unit_cost)
+from .rules import (_scaled_target, bank_limit, bank_target, building_cost, claim_cost,
+                    legacy_target, rules_json, season, settle_cost, storage_cap, streak_deposit,
+                    thresholds, unit_cost)
 
 ACTION_TYPES = ("build", "claim", "settle", "recruit", "disband", "bank")
 
@@ -42,6 +43,9 @@ class GameConfig:
     name: str | None = None
     max_players: int = C.MAX_PLAYERS
     fog: bool = False          # fog of war and espionage (docs/RULES.md §14)
+    # experimental rule variants for offline balance runs (agentciv.engine.variants);
+    # empty = today's rules
+    variants: dict = field(default_factory=dict)
 
 
 class _Group:
@@ -83,6 +87,7 @@ class Game:
 
     def __init__(self, config: GameConfig | None = None):
         self.config = config or GameConfig()
+        self.variants = V.validate(getattr(self.config, "variants", None))
         self.game_id = self.config.game_id
         self.max_turns = int(self.config.max_turns)
         self.status = "lobby"
@@ -137,6 +142,8 @@ class Game:
         self.defaulted_this_turn: set = set()   # payers that defaulted in this turn's phase 7
         self.betrayed_this_turn: set = set()    # players that broke a treaty this turn
         self.lost_city_this_turn: set = set()   # players that lost a city this turn
+        self.lost_city_held: dict = {}          # pid -> turns each city lost this turn had been held
+        self.city_taken_turn: dict = {}         # city tile -> turn its current owner captured it
         self._bank_limits: dict = {}            # bank_limit per player at the start of phase 4
         self.last_events: list = []
         self.result: dict | None = None
@@ -615,6 +622,7 @@ class Game:
         self.defaulted_this_turn = set()
         self.betrayed_this_turn = set()
         self.lost_city_this_turn = set()
+        self.lost_city_held = {}
         fog = self.config.fog
         if fog:
             pre = F.vision_all(self)
@@ -939,7 +947,34 @@ class Game:
             if c.owner == pid:
                 cities += 1
                 halls += 1 if c.market_hall else 0
+        base = self._var("bank_base")
+        if base is not None:
+            return (base if cities > 0 else 0) + C.BANK_PER_MARKET_HALL * halls
         return bank_limit(cities, halls)
+
+    def _var(self, key: str, default=None):
+        """An experimental variant's value (``GameConfig.variants``,
+        agentciv.engine.variants), ``default`` when the game has none."""
+        return (self.__dict__.get("variants") or {}).get(key, default)
+
+    def thresholds(self, n: int | None = None) -> dict:
+        """The victory thresholds of this game (``rules.thresholds`` plus
+        any target variant)."""
+        n = len(self.players) if n is None else n
+        thr = thresholds(n, self.max_turns)
+        for key, var in (("bank", "bank_target"), ("legacy", "legacy_target")):
+            v = self._var(var)
+            if v is not None:
+                thr[key] = _scaled_target(v, self.max_turns)
+        return thr
+
+    def bank_target(self) -> int:
+        v = self._var("bank_target")
+        return bank_target(self.max_turns) if v is None else _scaled_target(v, self.max_turns)
+
+    def legacy_target(self) -> int:
+        v = self._var("legacy_target")
+        return legacy_target(self.max_turns) if v is None else _scaled_target(v, self.max_turns)
 
     def _act_bank(self, p: Player, o: dict):
         room = self.bank_limit(p.id) - p.banked
@@ -1135,7 +1170,8 @@ class Game:
                     garrison=float(city.garrison) if is_owner else 0.0,
                     terrain_bonus=defender and defensive,
                     order=(0 if defender else 1, rank.get(q, len(rank)))))
-            records = combat.resolve(sides, self.hostile, walls=city.walls if city is not None else 0)
+            records = combat.resolve(sides, self.hostile, walls=city.walls if city is not None else 0,
+                                     **self._combat_variants())
             for rec in records:
                 self._emit("battle", **self._xy_fields(i), clash=False, **rec)
             new_per = {}
@@ -1188,6 +1224,10 @@ class Game:
         rank = self._turn_rank()
         return min(cands, key=lambda q: (-combat.military_power(per[q]), rank.get(q, len(rank))))
 
+    def _combat_variants(self) -> dict:
+        """Keyword switches for ``combat.resolve`` (experimental variants)."""
+        return {"pool": bool(self._var("pool_allies")), "symmetric": bool(self._var("symmetric_ties"))}
+
     def _turn_rank(self) -> dict:
         """Player id -> position in this turn's rotating order (``_rotated``).
         Tie-break for equal-power battle sides and captures; players not in
@@ -1235,7 +1275,7 @@ class Game:
             back = [s for s in sides if s.order[0] == 1]
             if not any(self.hostile(s.pid, r.pid) for s in fwd for r in back):
                 continue
-            records = combat.resolve(sides, self.hostile)
+            records = combat.resolve(sides, self.hostile, **self._combat_variants())
             ax, ay = self.xy(a)
             bx, by = self.xy(b)
             for rec in records:
@@ -1256,9 +1296,12 @@ class Game:
         old = city.owner
         victim = self._by_id[old]
         p = self._by_id[pid]
+        held = self.turn - self.__dict__.setdefault("city_taken_turn", {}).get(i, city.founded_turn)
         city.owner = pid
         self._set_owner(i, pid)
         self.lost_city_this_turn.add(old)
+        self.__dict__.setdefault("lost_city_held", {}).setdefault(old, []).append(held)
+        self.city_taken_turn[i] = self.turn
         city.walls = max(0, city.walls - 1)
         wonder_lost = city.wonder_stage
         city.wonder_stage = 0
@@ -1466,14 +1509,22 @@ class Game:
             if not any(c.owner == p.id for c in self.cities.values()):
                 self._eliminate(p)
         # economic and influence streaks (§11)
-        bt, lt = bank_target(self.max_turns), legacy_target(self.max_turns)
+        bt, lt = self.bank_target(), self.legacy_target()
         # players owning their original capital
         home_of = {c.owner for c in self.cities.values() if c.capital and c.original_owner == c.owner}
+        loss_rule, loss_n = V.parse_city_loss(self._var("city_loss", "reset"))
         for p in self._alive_in_order():
             home = p.id in home_of
             lost = p.id in self.lost_city_this_turn
+            setback = 0
+            if lost and loss_rule == "held":
+                # variant: only cities held for loss_n turns or more count
+                lost = any(h >= loss_n for h in self.lost_city_held.get(p.id, ()))
+            elif lost and loss_rule == "minus":
+                # variant: each city lost costs loss_n streak turns
+                setback = loss_n * len(self.lost_city_held.get(p.id, ()))
             # a contract default this turn keeps the economic streak at 0 (§10);
-            # losing any city ends both streaks
+            # losing any city ends both streaks (unless a city_loss variant says otherwise)
             for condition, ok in (("economic", home and p.bank >= bt and p.id not in self.defaulted_this_turn),
                                   ("influence", home and p.legacy >= lt and p.id not in self.betrayed_this_turn)):
                 attr = condition + "_streak"
@@ -1489,6 +1540,10 @@ class Game:
                     setattr(p, attr, getattr(p, attr) + 1)
                     if getattr(p, attr) == 1:
                         self._emit("streak_started", player=p.id, condition=condition)
+                elif ok and lost and setback and getattr(p, attr) > setback:
+                    setattr(p, attr, getattr(p, attr) - setback)
+                    self._emit("streak_paused", player=p.id, condition=condition, reason="city_lost",
+                               lost_turns=setback)
                 elif lost:
                     self._end_streak(p, condition, reason="city_lost")
                 else:
@@ -1569,7 +1624,7 @@ class Game:
                 relics[o] += 1
                 if self.relic_guarded(r):
                     guarded[o] += 1
-        thr = thresholds(n, self.max_turns) if n else {}
+        thr = self.thresholds(n) if n else {}
         alive_count = sum(1 for p in self.players if p.alive)
         out = {}
         for p in self.players:
@@ -1619,7 +1674,7 @@ class Game:
 
     def _check_victory(self) -> None:
         n = len(self.players)
-        thr = thresholds(n, self.max_turns)
+        thr = self.thresholds(n)
         st = self.stats()
         alive = self._alive_in_order()
         met: dict = {}

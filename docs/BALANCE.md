@@ -668,3 +668,202 @@ keeps 2 units in those cities.
 * **Contract defaults** are now the only way bank gold reaches another player
   (DESIGN §8). A losing player could default on purpose to give a leader its
   bank.
+
+## 10. Counterplay baselines and rule variants (review stream H)
+
+No rule or constant changed here. The variants below are switches
+(`GameConfig.variants`, `--variant key=value`, DESIGN §11 "Experimental
+variants"); with none set every game plays exactly as before.
+
+Fields (6 players, 150 max turns, 48 games per run): A, F1, S as in §9;
+CPb = `banker,spoiler,strategist,strategist,economist,turtle`;
+CPz = `zealot,spoiler,strategist,strategist,economist,turtle`;
+BB = `banker,banker,strategist,strategist,economist,turtle` (no spoiler);
+MIX = `banker,zealot,spoiler,strategist,rusher,turtle`;
+A'b / A'z = `banker|zealot,strategist,economist,rusher,turtle,random`
+(docs/BOTS.md). Seeds as in §9's verification: A std 31, A fog 32, F1 std
+33, F1 fog 34, S fog 35; every new field std 33, fog 34, so a variant and
+its baseline play the same maps and seats. Win conditions and the
+forced-replanning numbers come from `python -m agentciv.tournament --bots
+... --games 48 --seed S --jobs 6 [--fog] [--variant ...]`; battles near
+relics, attacks on streak holders and the city-held times come from an
+instrumented driver that wraps `Game.step` (not shipped). A 48-game share
+is about ±7 points (one standard error); 13 runs × 48 = 624 games per
+variant column. 24 runs were re-run with the driver's extra counters and
+gave identical games.
+
+### Baseline with the counterplay bots
+
+Win columns: economic / influence / wonder / conquest, % and median turn.
+"Resets/g": streak resets by a city capture per game. "Broken": streak
+winners whose streak had ended at least once before the win. "Calm":
+winners never attacked after t30.
+
+| Run | Median end | Wins | Top seats (win %) | Battles/g | On / next to relic | Relic changes/g | Resets/g | Broken | Lead changes/g | Calm |
+|---|---|---|---|---|---|---|---|---|---|---|
+| A std | t81 | 19 t94 / 12 t96 / 38 t74 / 31 t63 | strategist 33, rusher 27 | 15.4 | 3.9% / 9.5% | 4.7 | 0.02 | 7% | 3.1 | 60% |
+| A fog | t91 | 29 t92.5 / 17 t98.5 / 25 t77 / 29 t72 | economist 29, rusher 27 | 16.4 | 2.3% / 10.0% | 4.2 | 0.19 | 0% | 3.4 | 54% |
+| F1 std | t92 | 65 t93 / 12 t95 / 19 t88 / 4 t86.5 | economist 38, strategists 38 | 11.4 | 4.4% / 9.0% | 3.8 | 0.21 | 0% | 4.3 | 85% |
+| F1 fog | t93 | 48 t94 / 29 t95.5 / 17 t85 / 6 t84 | strategists 40, economist 29 | 14.2 | 6.5% / 9.6% | 4.0 | 0.19 | 3% | 4.9 | 67% |
+| S fog | t96.5 | 31 t98 / 65 t95 / 0 / 4 t95.5 | strategists 50 | 13.9 | 4.0% / 9.6% | 3.3 | 0.42 | 0% | 4.2 | 50% |
+| CPb std | t92 | 65 t91 / 15 t99 / 12 t81.5 / 8 t85.5 | strategists 40, banker 23, spoiler 17 | 7.9 | 1.3% / 13.1% | 2.9 | 0.67 | 5% | 5.5 | 65% |
+| CPb fog | t92 | 67 t86.5 / 23 t100 / 4 t92.5 / 6 t98 | banker 40, strategists 21, spoiler 10 | 7.9 | 6.6% / 14.0% | 3.4 | 0.62 | 14% | 5.2 | 58% |
+| CPz std | t92 | 27 t93 / 62 t91.5 / 6 t81 / 4 t79 | strategists 25, economist 25, spoiler 23, zealot 21 | 8.7 | 7.4% / 16.7% | 4.7 | 0.83 | 9% | 3.9 | 56% |
+| CPz fog | t91 | 17 t93.5 / 75 t88.5 / 2 t90 / 6 t97 | zealot 33, strategists 27, spoiler 19 | 7.8 | 9.4% / 15.5% | 5.2 | 0.77 | 9% | 3.9 | 42% |
+| BB std | t68 | 96 t68 / 2 t100 / 2 t91 / 0 | bankers 88 | 3.1 | 2.7% / 14.1% | 1.5 | 0.10 | 0% | 4.2 | 83% |
+| BB fog | t69 | 96 t68.5 / 0 / 0 / 4 t73.5 | bankers 88 | 2.3 | 0.0% / 8.0% | 1.7 | 0.08 | 0% | 4.0 | 94% |
+| MIX std | t74 | 35 t72 / 50 t75 / 12 t83 / 2 t92 | zealot 44, banker 29, spoiler 4 | 11.9 | 7.9% / 10.0% | 5.5 | 0.79 | 7% | 4.2 | 58% |
+| MIX fog | t73 | 35 t67 / 52 t88 / 6 t82 / 6 t116 | banker 35, zealot 31, spoiler 12 | 12.2 | 7.7% / 8.0% | 5.9 | 0.65 | 7% | 3.9 | 65% |
+| A'b std | t68.5 | 62 t66 / 8 t95.5 / 17 t83.5 / 12 t67 | banker 56 | 10.8 | 3.5% / 9.0% | 3.0 | 0.10 | 6% | 3.6 | 71% |
+| A'b fog | t70 | 73 t69 / 4 t109.5 / 12 t78 / 10 t68 | banker 62 | 10.7 | 1.4% / 10.3% | 3.3 | 0.12 | 0% | 3.3 | 75% |
+| A'z std | t70.5 | 12 t93 / 65 t70 / 6 t85 / 17 t65.5 | zealot 58 | 11.2 | 4.1% / 5.4% | 4.5 | 0.08 | 3% | 3.3 | 73% |
+| A'z fog | t72.5 | 8 t92.5 / 75 t72 / 8 t72.5 / 8 t83 | zealot 71 | 10.5 | 6.7% / 10.1% | 5.2 | 0.02 | 2% | 3.4 | 50% |
+
+No score wins, no bot exceptions, no pre-validation errors. The five §9
+fields reproduce §9's verification exactly (pooled: 38.3 / 27.1 / 19.6 /
+15.0%, median t93, relic battles 4.1% / 9.6%, 4.0 owner changes per game).
+In every streak win the median time from first reaching B or L to the win
+is 9 turns, the minimum.
+
+Stream F's findings, checked on other seeds:
+
+* **Banker and zealot in field A':** confirmed. Banker 56% / 62% (F: 62.5%
+  / 64.6%), zealot 58% / 71% (F: 56% / 65%); both beat the strategist
+  (15–19%).
+* **Zealot wins before t70:** 13 of 28 in A'z std (about half, as F found),
+  but only 3 of 34 in A'z fog (F: 9 of 31), 2 of 10 / 1 of 16 in CPz and 6
+  of 21 / 4 of 15 in MIX. The §9 trigger ("temple rush wins before about
+  T70") is met by the bot in standard games without opposition, not once a
+  spoiler or a second racer is in the field.
+* **The spoiler against a banker at target:** the banker reached B in 29 /
+  34 games (CPb std / fog) and its streak was reset by a spoiler capture
+  after that in 10 / 9 of them (34% / 26%; MIX 26% / 19%). F's 15–25% is at
+  the low end of this. A reset works when it lands: a banker at B whose
+  streak was reset won 10 of 40 such games (CPb and MIX pooled), one that
+  was never hit 51 of 86. The zealot: reset 9 of 54, not hit 53 of 114.
+* **Two bankers, no spoiler (BB):** a banker wins 88% at a median t68, and
+  only 5 / 4 streak resets happen in 48 games. With nobody assigned to
+  raid, nothing in the bot pool stops a banker.
+* **Two attackers on one streak holder never happened:** of 281 captures
+  of a streak holder's city in the 13 baseline runs, every battle there had
+  one attacker except one (MIX fog). The bots do not coordinate, so
+  leader suppression by a coalition cannot be measured with them.
+
+### City loss and the streaks (rules §11)
+
+`city_loss`: `reset` (today), `minus:3` (each city lost costs 3 streak
+turns), `held:10` (only a city held for 10 turns or more resets). Cell:
+economic / influence win %; banker or zealot wins after reaching the
+target; games with another winner or condition than today.
+
+| Run | today | minus:3 | held:10 |
+|---|---|---|---|
+| CPb std | 65 / 15; banker 11 of 29 | 62 / 15; 11 of 28; 1 differs | identical |
+| CPb fog | 67 / 23; banker 19 of 34 | 69 / 21; 20 of 34; 3 differ | identical |
+| CPz std | 27 / 62; zealot 10 of 46 | 17 / 73; 15 of 46; 5 differ | identical (1 reset fewer) |
+| CPz fog | 17 / 75; zealot 16 of 48 | 17 / 75; 18 of 48; 2 differ | identical |
+| MIX std | 35 / 50; banker 14 of 31, zealot 21 of 36 | 35 / 54; 14 of 30, 22 of 36; 3 differ | identical |
+| MIX fog | 35 / 52; banker 17 of 32, zealot 15 of 38 | 38 / 50; 18 of 31, 15 of 38; 2 differ | identical |
+| other 7 runs | — | 0 differ | 0 differ |
+
+* Over the 13 runs today's rule made 271 streak resets (per condition)
+  through 281 captures of a streak holder's city. `minus:3` turned 95 of
+  them into setbacks and changed 16 of 624 games. Where it shows, it helps
+  the zealot: a zealot whose streak was hit after reaching L won 9 of 54
+  games today and 18 of 54 under `minus:3` (banker 10 of 40 and 12 of 40).
+  It weakens the one counter the spoiler has, and it removes nothing the
+  bots were stuck on.
+* `held:10` changed no game. Only 2 of the 281 captured cities had been
+  held for less than 10 turns (206 for 60 turns or more): bots raid old
+  cities, and a streak holder almost never takes a new one (85 of 1096
+  streak holders gained a city while on a streak, 0–13% per run; the
+  banker and zealot stop expanding by design). So "a marginal city near
+  victory is a liability" is not observable with bots: the 2 resets
+  caused by a city held under 10 turns are the whole effect. Whether LLM
+  leaders avoid new cities near victory, or rivals hand them throwaway
+  cities to reset, needs LLM games.
+
+### Combat: allied pooling and symmetric ties (DESIGN §7)
+
+`pool_allies`: in a battle of three or more sides, the sides (other than
+the city owner) that face exactly the same hostile sides form one
+coalition: summed raw power in the queue, summed combat power (each member
+with its own terrain bonus and counters) in duels, defender if any member
+is; it is queued by its first member's tie-break key, so the rotating order
+still decides equal coalitions. A beaten coalition loses everything; a
+winning one takes the Lanchester losses of its pooled units, shared out in
+proportion to the units each member brought (floor, then largest
+remainder, ties to the member earlier in the queue). The city owner
+(garrison, walls, archer bonus) never pools; its allies in the city fight
+as separate sides, as today. Two allied stacks of 6 infantry against 10:
+today both lose and 5 of the 10 survive; pooled they win like one stack of
+12 (7 left, 3 + 4). `symmetric_ties`: three or more pairwise-hostile sides
+tied at the lowest raw power, of the same defender status, none a city
+owner and equal in combat power in every pairing, are destroyed together
+(three equal attackers: nobody keeps units, whatever the seat order).
+No two-side battle changes under either switch (unit tests; with the
+switches forced on, the only failing existing combat tests are the 3-side
+ones that pin today's queue order).
+
+| | today | pool_allies | symmetric_ties |
+|---|---|---|---|
+| Battles with 3+ sides (624 games) | 4 | 9 (11 runs counted) | — |
+| Coalition duels / simultaneous ties | — | 6 | not counted |
+| Games with another result | — | 2 (F1 std) | 0 |
+| Conquest share, battles/g, captures/g | unchanged in every run | unchanged | unchanged |
+
+Bots almost never put three sides on one tile, and never two attackers on
+a streak holder (above), so neither variant can be judged on bot data:
+both are rules for LLM coalitions. The battery dropped below 50% during the
+counter re-run, so the `symmetric_ties` runs and two `pool_allies` runs
+(MIX) carry results but no 3+-side counters.
+
+### Relic contest
+
+Battles on / next to a relic: 4.1% / 9.6% in the §9 fields (unchanged
+since §9), 6.4% / 12.3% in the eight CP/BB/MIX runs and 3.9% / 8.7% in A'.
+The shares rise in the counterplay fields only because there are half as
+many battles (7.7 per game against 14.3); in absolute terms it is 1.4
+battles per game on or next to a relic against 2.0. Relic owner changes:
+4.0 per game (§9 fields), 3.9 (CP/BB/MIX), 4.0 (A'). The counterplay fields
+are parallel economic races: economic plus influence wins are 90% of their
+games (BB 97%), wonder 6%, conquest 5%. No relic variant was run.
+
+### Threshold sensitivity (not proposals)
+
+| Run | today | L 3000 | B 4000 | bank base 40 |
+|---|---|---|---|---|
+| CPz std | E 27 / I 62; zealot 21% | 38 / 46; zealot 33%, wins < t70 2 → 0 | | |
+| CPz fog | 17 / 75; zealot 33% | 25 / 71; zealot 48% | | |
+| MIX std | 35 / 50; zealot 44%, banker 29% | 33 / 56; zealot 52%, banker 27% | 25 / 62; banker 25% | 19 / 62; banker 19% |
+| MIX fog | 35 / 52; zealot 31%, banker 35% | 35 / 58; zealot 46%, banker 33% | 27 / 60; banker 25% | 31 / 50; banker 31% |
+| A'z std | 12 / 65; zealot 58%, wins < t70 13 | 15 / 60; zealot 56%, wins < t70 2 | | |
+| S fog | 31 / 65 | 62 / 29 | | |
+| F1 std | 65 / 12 | 71 / 6 | | |
+| CPb std | 65 / 15; banker 23% | | 38 / 48; banker 31% | 31 / 54; banker 31% |
+| CPb fog | 67 / 23; banker 40% | | 38 / 44; banker 25% | 33 / 54; banker 33% |
+| BB std | 96 / 2; bankers 88% | | 83 / 0; 81% | 83 / 4; 83% |
+| BB fog | 96 / 0; bankers 88% | | 88 / 6; 83% | 90 / 6; 88% |
+| A'b std | 62 / 8; banker 56% | | 60 / 6; 60% | 60 / 10; 60% |
+
+* L 3000 removes the early temple-rush wins (A'z std 13 → 2 before t70,
+  CPz and MIX 0) but not the zealot's share, which rises in all four
+  counterplay runs (by 8–16 points): a higher target delays the other
+  influence racers more than the temple rush. It also flips the all-strategist field (S fog
+  influence 65% → 29%).
+* B 4000 or a 40-gold base move economic wins to influence in the mixed
+  fields, but the banker's own share moves within noise in either
+  direction (CPb std 23 → 31%, CPb fog 40 → 25–33%) and not at all where
+  it already dominates (BB 81–88%, A'b 56 → 60%): the banker banks from
+  turn 6 whatever B is, and the other economic racers fall out first.
+
+### What the data supports
+
+* No change on bot data. The thresholds do not slow the specialist bots,
+  `held:10` is inert with bots, `minus:3` mainly makes raids on influence
+  leaders weaker, and the combat variants almost never trigger.
+* The bot pool still has no counter to an unopposed banker (BB): only a
+  bot assigned to raid makes resets happen. Counterplay questions
+  (coalitions against a leader, marginal cities near victory, early temple
+  rushes against human-like opposition) need LLM games; the variants are
+  ready for them offline.

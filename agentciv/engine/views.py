@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING
 from . import constants as C
 from . import deals as D
 from . import fog as F
-from .rules import claim_cost, rules_json, season, settle_cost, streak_deposit, thresholds
+from .rules import claim_cost, rules_json, season, settle_cost, streak_deposit
 
 if TYPE_CHECKING:  # pragma: no cover
     from .game import Game
@@ -216,7 +216,7 @@ def build_view(g: "Game", viewer: str | None, full: bool = False) -> dict:
         "messages": messages,
         "events": events,
         "victory": {
-            "thresholds": thresholds(n, g.max_turns) if n else {},
+            "thresholds": g.thresholds(n) if n else {},
             "result": dict(g.result) if g.result else None,
         },
         "costs": rules_json(),

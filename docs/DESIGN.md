@@ -671,6 +671,29 @@ All constants live in `agentciv/engine/constants.py`; after changing them run
 The engine is single-threaded, deterministic, and has no I/O. The server wraps
 it with a lock.
 
+### Experimental variants
+
+`GameConfig(variants={...})` switches on rule variants for offline balance
+experiments (`agentciv/engine/variants.py`; tournament
+`--variant key=value`; results in docs/BALANCE.md §10). The default is an
+empty dict: today's rules, unchanged. The server never sets variants, and
+the rules served to agents (docs/RULES.md, `rulesdoc`) do not describe them.
+None is adopted.
+
+* `city_loss`: `reset` (today: any city lost sets both streaks to 0),
+  `minus:N` (each city lost costs N streak turns; the turn end does not
+  count) or `held:N` (only a city held for at least N turns resets the
+  streaks).
+* `pool_allies`: in a battle of three or more sides, sides other than the
+  city owner that face exactly the same hostile sides fight as one
+  coalition: summed power, losses shared out in proportion to the units
+  each brought (largest remainder, ties to the earlier in the queue).
+* `symmetric_ties`: three or more pairwise-hostile sides tied at the lowest
+  raw power (same defender status, no city owner, equal power in every
+  pairing) are destroyed together instead of in queue order.
+* `bank_target`, `legacy_target`, `bank_base`: B, L and the per-turn bank
+  allowance before market halls (threshold sensitivity runs).
+
 ## 12. HTTP API (server)
 
 Base URL default `http://localhost:8765`. All bodies JSON. Auth for player
