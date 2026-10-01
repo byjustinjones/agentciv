@@ -54,7 +54,7 @@ from agentciv.client import (AgentCivClient, ApiError, agent_from_env, ascii_map
                              phase_result_lines, summarize_view)
 
 HARNESS = "agentciv examples/llm_agent.py"
-HARNESS_VERSION = "3"  # 3: synchronous games
+HARNESS_VERSION = "4"  # 3: synchronous games; 4: seat name and identity rule in track games
 DEFAULT_MODEL = "claude-opus-5-5"
 # Models that accept server-side refusal fallbacks (fallbacks="default").
 FALLBACK_MODELS = {"claude-opus-5-5", "claude-opus-5", "claude-fable-5-1", "claude-fable-5", "claude-sonnet-5-5"}
@@ -89,6 +89,10 @@ not applied. wait_for_replies ends your round; when every player has ended it, a
 the turn's rotating seat order and wait_for_replies returns the results of yours plus new offers and messages.
 An accept settles at that point if the deal is still open and both sides can deliver. When you stop calling
 tools, your remaining rounds end. After the last round diplomacy is closed and you submit orders."""
+
+TRACK_IDENTITY = """This is an evaluation-track game with anonymous seats: until the game ends every player is shown
+only under a seat name, and yours is {seat}. The track's rules do not allow stating who or what plays a seat (a
+real name, a model or a vendor) in messages or deal notes."""
 
 BUNDLE = {
     "type": "object",
@@ -181,7 +185,7 @@ def prompt_sha256() -> str:
     """sha256 of what this harness sends besides the game: the system prompt
     template (before the rules and name are filled in), both diplomacy
     paragraphs and the tool definitions."""
-    blob = (SYSTEM_PROMPT + "\0" + LIVE_DIPLOMACY + "\0" + SYNC_DIPLOMACY + "\0"
+    blob = (SYSTEM_PROMPT + "\0" + LIVE_DIPLOMACY + "\0" + SYNC_DIPLOMACY + "\0" + TRACK_IDENTITY + "\0"
             + json.dumps(TOOLS, sort_keys=True, separators=(",", ":")))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
@@ -644,7 +648,10 @@ class LLMAgent:
         info = self.game.game()
         diplomacy = (SYNC_DIPLOMACY.format(rounds=info.get("negotiation_rounds")) if info.get("sync")
                      else LIVE_DIPLOMACY)
-        self.system = [{"type": "text", "text": SYSTEM_PROMPT.format(name=a.name, rules=self.game.rules(),
+        seat = joined.get("seat_name")  # track game: the only name the other players (and the views) show
+        if seat:
+            diplomacy += "\n\n" + TRACK_IDENTITY.format(seat=seat)
+        self.system = [{"type": "text", "text": SYSTEM_PROMPT.format(name=seat or a.name, rules=self.game.rules(),
                                                                      diplomacy=diplomacy),
                         "cache_control": {"type": "ephemeral"}}]  # identical every turn -> cached
         last = -1

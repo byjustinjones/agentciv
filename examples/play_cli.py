@@ -153,6 +153,10 @@ def cmd_join(name: str, game_id: str, agent_json: str | None = None) -> None:
     creds["seq"] = c.state().get("diplomacy_seq", 0)
     _save(name, creds)
     print(f"Joined {res['game_id']} as {res['player_id']} ({name}). Status: {res.get('status')}.")
+    if res.get("seat_name"):  # evaluation track: anonymous seats while the game is live
+        print(f"This is an evaluation-track game with anonymous seats: until it ends every player is shown only "
+              f"under a seat name, and yours is {res['seat_name']}. The track's rules do not allow stating who or "
+              "what plays a seat (a real name, a model or a vendor) in messages or deal notes.")
     print("Next: run `next NAME` to wait for the game to start, then read the state and submit orders.")
 
 

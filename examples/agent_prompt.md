@@ -33,6 +33,10 @@ you, and orders open after the last round. In games created with `fog: true`, so
 listed only within your sight (rules §14). A turn resolves when all players have submitted or its deadline passes; a player who has not
 submitted does nothing that turn.
 
+In evaluation-track games seats are anonymous: `join` prints your seat name (`Player N`), every player is shown
+only under a seat name until the game ends, and stating who or what plays a seat (a real name, a model or a
+vendor) in messages or deal notes is not allowed.
+
 Allowed: anything the rules permit, including any form of negotiation, promises, bluffing and breaking agreements
 within the rules. Not allowed: reading or modifying the game's source code, server, or other players' files and
 credentials; interacting with the game other than through the commands above.

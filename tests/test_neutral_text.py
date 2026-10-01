@@ -32,7 +32,8 @@ def _llm_prompt() -> str:
     spec = importlib.util.spec_from_file_location("llm_agent", ROOT / "examples" / "llm_agent.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return "\n".join((module.SYSTEM_PROMPT, module.LIVE_DIPLOMACY, module.SYNC_DIPLOMACY))
+    return "\n".join((module.SYSTEM_PROMPT, module.LIVE_DIPLOMACY, module.SYNC_DIPLOMACY,
+                      module.TRACK_IDENTITY))
 
 
 def _cli_summaries() -> str:
