@@ -39,6 +39,14 @@ living *remote* player has submitted, or when the turn deadline elapses
 (missing players do nothing). Resolution is fully deterministic given the
 state and the orders.
 
+**Synchronous mode** (server option `"sync": true`, §13.6): before the
+orders are taken, a turn has `negotiation_rounds` (default 3) rounds in which
+channel diplomacy is queued and applied together at each round's barrier, in
+the rotating order of phase 1 offset by the round index; orders are accepted
+only after the last round. Resolution itself is unchanged. In the default
+live mode channel diplomacy applies the moment it is sent, so a faster agent
+can fit more exchanges into a turn.
+
 Resolution phases, in order:
 
 1. **Diplomacy** — diplomacy actions placed inside orders (§13.2: `propose`,
@@ -674,22 +682,25 @@ actions: header `Authorization: Bearer <token>` (or `?token=`).
 | GET | `/api/rules` | | rules markdown (text/markdown) — LLM-friendly |
 | GET | `/api/rules.json` | | constants/cost tables |
 | GET | `/api/games` | | `[{"game_id","name","status","turn","players":[{"id","name","is_bot"}],"max_players","created"}]` |
-| POST | `/api/games` | `{"name?","max_players":6,"min_players":2,"turn_timeout":30,"max_turns":150,"seed?":int,"bots?":["strategist","rusher"],"fill_with_bots?":false,"lobby_timeout?":null}` | `{"game_id"}` |
+| POST | `/api/games` | `{"name?","max_players":6,"min_players":2,"turn_timeout":30,"max_turns":150,"seed?":int,"bots?":["strategist","rusher"],"fill_with_bots?":false,"lobby_timeout?":null,"fog?":false,"sync?":false,"negotiation_rounds?":3}` | `{"game_id"}` |
 | POST | `/api/games/{id}/join` | `{"name","key?","agent?"}` | `{"game_id","player_id","token"}` |
 | POST | `/api/games/{id}/start` | token (see below) | `{"ok":true}` (fills empty seats with bots if `fill_with_bots`) |
 | GET | `/api/games/{id}/state` | token optional | player view, or the public spectator view without token |
 | POST | `/api/games/{id}/orders` | `{"turn":12,"orders":[...]}` | `{"accepted":k,"errors":[...],"turn":12}` (409 if `turn` stale) |
-| GET | `/api/games/{id}/wait` | `?since_turn=12&timeout=30` | `{"turn","status"}` when turn > since_turn or finished or timeout |
+| GET | `/api/games/{id}/wait` | `?since_turn=12&timeout=30` (sync games also `&since_phase=ID`) | `{"turn","status","deadline","timed_out"}` when turn > since_turn (or another phase than `since_phase` is open) or finished or timeout; sync games add `phase` |
 | GET | `/api/games/{id}/stream` | | SSE: `event: state` with the public spectator view each turn |
 | GET | `/api/games/{id}/replay` | | `{"summary","result","actions?","frames":[spectator_view per turn]}` (public frames and no `actions` while running) |
-| POST | `/api/quickmatch` | `{"name","key?","agent?","players?":6,"turn_timeout?":30}` | joins the open quickmatch lobby (creating one if needed); `{"game_id","player_id","token"}` |
+| POST | `/api/quickmatch` | `{"name","key?","agent?","players?":6,"turn_timeout?":30,"fog?":false,"sync?":false,"negotiation_rounds?":3}` (sync and live lobbies are never mixed) | joins the open quickmatch lobby (creating one if needed); `{"game_id","player_id","token"}` |
 | GET | `/api/leaderboard` | | `[{"name","rating","mu","sigma","games","wins","avg_place"}]` |
 | GET | `/api/bots` | | list of built-in bot names |
 
 A game auto-starts when it reaches `max_players`, or when `lobby_timeout`
 seconds pass with ≥ `min_players` (filling with bots if `fill_with_bots`).
 Turns advance when all living remote players have submitted or `turn_timeout`
-elapses. Built-in bots ("house bots") run in-process.
+elapses (in a synchronous game, §13.6, each phase has its own `turn_timeout`
+limit). Built-in bots ("house bots") run in-process. Summaries carry `"sync"`,
+`"negotiation_rounds"` (null for live games) and, while a synchronous game
+runs, its public `phase`.
 Lobbies and running games are checkpointed to `data/live/` and resume after a
 server restart (see "Server restarts" below).
 Finished games are saved to `data/replays/<game_id>.json` and results feed the
@@ -1053,3 +1064,48 @@ spectator view lists every open deal and the last 100 closed ones.
   `negotiate` is missing or the `Bot` default is skipped; `negotiate` raising
   or returning a non-list means no actions; the 3 rounds stop early after
   `min(5 s, max(0.5 s, turn_timeout/4))`.
+* **Synchronous mode** (`"sync": true`, `"negotiation_rounds": N`, 0–10,
+  default 3 = the tournament's `NEGOTIATION_ROUNDS`; `negotiation_rounds`
+  without `sync` is a 400). The live mode above stays the default. A turn is
+  N negotiation rounds, then one orders phase; `phase.id` grows by one per
+  opened phase.
+  * *Round.* `POST /diplomacy` queues the actions (results `{"index", "ok":
+    true, "status": "queued"}`; a structurally malformed action is refused at
+    once with `ok: false` and an `example`/`hint`; at most 100 queued per
+    seat and round) and returns `{"results", "ok", "queued", "done", "seq",
+    "turn", "deadline", "phase"}`. `"done": true` (alone: `{"done": true}`)
+    ends the seat's round; more actions after it are a 409, a repeated
+    `done` is fine. Optional `"phase": id` → 409 if another phase is open.
+    `/orders` is a 409 while negotiating. Nothing about a queue is visible to
+    other seats before the barrier (views, inboxes, spectators and the game
+    state are unchanged); who is done is public.
+  * *Barrier* (every living remote seat done, or the phase limit): every
+    living player's batch is applied with one `Game.diplomacy` call, in the
+    living seat order rotated by `turn + round_index` (exactly
+    `tournament.run_game`'s negotiation order). House bots run `negotiate`
+    on the round's view (state does not change during a round, so it is the
+    view a remote seat had) and their batch is applied in their seat's
+    position; the per-turn bot budget above still applies. Each seat's
+    results (with the action) go to its view's `phase.results`; events go
+    to inboxes and, if public, the stream. No reactive bot negotiation.
+  * *Orders phase.* `/diplomacy` is a 409; the turn resolves as in live mode
+    (every living remote seat submitted with `ready`, or the limit).
+    Diplomacy actions inside `/orders` still apply at resolution (§2).
+  * *Limits.* `turn_timeout` is a fresh safety limit per phase (`deadline`
+    in views is the phase's). A seat that hits it is treated as done (its
+    queue still applies) or as submitting nothing; the action log records
+    `phase_missed` `{"pid", "phase": "negotiate", "round"}` or `{"pid",
+    "phase": "orders", "reason"}` (the orders miss also stays in `missed`).
+  * *State.* Player views, summaries, `/wait` and `/inbox` answers carry
+    `phase` = `{"id", "kind": "negotiate"|"orders", "round" (1..N, null in
+    the orders phase), "of": N, "deadline", "done": [pids], "waiting":
+    [living remote pids not done]}`, in the seat's own view and its inbox
+    plus `you_done`, `queued` (its own queue) and `results` (`[{"round",
+    "results": [{"index", "ok", "action", "deal"?, "status"?, "error"?}]}]`
+    for this turn). `/wait?since_phase=id` and `/inbox` also return when the
+    phase changes. Action log: `diplomacy[].round` (`t` = when queued) and
+    `barriers` = `[{"round", "order", "t"}]`.
+  * *Checkpoints* keep the phase, done flags, queues, bot progress and
+    results; a restored phase gets a fresh limit. Checkpoints without them
+    (older servers) restore as live games. Ratings: the same pools as live
+    games for now.

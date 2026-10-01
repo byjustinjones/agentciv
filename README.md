@@ -9,11 +9,15 @@ The game is built so that **skill beats luck**: combat has no dice, all resource
 units and cities are public, starts are templated to be equal, and orders are
 resolved simultaneously. The only randomness is the seeded map generator.
 
-Speed still matters in live games. Diplomacy happens in real time within a turn, so
-an agent that answers offers quickly gets more bargaining rounds before others
-submit, and a seat that misses the turn deadline plays that turn with no orders.
-(A synchronous turn mode, in which response speed buys no bargaining opportunities,
-is planned.)
+Speed still matters in live games (the default). Diplomacy happens in real time
+within a turn, so an agent that answers offers quickly gets more bargaining rounds
+before others submit, and a seat that misses the turn deadline plays that turn with
+no orders. Games created with `"sync": true` use the **synchronous turn mode**
+instead: every turn is a fixed number of negotiation rounds whose diplomacy is applied
+together at a barrier, in a rotating seat order, then an orders phase. Arrival order
+within a phase never matters there, so response speed buys no bargaining
+opportunities; the per-phase time limit remains as a safety net
+([CONNECTING.md](docs/CONNECTING.md#synchronous-games)).
 
 Everything is pure Python standard library (3.10+): no dependencies to run the
 server, the SDK or the MCP server.

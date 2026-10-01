@@ -10,10 +10,19 @@ command only needs your player name.
     python examples/play_cli.py state  NAME [--compact]  # summary of your view
     python examples/play_cli.py map    NAME              # ASCII map
     python examples/play_cli.py orders NAME '<json list of orders>'
-    python examples/play_cli.py deal   NAME '<json list of diplomacy actions>' [--force]
+    python examples/play_cli.py deal   NAME '<json list of diplomacy actions>' [--force] [--done]
+    python examples/play_cli.py done   NAME              # synchronous games: end your negotiation round
     python examples/play_cli.py inbox  NAME [SECONDS] [--all]  # new items; --all: full history
-    python examples/play_cli.py next   NAME [--compact]  # wait for the next turn, then print state
+    python examples/play_cli.py next   NAME [--compact]  # wait for the next turn (or phase), then print state
     python examples/play_cli.py rules                    # full rules (markdown)
+
+Synchronous games (created with "sync": true; the state shows a SYNCHRONOUS
+TURN line): each turn is a few negotiation rounds, then an orders phase.
+In a negotiation round `deal` queues actions; they are applied when every
+seat has ended the round (`done`, or `deal ... --done`), in the turn's
+rotating seat order, and `next` then shows their results. `next` in a round
+you have already looked at ends that round for you and waits for the next
+phase. In the orders phase diplomacy is closed and `orders` is open.
 
 When some orders are rejected or market sequencing warnings occur,
 the turn is held open for ``$AGENTCIV_FIX_WINDOW``
@@ -115,6 +124,8 @@ def _print_state(c: AgentCivClient, name: str, creds: dict, compact: bool = Fals
     creds["summary_snapshot"] = snapshot
     if view.get("status") == "running":
         creds["seen_turn"] = view.get("turn")
+        if view.get("phase"):
+            creds["seen_phase"] = view["phase"].get("id")
     _save(name, creds)
     alerts = view_alerts(view, c.player_id)
     if alerts:
@@ -163,6 +174,11 @@ def cmd_orders(name: str, text: str) -> None:
         if not res.get("errors") and not sequencing:
             res = c.submit_orders(orders, turn=turn)
     except ApiError as e:
+        phase = (e.body or {}).get("phase") if isinstance(e.body, dict) else None
+        if e.status == 409 and phase and phase.get("kind") == "negotiate":
+            sys.exit(f"NOT APPLIED: orders open after the negotiation rounds (now: round {phase.get('round')} of "
+                     f"{phase.get('of')}). End the round with `done {name}` (or `next {name}`), then submit "
+                     "orders in the orders phase.")
         if e.status == 409 and "stale turn" in e.message:
             sys.exit(f"NOT APPLIED: these orders were for turn {turn}, which has already resolved "
                      f"(current turn: {e.body.get('turn')}). Run `state` (or `next`) and submit orders "
@@ -221,8 +237,8 @@ def cmd_release(name: str, stamp: str) -> None:
         pass  # the turn already resolved
 
 
-def cmd_deal(name: str, text: str, force: bool = False) -> None:
-    c, _ = _client(name)
+def cmd_deal(name: str, text: str, force: bool = False, done: bool = False) -> None:
+    c, creds = _client(name)
     actions = _parse_json(text)
     for i, action in enumerate(actions):
         if (isinstance(action, dict) and action.get("type") in ("propose", "counter", "reject")
@@ -246,13 +262,56 @@ def cmd_deal(name: str, text: str, force: bool = False) -> None:
             print("NOT SENT: these actions have projected contract shortfalls; `deal NAME '<json>' --force` "
                   "sends them despite these warnings.")
             return
-    res = c.diplomacy(actions)
+    try:
+        if done or creds.get("seen_phase") is not None:  # synchronous game
+            res = c.diplomacy(actions, done=True if done else None, phase=creds.get("seen_phase"))
+        else:
+            res = c.diplomacy(actions)
+    except ApiError as e:
+        _sync_refusal(name, e)
+        raise
     for r in res.get("results", []):
-        if r.get("ok"):
+        if r.get("ok") and r.get("status") == "queued":
+            print(f"  #{r.get('index')} queued")
+        elif r.get("ok"):
             extra = {k: v for k, v in r.items() if k not in ("index", "ok")}
             print(f"  #{r.get('index')} ok {json.dumps(extra)}")
         else:
             print(f"  #{r.get('index')} FAILED: {r.get('error')}")
+            if r.get("example") is not None:
+                print(f"    example: {json.dumps(r['example'])}")
+    phase = res.get("phase")
+    if phase:
+        print(f"Queued for the end of negotiation round {phase.get('round')} of {phase.get('of')} "
+              f"({res.get('queued')} action(s) in your queue). " +
+              (f"You have ended this round; run `next {name}` for the results." if res.get("done") else
+               f"End the round with `done {name}` (or `next {name}`) when you have nothing more to send."))
+
+
+def _sync_refusal(name: str, e: ApiError) -> None:
+    """Exit with a plain explanation of a synchronous game's 409 (stale or closed phase)."""
+    phase = (e.body or {}).get("phase") if isinstance(e.body, dict) else None
+    if e.status != 409 or not phase:
+        return
+    if phase.get("kind") == "orders":
+        sys.exit(f"NOT SENT: diplomacy is closed in the orders phase of this synchronous turn. Submit orders "
+                 f"(`orders {name} ...`); negotiation reopens next turn.")
+    if "stale phase" in e.message:
+        sys.exit(f"NOT SENT: the round you looked at has ended (now: round {phase.get('round')} of "
+                 f"{phase.get('of')}). Run `state {name}` or `next {name}` first.")
+    sys.exit(f"NOT SENT: {e.message}")
+
+
+def cmd_done(name: str) -> None:
+    c, creds = _client(name)
+    try:
+        res = c.end_round(phase=creds.get("seen_phase"))
+    except ApiError as e:
+        _sync_refusal(name, e)
+        raise
+    phase = res.get("phase") or {}
+    print(f"Ended negotiation round {phase.get('round')} of {phase.get('of')} with {res.get('queued')} queued "
+          f"action(s). Waiting for: {', '.join(phase.get('waiting') or []) or 'nobody'}. Run `next {name}`.")
 
 
 def cmd_inbox(name: str, seconds: float = 0.0, all_history: bool = False) -> None:
@@ -287,11 +346,14 @@ def _print_eliminated(view: dict, pid: str) -> bool:
 def cmd_next(name: str, compact: bool = False) -> None:
     """Wait until there is a turn you have not submitted orders for yet (or the
     game is over), then print the state. Never skips a turn: if the turn you
-    acted on already resolved, it returns at once."""
+    acted on already resolved, it returns at once. Synchronous games: also
+    returns at every negotiation round you have not looked at yet; in one you
+    have looked at, it ends the round for you first."""
     c, creds = _client(name)
     acted = creds.get("acted_turn", -1)
     deadline = time.time() + 900
     replayed = False
+    ended = None
     while time.time() < deadline:
         view = c.state()
         if _print_eliminated(view, c.player_id):
@@ -299,25 +361,59 @@ def cmd_next(name: str, compact: bool = False) -> None:
         status = view.get("status")
         turn = view.get("turn", 0)
         you = view.get("you") or {}
-        if status == "finished" or (status == "running" and turn > acted):
+        phase = view.get("phase") if status == "running" else None
+        if status == "finished" or (status == "running" and turn > acted and not
+                                    (phase and phase.get("kind") == "negotiate")):
             break
-        if status == "running" and you.get("alive", True) and you.get("submitted") is False:
+        if status == "running" and turn <= acted and you.get("alive", True) and you.get("submitted") is False:
             # turn <= acted but no orders on the server: it restarted from a checkpoint taken before
             # them, so this turn is being played again
             replayed = True
             creds["acted_turn"] = turn - 1
             _save(name, creds)
             break
+        if phase and phase.get("kind") == "negotiate":
+            if not phase.get("you_done"):
+                if phase.get("id") != creds.get("seen_phase"):
+                    break  # a round you have not seen yet
+                try:
+                    c.end_round(phase=phase.get("id"))
+                    ended = phase.get("round")
+                except ApiError as e:
+                    if e.status != 409:
+                        raise
+            c.wait(since_phase=phase.get("id"), timeout=60)
+            continue
         if status == "lobby":
             time.sleep(2)
+        elif phase:
+            c.wait(since_phase=phase.get("id"), timeout=60)
         else:
             c.wait(since_turn=turn, timeout=60)
+    if ended is not None:
+        print(f"(Ended your negotiation round {ended}.)\n")
     if replayed:
         print(f"Note: the server restarted and turn {view.get('turn')} is being played again; your orders "
               "for it were lost. Submit them again.\n")
     view = _print_state(c, name, creds, compact, view)
     if view.get("status") == "finished":
         print("\nGAME OVER:", json.dumps(view.get("victory", {}).get("result")))
+    elif view.get("phase"):
+        _print_new_diplomacy(c, name, creds)
+
+
+def _print_new_diplomacy(c: AgentCivClient, name: str, creds: dict) -> None:
+    """Synchronous games: what the last barrier delivered to you (inbox items since the last look)."""
+    if "seq" not in creds:
+        return
+    res = c.inbox(since=creds["seq"], timeout=0)
+    creds["seq"] = res.get("seq", creds["seq"])
+    _save(name, creds)
+    items = res.get("items") or []
+    if items:
+        print("\nNEW DIPLOMACY:")
+        for ev in items:
+            print("  " + describe_event(ev, c.player_id))
 
 
 def main(argv: list[str]) -> None:
@@ -349,8 +445,10 @@ def main(argv: list[str]) -> None:
         elif cmd == "orders":
             cmd_orders(args[0], args[1])
         elif cmd == "deal":
-            rest = [arg for arg in args[1:] if arg != "--force"]
-            cmd_deal(args[0], rest[0], "--force" in args[1:])
+            rest = [arg for arg in args[1:] if arg not in ("--force", "--done")]
+            cmd_deal(args[0], rest[0], "--force" in args[1:], "--done" in args[1:])
+        elif cmd == "done":
+            cmd_done(args[0])
         elif cmd == "inbox":
             rest = [arg for arg in args[1:] if arg != "--all"]
             cmd_inbox(args[0], float(rest[0]) if rest else 0.0, "--all" in args[1:])

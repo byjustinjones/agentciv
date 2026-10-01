@@ -67,6 +67,7 @@ NEGOTIATION_BUDGET = 5.0         # max seconds of those rounds per turn (later r
 NEGOTIATE_DEBOUNCE = 0.25        # a house bot answers this long after something is addressed to it ...
 NEGOTIATE_DEBOUNCE_MAX = 1.0     # ... (the timer restarts on new items, but never beyond this)
 REACTIVE_PER_TURN = 10           # mid-turn (reactive) negotiations per house bot per turn
+MAX_NEGOTIATION_ROUNDS = 10      # synchronous games: most negotiation rounds a turn may have
 
 # Ratings: only games played under standard, server-controlled conditions feed the leaderboard.
 MAX_RATED_TURN_TIMEOUT = 300.0   # rated games need a real deadline, so a losing player can't stall forever
@@ -256,6 +257,7 @@ def parse_game_options(body: dict) -> dict:
         seed = _number(body, "seed", 0, -(2 ** 63), 2 ** 63, integer=True)
     lobby_timeout = _number(body, "lobby_timeout", None, 0, MAX_TIMEOUT, allow_none=True)
     turn_delay = _number(body, "turn_delay", None, 0, 60, allow_none=True)
+    sync, rounds = _sync_options(body)
     return {
         "name": name,
         "max_players": max_players,
@@ -271,7 +273,20 @@ def parse_game_options(body: dict) -> dict:
         "fog": _bool(body, "fog", False),
         "quickmatch": False,
         "seed_given": seed_given,
+        "sync": sync,
+        "negotiation_rounds": rounds,
     }
+
+
+def _sync_options(body: dict) -> tuple[bool, int | None]:
+    """``sync`` (bool, default false) and ``negotiation_rounds`` (0-10, default
+    3; only valid with ``sync``) of a create/quickmatch body (docs/DESIGN.md §13.6)."""
+    sync = _bool(body, "sync", False)
+    if not sync:
+        if body.get("negotiation_rounds") is not None:
+            raise ApiError(400, "negotiation_rounds is only valid with \"sync\": true")
+        return False, None
+    return True, _number(body, "negotiation_rounds", NEGOTIATION_ROUNDS, 0, MAX_NEGOTIATION_ROUNDS, integer=True)
 
 
 def unrated_reason(opts: dict) -> str | None:
@@ -383,7 +398,17 @@ class GameSession:
         self._deadline_mono: float | None = None
         self._bots_done = True
         self._public_dip = 0          # bumped when public diplomacy happens mid-turn (pushes an SSE frame)
-        self._thread = threading.Thread(target=self._run, name=f"game-{game_id}", daemon=True)
+        # synchronous turn mode (docs/DESIGN.md §13.6): N negotiation rounds, then an orders phase
+        self._sync = bool(opts.get("sync"))
+        self._rounds = int(opts.get("negotiation_rounds") or 0) if self._sync else 0
+        self._phase_index = 0          # 0..rounds-1: negotiation round index+1; == rounds: orders phase
+        self._phase_id = 0             # bumped whenever a phase opens (clients wait on it)
+        self._done: set[str] = set()   # remote seats that ended the current negotiation round
+        self._queued: dict[str, list] = {}       # pid -> [[action, t], ...] queued this round
+        self._bots_queued: set[str] = set()      # house bots whose batch for this round is queued
+        self._sync_results: dict[str, list] = {}  # pid -> [{"round", "results"}] of this turn's barriers
+        self._neg_spent = 0.0          # seconds of house-bot negotiate() this turn (NEGOTIATION_BUDGET)
+        self._thread =threading.Thread(target=self._run, name=f"game-{game_id}", daemon=True)
         # checkpoints (see checkpoint())
         self._ckpt_io = threading.Lock()   # serialises checkpoint writes; taken before (never inside) self.lock
         self._ckpt_dirty = True            # state changed since the last checkpoint
@@ -515,9 +540,8 @@ class GameSession:
         self._begin_turn()
         self._record_frame()
 
-    def _begin_turn(self) -> None:
-        now = time.monotonic()
-        self._turn_started = now
+    def _set_deadline(self, now: float) -> None:
+        """A fresh limit of ``turn_timeout`` seconds from ``now`` (per turn; per phase in sync games)."""
         tt = self.opts["turn_timeout"]
         if tt > 0:
             self._deadline_mono = now + tt
@@ -525,13 +549,156 @@ class GameSession:
         else:
             self._deadline_mono = None
             self.game.deadline = None
+
+    def _begin_turn(self) -> None:
+        now = time.monotonic()
+        self._turn_started = now
+        self._set_deadline(now)
         alive = set(self.game.alive_players())
         self._bots_done = not any(s.is_bot and s.pid in alive for s in self.seats.values())
         for s in self.seats.values():
             s.draft, s.error_at = False, None
             s.nudge_due = s.nudge_first = None
             s.reactive = 0
+        if self._sync:
+            self._sync_results = {}
+            self._neg_spent = 0.0
+            self._open_phase(0)
         self._touch()
+
+    # ------------------------------------------------------------ synchronous turns (§13.6)
+    def _negotiating(self) -> bool:
+        """A synchronous game in one of its negotiation rounds (under the lock)."""
+        return self._sync and self._phase_index < self._rounds
+
+    def _open_phase(self, index: int) -> None:
+        """Open negotiation round ``index`` (0-based) or, at ``index ==
+        rounds``, the orders phase: fresh limit, nobody done, nothing queued."""
+        now = time.monotonic()
+        self._phase_index = index
+        self._phase_id += 1
+        self._done = set()
+        self._queued = {}
+        self._bots_queued = set()
+        self._set_deadline(now)
+        alive = set(self.game.alive_players())
+        if index < self._rounds:
+            self._bots_done = not any(s.is_bot and s.pid in alive and s.bot is not None
+                                      and _negotiator(s.bot) is not None for s in self.seats.values())
+        else:
+            self._bots_done = not any(s.is_bot and s.pid in alive for s in self.seats.values())
+        self._touch()
+
+    def _sync_current(self, turn: int, phase_id: int) -> bool:
+        return self.game.status == "running" and self.game.turn == turn and self._phase_id == phase_id
+
+    def _round_wait(self) -> float:
+        """Seconds until the current negotiation round's barrier (<= 0: now).
+        House bots are not waited for here (``_bots_done``)."""
+        if all(s.pid in self._done for s in self._living_remote()):
+            return 0.0
+        if self._deadline_mono is not None:
+            return self._deadline_mono - time.monotonic()
+        return math.inf
+
+    def _barrier_order(self) -> list[str]:
+        """Living players in seat order rotated by turn + round index, as
+        :func:`agentciv.tournament.run_game` negotiates."""
+        alive = self.game.alive_players()
+        if not alive:
+            return []
+        k = (self.game.turn + self._phase_index) % len(alive)
+        return alive[k:] + alive[:k]
+
+    def _sync_barrier(self) -> None:
+        """End the current negotiation round (under the lock): apply every
+        queued batch in the rotating order, record the results for their
+        seats and the action log, then open the next phase."""
+        g = self.game
+        rnd = self._phase_index + 1
+        clock = self._turn_clock()
+        for s in self._living_remote():
+            if s.pid not in self._done:  # hit the limit: treated as done (its queued actions still apply)
+                self.actions.phase_missed(g.turn, s.pid, "negotiate", round_=rnd)
+        order = self._barrier_order()
+        seq0 = g.diplomacy_seq
+        for pid in order:
+            batch = self._queued.get(pid)
+            if not batch:
+                continue
+            actions = [a for a, _ in batch]
+            results = g.diplomacy(pid, actions)
+            for r in results:
+                i = r.get("index", -1)
+                if not r.get("ok") and isinstance(i, int) and 0 <= i < len(actions):
+                    r.update({k: v for k, v in _action_hint(actions[i]).items() if k not in r})
+            self.actions.diplomacy(g.turn, pid, actions, results, clock, ts=[t for _, t in batch], round_=rnd)
+            shown = []
+            for r in results:
+                i = r.get("index", -1)
+                item = dict(r)
+                if isinstance(i, int) and 0 <= i < len(actions):
+                    item["action"] = actions[i]
+                shown.append(item)
+            self._sync_results.setdefault(pid, []).append({"round": rnd, "results": shown})
+        self.actions.barrier(g.turn, rnd, order, clock)
+        if g.diplomacy_seq != seq0 and any(ev.get("_vis") is None for ev in self._dip_events(seq0)):
+            self._public_dip += 1
+        self._open_phase(self._phase_index + 1)
+
+    def _phase_view(self, pid: str | None = None) -> dict:
+        """The ``phase`` object of views, summaries and long-poll answers.
+        Other seats' queued actions are never shown, only who is done."""
+        g = self.game
+        negotiate = self._phase_index < self._rounds
+        alive = g.alive_players()
+        if negotiate:
+            done = [p for p in alive if p in self._done or p in self._bots_queued
+                    or (self._bots_done and self.seats.get(p) is not None and self.seats[p].is_bot)]
+        else:
+            done = [p for p in alive if (s := self.seats.get(p)) is not None
+                    and ((s.is_bot and self._bots_done) or (not s.is_bot and g.has_submitted(p) and not s.draft))]
+        out = {"id": self._phase_id, "kind": "negotiate" if negotiate else "orders",
+               "round": self._phase_index + 1 if negotiate else None, "of": self._rounds,
+               "deadline": g.deadline, "done": done,
+               "waiting": [s.pid for s in self._living_remote() if s.pid not in done]}
+        if pid is not None:
+            out["you_done"] = pid in done
+            out["queued"] = [a for a, _ in self._queued.get(pid, [])]
+            out["results"] = list(self._sync_results.get(pid, []))
+        return out
+
+    def _sync_bots_negotiate(self, turn: int, phase_id: int) -> None:
+        """House bots' batches for the current negotiation round. Each bot
+        sees the same (unchanging) state a remote seat sees during the round;
+        its batch is queued and applied at the barrier in its seat's turn."""
+        with self.cond:
+            if not self._sync_current(turn, phase_id):
+                return
+            work = [(s, _negotiator(s.bot)) for s in self._bot_seats(turn) if s.pid not in self._bots_queued]
+        budget = self._negotiation_budget()
+        for seat, fn in work:
+            actions: list = []
+            if fn is not None and self._neg_spent < budget:
+                with self.cond:
+                    if not self._sync_current(turn, phase_id):
+                        return
+                    view = self.game.player_view(seat.pid) if self._current(turn, seat) else None
+                if view is not None:
+                    t0 = time.monotonic()
+                    actions = self._bot_negotiate(seat, fn, view)
+                    self._neg_spent += time.monotonic() - t0
+            with self.cond:
+                if not self._sync_current(turn, phase_id):
+                    return
+                if actions:
+                    t = self._turn_clock()
+                    self._queued[seat.pid] = [[a, t] for a in actions]
+                self._bots_queued.add(seat.pid)
+        with self.cond:
+            if self._sync_current(turn, phase_id):
+                self._bots_done = True
+                self._touch()
 
     def _record_frame(self) -> None:
         if self.frames is not None:
@@ -595,6 +762,9 @@ class GameSession:
                 missed[s.pid] = "no_orders"
             elif s.draft:
                 missed[s.pid] = "draft"
+        if self._sync:
+            for pid, reason in missed.items():
+                self.actions.phase_missed(g.turn, pid, "orders", reason=reason)
         self.actions.end_turn(g.turn, "deadline" if missed else "all_ready", missed)
 
     def _advance(self) -> None:
@@ -631,7 +801,19 @@ class GameSession:
                 if self.status == "finished":
                     break
                 turn = self.game.turn
-                if not self._bots_done:
+                if self._negotiating():
+                    # synchronous game, negotiation round: house bots queue their batch, then the
+                    # barrier waits for every living remote seat to be done (or the phase limit)
+                    if not self._bots_done:
+                        job = ("negotiate", not self._living_remote(), self._phase_id)
+                    else:
+                        wait = self._round_wait()
+                        if wait <= 0:
+                            self._sync_barrier()
+                            continue
+                        self.cond.wait(max(0.0, min(wait, 1.0, self._ckpt_wait())))
+                        continue
+                elif not self._bots_done:
                     job = ("turn", not self._living_remote())
                 else:
                     due = self._take_due_nudges()
@@ -654,7 +836,13 @@ class GameSession:
                             continue
             # house bots think outside the lock so state requests stay fast; bot-only games share a
             # few compute slots so a pile of them can't starve the API and games with remote players
-            if job[0] == "turn":
+            if job[0] == "negotiate":
+                if job[1]:
+                    with self.manager.bot_slots:
+                        self._sync_bots_negotiate(turn, job[2])
+                else:
+                    self._sync_bots_negotiate(turn, job[2])
+            elif job[0] == "turn":
                 if job[1]:
                     with self.manager.bot_slots:
                         self._house_turn(turn)
@@ -684,10 +872,12 @@ class GameSession:
     def _house_turn(self, turn: int) -> None:
         """A turn's work for the house bots: NEGOTIATION_ROUNDS rounds of
         ``negotiate`` (each bot, in rotating seat order, sees a fresh view and
-        its actions apply at once), then ``act`` on fresh views."""
+        its actions apply at once), then ``act`` on fresh views. In a
+        synchronous game the bots negotiated in the rounds (see
+        :meth:`_sync_bots_negotiate`); this is its orders phase: ``act`` only."""
         with self.cond:
             order = self._bot_seats(turn)
-            negotiators = [(s, fn) for s in order if (fn := _negotiator(s.bot)) is not None]
+            negotiators = [] if self._sync else [(s, fn) for s in order if (fn := _negotiator(s.bot)) is not None]
         t0 = time.monotonic()
         budget = self._negotiation_budget()
         for _ in range(NEGOTIATION_ROUNDS if negotiators else 0):
@@ -849,14 +1039,23 @@ class GameSession:
         return results
 
     def diplomacy(self, pid: str, body) -> dict:
-        """``POST /diplomacy``: apply actions immediately (§13.2)."""
+        """``POST /diplomacy``: apply actions immediately (§13.2). In a
+        synchronous game they are queued for the round's barrier instead,
+        and ``"done": true`` ends the seat's negotiation round (§13.6)."""
         turn = None
+        done, phase = False, None
+        if self._sync and isinstance(body, dict):
+            done = _bool(body, "done", False)
+            if body.get("phase") is not None:
+                phase = _number(body, "phase", None, 0, 10 ** 12, integer=True)
         if isinstance(body, list):
             actions = body
         elif isinstance(body, dict) and "actions" in body:
             actions, turn = body["actions"], body.get("turn")
         elif isinstance(body, dict) and "type" in body:
             actions = [body]
+        elif self._sync and isinstance(body, dict) and "done" in body:
+            actions, turn = [], body.get("turn")
         else:
             raise ApiError(400, "body must be {\"actions\": [...]} (e.g. {\"actions\": [{\"type\": \"propose\", "
                                 "\"to\": \"p2\", \"give\": {\"wood\": 60}, \"get\": {\"gold\": 45}}]})")
@@ -879,6 +1078,8 @@ class GameSession:
             if p is None or not p.alive:
                 raise ApiError(409, "you have been eliminated", turn=g.turn, status=g.status)
             self._check_stopping()
+            if self._sync:
+                return self._queue_diplomacy(pid, actions, done, phase)
             results = self._apply_diplomacy(pid, actions)
             for r in results:  # malformed actions get a correctly shaped example (like rejected orders)
                 i = r.get("index", -1)
@@ -886,6 +1087,50 @@ class GameSession:
                     r.update({k: v for k, v in _action_hint(actions[i]).items() if k not in r})
             return {"results": results, "ok": all(r.get("ok") for r in results), "seq": g.diplomacy_seq,
                     "turn": g.turn, "deadline": g.deadline}
+
+    def _queue_diplomacy(self, pid: str, actions: list, done: bool, phase: int | None) -> dict:
+        """Synchronous game: queue ``actions`` for this round's barrier (under
+        the lock). Malformed actions are refused at once; everything else is
+        checked when it is applied. ``done`` ends the seat's round."""
+        g = self.game
+        if phase is not None and phase != self._phase_id:
+            raise ApiError(409, f"stale phase {phase}: the current phase is {self._phase_id} (read your state)",
+                           turn=g.turn, status=g.status, phase=self._phase_view(pid))
+        if not self._negotiating():
+            raise ApiError(409, "diplomacy is closed: this synchronous game is in its orders phase; submit your "
+                                "orders (POST /orders). Negotiation reopens next turn.",
+                           turn=g.turn, status=g.status, phase=self._phase_view(pid))
+        rnd = self._phase_index + 1
+        if pid in self._done:
+            if actions:
+                raise ApiError(409, f"you already ended negotiation round {rnd}; wait for the next phase "
+                                    f"(GET /wait?since_phase={self._phase_id})",
+                               turn=g.turn, status=g.status, phase=self._phase_view(pid))
+        queue = self._queued.setdefault(pid, [])
+        results = []
+        t = self._turn_clock()
+        for i, action in enumerate(actions):
+            try:
+                parse_action(action, g.width, g.height)
+            except DealError as e:
+                r = {"index": i, "ok": False, "error": str(e)}
+                r.update({k: v for k, v in _action_hint(action).items() if k not in r})
+                results.append(r)
+                continue
+            if len(queue) >= C.MAX_ACTIONS_PER_CALL:
+                results.append({"index": i, "ok": False,
+                                "error": f"at most {C.MAX_ACTIONS_PER_CALL} actions can be queued per round"})
+                continue
+            queue.append([action, t])
+            results.append({"index": i, "ok": True, "status": "queued"})
+        if not queue:
+            del self._queued[pid]
+        if done:
+            self._done.add(pid)
+        self._touch()
+        return {"results": results, "ok": all(r.get("ok") for r in results), "queued": len(queue),
+                "done": pid in self._done, "seq": g.diplomacy_seq, "turn": g.turn, "deadline": g.deadline,
+                "phase": self._phase_view(pid)}
 
     def inbox(self, pid: str, since: int | None, timeout: float, turn: int | None = None) -> dict:
         """``GET /inbox``: diplomacy events visible to ``pid`` with ``seq >
@@ -900,19 +1145,23 @@ class GameSession:
             # events the caller had already seen): deliver whatever happens from now on
             since = min(since, g.diplomacy_seq) if isinstance(since, int) else since
             turn0, status0 = (g.turn if turn is None else turn), g.status
+            phase0 = self._phase_id
             timed_out = False
             while True:
                 box = g.inbox(pid, since)
                 if (box["items"] or g.status != status0 or g.turn != turn0 or g.status == "finished"
-                        or self.manager.stopping or self.closed):
+                        or self.manager.stopping or self.closed or self._phase_id != phase0):
                     break
                 remaining = end - time.monotonic()
                 if remaining <= 0:
                     timed_out = True
                     break
                 self.cond.wait(remaining)
-            return {"seq": box["seq"], "items": box["items"], "turn": g.turn, "status": g.status,
-                    "deadline": g.deadline, "timed_out": timed_out}
+            out = {"seq": box["seq"], "items": box["items"], "turn": g.turn, "status": g.status,
+                   "deadline": g.deadline, "timed_out": timed_out}
+            if self._sync and g.status == "running":
+                out["phase"] = self._phase_view(pid)
+            return out
 
     def _bot_orders(self, seat: Seat, view: dict) -> list:
         t0 = time.monotonic()
@@ -1032,7 +1281,10 @@ class GameSession:
                 return self._spectator_bytes(full=full)
             cached = self._player_cache.get(pid)
             if cached is None or cached[0] != self.version:
-                cached = (self.version, _dumps(self.game.player_view(pid)))
+                view = self.game.player_view(pid)
+                if self._sync and self.game.status == "running":
+                    view["phase"] = self._phase_view(pid)
+                cached = (self.version, _dumps(view))
                 self._player_cache[pid] = cached
             return cached[1]
 
@@ -1090,10 +1342,14 @@ class GameSession:
                 "unrated_reason": self.opts.get("unrated_reason"),
                 "fog": bool(self.opts.get("fog", False)),
                 "rules_sha256": self.opts.get("rules_sha256"),
+                "sync": self._sync,
+                "negotiation_rounds": self._rounds if self._sync else None,
                 "deadline": g.deadline,
                 "result": dict(g.result) if g.result else None,
                 "frames": len(self.frames) if self.frames is not None else g.turn + 1,
             }
+            if self._sync and g.status == "running":
+                out["phase"] = self._phase_view()
             if g.status == "finished":
                 # the same summary whether the replay is served from memory or from the saved file
                 ranked = self._rated_entries()
@@ -1132,6 +1388,12 @@ class GameSession:
             if p is None or not p.alive:
                 raise ApiError(409, "you have been eliminated", turn=g.turn, status=g.status)
             self._check_stopping()
+            if self._negotiating():
+                raise ApiError(409, f"orders open after the negotiation rounds: this synchronous game is in "
+                                    f"negotiation round {self._phase_index + 1} of {self._rounds}. Queue diplomacy "
+                                    "(POST /diplomacy) and end the round with {\"done\": true}; then wait "
+                                    f"(GET /wait?since_phase={self._phase_id}).",
+                               turn=g.turn, status=g.status, phase=self._phase_view(pid))
             errors = g.submit_orders(pid, orders)
             self.actions.orders(g.turn, pid, orders, errors, ready, self._turn_clock())
             seat = self.seats.get(pid)
@@ -1155,23 +1417,33 @@ class GameSession:
                                "resubmit with \"ready\": true (the deadline still applies).")
             return out
 
-    def wait(self, since_turn: int | None, timeout: float) -> dict:
+    def wait(self, since_turn: int | None, timeout: float, since_phase: int | None = None) -> dict:
+        """``GET /wait``: until ``turn > since_turn`` (or, in a synchronous
+        game, ``since_phase`` given and another phase is open), the game
+        finishes or ``timeout`` passes."""
         end = time.monotonic() + timeout
         with self.cond:
             if since_turn is None:
                 since_turn = self.game.turn if self.status == "running" else -1
+            if not self._sync:
+                since_phase = None
             timed_out = False
             while not self.manager.stopping:
                 st = self.game.status
                 if st == "finished" or (st == "running" and self.game.turn > since_turn):
+                    break
+                if since_phase is not None and st == "running" and self._phase_id != since_phase:
                     break
                 remaining = end - time.monotonic()
                 if remaining <= 0:
                     timed_out = True
                     break
                 self.cond.wait(remaining)
-            return {"turn": self.game.turn, "status": self.game.status, "deadline": self.game.deadline,
-                    "timed_out": timed_out}
+            out = {"turn": self.game.turn, "status": self.game.status, "deadline": self.game.deadline,
+                   "timed_out": timed_out}
+            if self._sync and self.game.status == "running":
+                out["phase"] = self._phase_view()
+            return out
 
     def _stream_key(self) -> tuple:
         # remote players' submissions are part of the key so spectators see "submitted" live
@@ -1245,7 +1517,32 @@ class GameSession:
             "public_dip": self._public_dip,
             "frames": len(self.frames) if self.frames is not None else 0,
             "deadline": self.game.deadline,
+            **({"sync": self._sync_snapshot()} if self._sync else {}),
         }
+
+    def _sync_snapshot(self) -> dict:
+        return {"index": self._phase_index, "phase_id": self._phase_id, "done": sorted(self._done),
+                "queued": {pid: [[a, t] for a, t in q] for pid, q in self._queued.items()},
+                "bots_queued": sorted(self._bots_queued),
+                "results": {pid: list(r) for pid, r in self._sync_results.items()},
+                "neg_spent": self._neg_spent}
+
+    def _sync_restore(self, data) -> None:
+        """Phase state from a checkpoint (missing or unreadable: the turn's first phase, nothing queued)."""
+        data = data if isinstance(data, dict) else {}
+        try:
+            self._phase_index = max(0, min(int(data.get("index", 0)), self._rounds))
+            self._phase_id = int(data.get("phase_id", 0))
+            self._done = set(data.get("done") or [])
+            self._queued = {pid: [[a, float(t)] for a, t in q] for pid, q in (data.get("queued") or {}).items() if q}
+            self._bots_queued = set(data.get("bots_queued") or [])
+            self._sync_results = {pid: list(r) for pid, r in (data.get("results") or {}).items()}
+            self._neg_spent = float(data.get("neg_spent", 0.0))
+        except (TypeError, ValueError):
+            log.warning("game %s: unreadable synchronous-phase state in the checkpoint; restarting the turn's "
+                        "negotiation", self.game_id)
+            self._phase_index, self._done, self._queued, self._bots_queued = 0, set(), {}, set()
+            self._sync_results, self._neg_spent = {}, 0.0
 
     def checkpoint(self, force: bool = False, bots_idle: bool = False, clean: bool = False) -> bool:
         """Write ``live/<id>.pkl`` (and append new replay frames) if anything
@@ -1365,16 +1662,12 @@ class GameSession:
             log.warning("game %s: the server did not shut down cleanly; resumed from the checkpoint written "
                         "%.1f s ago (anything after it is lost)", self.game_id,
                         max(0.0, time.time() - float(state.get("saved_at", time.time()))))
+        if self._sync:
+            self._sync_restore(state.get("sync"))
         if g.status == "running":
-            # agents get a full turn after a restart
+            # agents get a full turn (in a synchronous game: a full phase) after a restart
             self._turn_started = now
-            tt = self.opts["turn_timeout"]
-            if tt > 0:
-                self._deadline_mono = now + tt
-                g.deadline = round(time.time() + tt, 3)
-            else:
-                self._deadline_mono = None
-                g.deadline = None
+            self._set_deadline(now)
         elif g.status == "finished":
             g.deadline = None
             self.finished_mono = now
@@ -1406,7 +1699,7 @@ class ArchivedGame:
     def state_bytes(self, pid: str | None = None, *, full: bool = False) -> bytes:
         return self.manager.archive(self.game_id).last_frame or _dumps(self._summary)
 
-    def wait(self, since_turn, timeout) -> dict:
+    def wait(self, since_turn, timeout, since_phase=None) -> dict:
         return {"turn": self._summary.get("turn", 0), "status": "finished", "deadline": None, "timed_out": False}
 
     def next_frame(self, last_key, timeout, *, full: bool = False):
@@ -1714,10 +2007,13 @@ class GameManager:
         lobby_timeout = float(_number(body, "lobby_timeout", DEFAULT_QUICKMATCH_LOBBY, 0, MAX_TIMEOUT))
         fill = _bool(body, "fill_with_bots", True)
         fog = _bool(body, "fog", False)
+        sync, rounds = _sync_options(body)
         self.check_name(name, key)  # a registered name with a wrong/missing key fails before any lobby is made
         # Lobbies are matched on every setting that changes how the game starts or plays, so a
         # caller asking for an odd lobby_timeout/fill can't trap the default matchmaking bucket.
         match = (players, turn_timeout, max_turns, lobby_timeout, fill, fog)
+        if sync:  # synchronous and live players are never mixed (live lobbies keep their old key)
+            match += ("sync", rounds)
         with self._qm_lock:  # one lobby choice at a time; the manager lock stays free for other requests
             with self.lock:
                 candidates = [s for s in self.sessions.values()
@@ -1738,6 +2034,7 @@ class GameManager:
                 "max_players": players, "min_players": min(2, players),
                 "turn_timeout": turn_timeout, "max_turns": max_turns, "fill_with_bots": fill,
                 "fog": fog,
+                **({"sync": True, "negotiation_rounds": rounds} if sync else {}),
             })
             # lobby_timeout 0 = start right away (with bots if fill_with_bots), not "never"
             opts["lobby_timeout"] = lobby_timeout

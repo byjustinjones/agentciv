@@ -17,6 +17,12 @@ seats missed the deadline. One plain-JSON entry per turn::
      "diplomacy": [{"by": "p2", "t": 3.1, "action": {...}, "result": {...}}],
      "missed": {"p3": "no_orders", "p4": "draft"}}
 
+Synchronous games (docs/DESIGN.md §13.6) add, without changing the rest:
+``diplomacy[].round`` (the negotiation round whose barrier applied the
+action; ``t`` is when it was queued), ``barriers`` = ``[{"round", "order":
+[pids in application order], "t"}]`` and ``phase_missed`` = ``[{"pid",
+"phase": "negotiate", "round"} | {"pid", "phase": "orders", "reason"}]``.
+
 ``t`` is seconds after the turn started (wall clock; after a server restart
 counted from the restart). Finished turns are kept as zlib-compressed JSON
 (cheap to checkpoint); the replay carries the log as the top-level key
@@ -151,7 +157,10 @@ class ActionLog:
         if not rejected:
             del rec["rejected"]
 
-    def diplomacy(self, turn: int, pid: str, actions: list, results: list, t: float) -> None:
+    def diplomacy(self, turn: int, pid: str, actions: list, results: list, t: float,
+                  ts: list[float] | None = None, round_: int | None = None) -> None:
+        """``ts``: per-action times (synchronous games: when each was queued);
+        ``round_``: the negotiation round at whose barrier they were applied."""
         e = self._entry(turn)
         log = e["diplomacy"]
         count = sum(1 for d in log if d.get("by") == pid)
@@ -167,10 +176,31 @@ class ActionLog:
                 continue
             count += 1
             r = by_index.get(i) or (whole[0] if whole else None)
-            item = {"by": pid, "t": round(max(0.0, t), 1), "action": _clip(action)}
+            ti = ts[i] if ts is not None and 0 <= i < len(ts) else t
+            item = {"by": pid, "t": round(max(0.0, ti), 1), "action": _clip(action)}
+            if round_ is not None:
+                item["round"] = round_
             if r is not None:
                 item["result"] = _clip({k: v for k, v in r.items() if k != "index"})
             log.append(item)
+
+    def barrier(self, turn: int, round_: int, order: list[str], t: float) -> None:
+        """Synchronous games: negotiation round ``round_`` ended; ``order`` is
+        the seat order its queued batches were applied in."""
+        e = self._entry(turn)
+        e.setdefault("barriers", []).append({"round": round_, "order": list(order), "t": round(max(0.0, t), 1)})
+
+    def phase_missed(self, turn: int, pid: str, phase: str, round_: int | None = None,
+                     reason: str | None = None) -> None:
+        """Synchronous games: a remote seat hit a phase's limit (``phase`` =
+        ``negotiate`` with its ``round``, or ``orders`` with the ``reason``
+        also kept in ``missed``)."""
+        item: dict = {"pid": pid, "phase": phase}
+        if round_ is not None:
+            item["round"] = round_
+        if reason is not None:
+            item["reason"] = reason
+        self._entry(turn).setdefault("phase_missed", []).append(item)
 
     def end_turn(self, turn: int, end: str, missed: dict[str, str]) -> None:
         """The turn resolved: how it ended and which remote seats missed it."""

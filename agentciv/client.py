@@ -238,8 +238,9 @@ class AgentCivClient:
     def create_game(self, **options) -> str:
         """Create a game and return its id. Options (all optional):
         ``name, max_players, min_players, turn_timeout, max_turns, seed, bots,
-        fill_with_bots, lobby_timeout, turn_delay, rated, fog`` (``fog``: fog of
-        war and espionage, rules §14). The returned
+        fill_with_bots, lobby_timeout, turn_delay, rated, fog, sync,
+        negotiation_rounds`` (``fog``: fog of war and espionage, rules §14;
+        ``sync``: synchronous turns, see :meth:`end_round`). The returned
         ``creator_token`` is remembered: :meth:`start` uses it."""
         res = self._request("POST", "/api/games", options)
         if res.get("creator_token"):
@@ -274,7 +275,9 @@ class AgentCivClient:
         """Join the open quickmatch lobby for ``players`` seats (creating one if
         needed). The lobby fills with house bots after ``lobby_timeout``
         seconds (default 30). ``key``, ``agent``: see :meth:`join`. ``fog=True``
-        joins a fog-of-war lobby (never mixed with standard ones)."""
+        joins a fog-of-war lobby (never mixed with standard ones); ``sync=True``
+        (optionally ``negotiation_rounds=N``) a synchronous one (never mixed
+        with live ones)."""
         body = {"name": name, "players": players, **options}
         if turn_timeout is not None:
             body["turn_timeout"] = turn_timeout
@@ -312,25 +315,65 @@ class AgentCivClient:
             body["ready"] = False
         return self._request("POST", f"/api/games/{self._gid(game_id)}/orders", body, auth=True)
 
-    def wait(self, since_turn: int | None = None, timeout: float = 30.0, game_id: str | None = None) -> dict:
+    def wait(self, since_turn: int | None = None, timeout: float = 30.0, game_id: str | None = None,
+             since_phase: int | None = None) -> dict:
         """Long-poll until ``turn > since_turn`` (or the game finishes / timeout).
-        Returns ``{"turn","status","deadline","timed_out"}``."""
+        Returns ``{"turn","status","deadline","timed_out"}`` (plus ``phase`` in
+        synchronous games). ``since_phase``: synchronous games, also return as
+        soon as another phase than ``since_phase`` (a ``phase.id``) is open."""
         return self._request("GET", f"/api/games/{self._gid(game_id)}/wait",
-                             query={"since_turn": since_turn, "timeout": timeout}, timeout=timeout + 15)
+                             query={"since_turn": since_turn, "timeout": timeout, "since_phase": since_phase},
+                             timeout=timeout + 15)
+
+    def wait_phase(self, since_phase: int, timeout: float = 30.0, game_id: str | None = None) -> dict:
+        """Synchronous games: long-poll until a phase other than ``since_phase``
+        is open (a barrier passed, the orders phase opened or a new turn began),
+        the game finishes or ``timeout`` passes. See :meth:`wait`."""
+        return self.wait(timeout=timeout, game_id=game_id, since_phase=since_phase)
+
+    @staticmethod
+    def phase(view: dict) -> dict | None:
+        """The ``phase`` of a view or long-poll answer: None in live games, else
+        ``{"id","kind": "negotiate"|"orders","round","of","deadline","done",
+        "waiting"}`` plus, in your own view, ``you_done``, ``queued`` (your
+        actions waiting for the barrier) and ``results`` (this turn's barrier
+        results for your actions: ``[{"round", "results": [{"index","ok",
+        "action",...}]}]``)."""
+        return view.get("phase") if isinstance(view, dict) else None
 
     # ------------------------------------------------------------ barter (§13)
-    def diplomacy(self, actions, turn: int | None = None, game_id: str | None = None) -> dict:
+    def diplomacy(self, actions, turn: int | None = None, game_id: str | None = None,
+                  done: bool | None = None, phase: int | None = None) -> dict:
         """Send diplomacy actions (``propose``, ``counter``, ``accept``,
         ``reject``, ``withdraw``, ``say``); they apply immediately. ``actions``
         is a list (or one action dict). With ``turn``, a stale turn raises
         ApiError(409). Returns ``{"results": [{"index","ok","deal"?,"error"?}],
-        "ok", "seq", "turn", "deadline"}``."""
+        "ok", "seq", "turn", "deadline"}``.
+
+        **Synchronous games** (``phase`` in the view): the actions are queued
+        (results say ``"status": "queued"``; malformed ones are refused at
+        once) and applied at the end of the negotiation round, in the turn's
+        rotating seat order. ``done=True`` ends your round; ``phase`` (a
+        ``phase.id``) makes a stale phase raise ApiError(409). The response
+        also has ``queued``, ``done`` and ``phase``. Results of the applied
+        actions appear in your view's ``phase.results`` after the barrier."""
         if isinstance(actions, dict):
             actions = [actions]
         body: dict = {"actions": list(actions)}
         if turn is not None:
             body["turn"] = turn
+        if done is not None:
+            body["done"] = bool(done)
+        if phase is not None:
+            body["phase"] = phase
         return self._request("POST", f"/api/games/{self._gid(game_id)}/diplomacy", body, auth=True)
+
+    def end_round(self, actions=(), phase: int | None = None, turn: int | None = None,
+                  game_id: str | None = None) -> dict:
+        """Synchronous games: queue ``actions`` (optional) and end your
+        negotiation round (``done``). Then :meth:`wait_phase` for the barrier."""
+        return self.diplomacy(list(actions) if not isinstance(actions, dict) else [actions], turn=turn,
+                              game_id=game_id, done=True, phase=phase)
 
     def _one(self, action: dict) -> dict:
         res = self.diplomacy([action])
@@ -465,7 +508,8 @@ def run_bot(bot_or_callable, base_url: str = DEFAULT_URL, game_id: str | None = 
             turn_timeout: float | None = None, client: AgentCivClient | None = None,
             verbose: bool = False, seed: int = 0, key: str | None = None,
             negotiate: Callable[[dict], list] | None = None, negotiate_window: float = 2.0,
-            deadline_margin: float = 1.0, agent: dict | None = None) -> dict:
+            deadline_margin: float = 1.0, agent: dict | None = None, sync: bool = False,
+            negotiation_rounds: int | None = None) -> dict:
     """Play one game remotely and return a result dict.
 
     ``bot_or_callable`` is a :class:`agentciv.bots.base.Bot`, any callable
@@ -484,6 +528,12 @@ def run_bot(bot_or_callable, base_url: str = DEFAULT_URL, game_id: str | None = 
     deals executed) until the turn ends or ``deadline_margin`` seconds before
     the deadline.
 
+    **Synchronous games** (the view has a ``phase``; ``sync=True`` asks
+    quickmatch for one, ``negotiation_rounds`` sets its rounds): in every
+    negotiation round ``negotiate`` runs once on the round's view and its
+    actions are queued with ``done``; in the orders phase ``act`` runs once.
+    The loop waits for each phase change.
+
     Returns ``{"game_id","player_id","name","result","place","won","turns"}``.
     """
     bot = _as_bot(bot_or_callable, seed)
@@ -497,7 +547,10 @@ def run_bot(bot_or_callable, base_url: str = DEFAULT_URL, game_id: str | None = 
         if game_id:
             c.join(game_id, name, key=key, agent=agent)
         elif quickmatch:
-            c.quickmatch(name, players=players, turn_timeout=turn_timeout, key=key, agent=agent)
+            qm: dict = {"sync": True} if sync else {}
+            if sync and negotiation_rounds is not None:
+                qm["negotiation_rounds"] = negotiation_rounds
+            c.quickmatch(name, players=players, turn_timeout=turn_timeout, key=key, agent=agent, **qm)
         else:
             raise ValueError("pass game_id=..., quickmatch=True, or a joined client")
     say = (lambda *a: print(*a, file=sys.stderr, flush=True)) if verbose else (lambda *a: None)
@@ -584,16 +637,58 @@ def run_bot(bot_or_callable, base_url: str = DEFAULT_URL, game_id: str | None = 
             if executed and not before_orders:
                 return True
 
+    def sync_step(view: dict) -> None:
+        """Synchronous game: this phase's one move (if not made yet), then wait for the next phase."""
+        ph = view["phase"]
+        you = view.get("you") or {}
+        turn = view["turn"]
+        if you.get("alive", True) and ph.get("kind") == "negotiate" and not ph.get("you_done"):
+            actions: list = []
+            if negotiate is not None:
+                try:
+                    actions = negotiate(view) or []
+                    if isinstance(actions, dict):
+                        actions = [actions]
+                except Exception as e:
+                    say(f"[{name}] negotiate error on turn {turn}: {type(e).__name__}: {e}")
+                    actions = []
+            try:
+                res = c.end_round(actions, phase=ph["id"], turn=turn)
+                bad = [r for r in res.get("results", []) if not r.get("ok")]
+                if bad:
+                    say(f"[{name}] turn {turn} round {ph.get('round')}: {len(bad)} actions refused, e.g. {bad[0]}")
+            except ApiError as e:
+                if e.status != 409:  # 409: the round already closed; the next phase is open
+                    say(f"[{name}] diplomacy failed: {e}")
+            except OSError as e:
+                say(f"[{name}] diplomacy failed: {e}")
+        elif you.get("alive", True) and ph.get("kind") == "orders" and you.get("submitted") is not True:
+            for rr in ph.get("results") or []:
+                bad = [r for r in rr.get("results", []) if not r.get("ok")]
+                if bad:
+                    say(f"[{name}] turn {turn} round {rr.get('round')}: {len(bad)} diplomacy errors, e.g. {bad[0]}")
+            submit(act_safe(view), turn)
+        c.wait_phase(ph["id"], timeout=30)
+
     last = -1
     failures = 0
     view: dict | None = None
     while True:
         try:
+            if view is not None and view.get("status") == "running" and view.get("phase"):
+                sync_step(view)
+                view = c.state()
+                failures = 0
+                if view["status"] == "finished":
+                    break
+                continue
             w = c.wait(since_turn=last, timeout=30)
             if w["status"] == "lobby":
                 continue
             view = c.state()
             failures = 0
+            if view.get("status") == "running" and view.get("phase"):
+                continue  # synchronous game: play it phase by phase
         except (ApiError, OSError) as e:  # transient network trouble: back off and retry
             if isinstance(e, ApiError) and e.status in (401, 403, 404):
                 raise
@@ -1505,6 +1600,66 @@ def view_changes(view: dict, previous: dict | None = None) -> tuple[list[str], d
     return out, {"turn": view.get("turn", 0), "events": keys, "relics": relics}
 
 
+def _action_str(a) -> str:
+    if not isinstance(a, dict):
+        return json.dumps(a, separators=(",", ":"))
+    t = a.get("type")
+    if t in ("propose", "counter"):
+        head = f"propose to {a.get('to')}" if t == "propose" else f"counter {a.get('deal')}"
+        extra = f", peace {a['peace']}" if a.get("peace") else ""
+        return f"{head}: give {bundle_str(a.get('give'))}, get {bundle_str(a.get('get'))}{extra}"
+    if t in ("accept", "reject", "withdraw"):
+        return f"{t} {a.get('deal')}"
+    if t == "say":
+        return f"say to {a.get('to')}: {str(a.get('text', ''))[:80]}"
+    return json.dumps(a, separators=(",", ":"))
+
+
+def phase_result_lines(phase: dict, rounds: set | None = None) -> list[str]:
+    """One line per action of yours applied at this turn's barriers (``rounds``: only those)."""
+    out = []
+    for rr in phase.get("results") or []:
+        if rounds is not None and rr.get("round") not in rounds:
+            continue
+        for r in rr.get("results") or []:
+            what = _action_str(r.get("action")) if "action" in r else f"action #{r.get('index')}"
+            if r.get("ok"):
+                extra = ", ".join(f"{k} {r[k]}" for k in ("deal", "countered", "status") if r.get(k))
+                out.append(f"  round {rr.get('round')}: {what} -> ok" + (f" ({extra})" if extra else ""))
+            else:
+                status = " (deal failed and closed)" if r.get("status") == "failed" else ""
+                out.append(f"  round {rr.get('round')}: {what} -> FAILED{status}: {r.get('error')}")
+    return out
+
+
+def phase_lines(view: dict) -> list[str]:
+    """Text for the ``phase`` of a synchronous game's view (empty in live games)."""
+    ph = view.get("phase") if isinstance(view, dict) else None
+    if not ph or view.get("status") != "running":
+        return []
+    dl = ph.get("deadline")
+    limit = f"; phase limit in {max(0.0, dl - time.time()):.0f}s" if dl else ""
+    waiting = ", ".join(ph.get("waiting") or []) or "nobody"
+    if ph.get("kind") == "negotiate":
+        out = [f"SYNCHRONOUS TURN: negotiation round {ph.get('round')} of {ph.get('of')} (phase {ph.get('id')})"
+               f"{limit}. Diplomacy is queued and applied when every seat has ended the round, in the turn's "
+               f"rotating seat order. Done: {', '.join(ph.get('done') or []) or 'nobody'}; waiting for: {waiting}."]
+        if ph.get("you_done"):
+            out.append("You have ended this round; your next step is the next phase.")
+        queued = ph.get("queued") or []
+        if queued:
+            out.append("Your queued actions (applied at the end of this round):")
+            out += [f"  {_action_str(a)}" for a in queued]
+    else:
+        out = [f"SYNCHRONOUS TURN: orders phase (phase {ph.get('id')}){limit}. Diplomacy is closed until next "
+               f"turn; orders are open. Waiting for: {waiting}."]
+    res = phase_result_lines(ph)
+    if res:
+        out.append("Results of your diplomacy at this turn's barriers:")
+        out += res
+    return out
+
+
 def summarize_compact(view: dict, pid: str | None = None, changes: list[str] | None = None) -> str:
     """Short state rendering; all fields come from the supplied player view."""
     you = view.get("you") or {}
@@ -1514,6 +1669,7 @@ def summarize_compact(view: dict, pid: str | None = None, changes: list[str] | N
     due = f"in {max(0.0, deadline - time.time()):.0f}s" if deadline else "none"
     out = [f"Turn {view.get('turn')}/{view.get('max_turns')} ({view.get('status')}); "
            f"season {season.get('name')} ({season.get('turns_left')} left); deadline {due}."]
+    out += phase_lines(view)
     # finished games have no `you` block; the player's own row still carries the numbers
     row = next((p for p in view.get("players", []) if p.get("id") == pid), {})
     res, inc = you.get("resources") or row.get("resources") or {}, seasonal_income(view, pid)
@@ -1599,8 +1755,9 @@ def summarize_view(view: dict, pid: str | None = None, max_events: int = 12, max
     out.append(f"Game {view.get('game_id')} \"{view.get('name') or ''}\" — turn {view.get('turn')}/"
                f"{view.get('max_turns')} ({view.get('status')}). Season {season.get('name')} ({mod_txt}; "
                f"{season.get('turns_left')} turn(s) left, next {season.get('next')}).")
-    if view.get("deadline"):
+    if view.get("deadline") and not view.get("phase"):
         out.append(f"Turn deadline in {max(0.0, view['deadline'] - time.time()):.0f}s.")
+    out += phase_lines(view)
     fog = _fog_active(view)
     visible = (view.get("map") or {}).get("visible") if fog else None
     if fog:
@@ -1849,6 +2006,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--agent-json", default=None,
                         help="agent manifest as a JSON object, shown in the game summary and replay "
                              "(default $AGENTCIV_AGENT)")
+    parser.add_argument("--sync", action="store_true",
+                        help="quickmatch: join a synchronous lobby (negotiation rounds, then orders)")
+    parser.add_argument("--rounds", type=int, default=None, help="with --sync: negotiation rounds per turn")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args(argv)
     if not args.game and not args.quickmatch:
@@ -1860,7 +2020,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         res = run_bot(args.bot, args.url, game_id=args.game, name=args.name, quickmatch=args.quickmatch,
                       players=args.players, turn_timeout=args.turn_timeout, verbose=not args.quiet,
-                      seed=args.seed, key=args.key, agent=agent)
+                      seed=args.seed, key=args.key, agent=agent, sync=args.sync,
+                      negotiation_rounds=args.rounds)
     except ApiError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1

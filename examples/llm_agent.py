@@ -19,6 +19,14 @@ anything addressed to it (a new offer, a counter, a message) is handed back to
 Claude in the same conversation so it can answer in real time. Its ``notes``
 are carried to the next turn as memory.
 
+Synchronous games (``"sync": true``; ``--sync`` asks quickmatch for one):
+each turn is a few negotiation rounds, then an orders phase. Deal tools
+queue their action for the end of the round; ``wait_for_replies`` ends the
+agent's round and waits until every seat has ended it, then returns what
+the round produced (results of its own actions, new offers and messages).
+When the model stops talking, the remaining rounds are ended for it; once
+the orders phase opens it is asked for its orders.
+
 Model: ``--model`` or ``$AGENTCIV_MODEL`` (default: claude-opus-5-5).
 Games with LLM players should use a generous ``turn_timeout`` (e.g. 120 s).
 
@@ -43,10 +51,10 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))  # run from a checkout
 from agentciv.client import (AgentCivClient, ApiError, agent_from_env, ascii_map, describe_event,  # noqa: E402
-                             summarize_view)
+                             phase_result_lines, summarize_view)
 
 HARNESS = "agentciv examples/llm_agent.py"
-HARNESS_VERSION = "2"
+HARNESS_VERSION = "3"  # 3: synchronous games
 DEFAULT_MODEL = "claude-opus-5-5"
 # Models that accept server-side refusal fallbacks (fallbacks="default").
 FALLBACK_MODELS = {"claude-opus-5-5", "claude-opus-5", "claude-fable-5-1", "claude-fable-5", "claude-sonnet-5-5"}
@@ -62,9 +70,7 @@ turn. Use get_full_state if you need exact details (tile owners, armies, improve
 with fog: true, some fields of other players are null and armies are listed only within your sight
 (rules §14).
 
-Diplomacy is live: deals settle the moment they are accepted. Tools: propose_deal and respond_to_deal
-(accept | reject | counter | withdraw), say for messages, and wait_for_replies to wait a few seconds for answers.
-The turn resolves as soon as every player has submitted orders; diplomacy after that applies to the next turn.
+{diplomacy}
 
 Finally call submit_orders with ALL of this turn's orders (you may call it again to fix rejected orders or
 after a deal changed your resources; the latest call replaces earlier ones), and put your plan for the next
@@ -72,6 +78,17 @@ turns in `notes`. Orders execute in the order given, paying costs when executed.
 
 THE RULES:
 {rules}"""
+
+LIVE_DIPLOMACY = """Diplomacy is live: deals settle the moment they are accepted. Tools: propose_deal and respond_to_deal
+(accept | reject | counter | withdraw), say for messages, and wait_for_replies to wait a few seconds for answers.
+The turn resolves as soon as every player has submitted orders; diplomacy after that applies to the next turn."""
+
+SYNC_DIPLOMACY = """This game is synchronous: each turn has {rounds} negotiation round(s), then an orders phase.
+In a negotiation round, propose_deal, respond_to_deal (accept | reject | counter | withdraw) and say are queued,
+not applied. wait_for_replies ends your round; when every player has ended it, all queued actions are applied in
+the turn's rotating seat order and wait_for_replies returns the results of yours plus new offers and messages.
+An accept settles at that point if the deal is still open and both sides can deliver. When you stop calling
+tools, your remaining rounds end. After the last round diplomacy is closed and you submit orders."""
 
 BUNDLE = {
     "type": "object",
@@ -136,7 +153,9 @@ TOOLS = [
     {
         "name": "wait_for_replies",
         "description": "Wait up to `seconds` (max 20) for diplomacy addressed to you (answers to your offers, new "
-                       "offers, messages) and return it. Use after proposing, before submitting orders.",
+                       "offers, messages) and return it. Use after proposing, before submitting orders. In a "
+                       "synchronous game: end your negotiation round and wait for the round to close (`seconds` "
+                       "is ignored), then return its results.",
         "input_schema": {"type": "object", "properties": {"seconds": {"type": "number"}}, "required": ["seconds"]},
     },
     {
@@ -160,8 +179,10 @@ TOOLS = [
 
 def prompt_sha256() -> str:
     """sha256 of what this harness sends besides the game: the system prompt
-    template (before the rules and name are filled in) and the tool definitions."""
-    blob = SYSTEM_PROMPT + "\0" + json.dumps(TOOLS, sort_keys=True, separators=(",", ":"))
+    template (before the rules and name are filled in), both diplomacy
+    paragraphs and the tool definitions."""
+    blob = (SYSTEM_PROMPT + "\0" + LIVE_DIPLOMACY + "\0" + SYNC_DIPLOMACY + "\0"
+            + json.dumps(TOOLS, sort_keys=True, separators=(",", ":")))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
@@ -297,6 +318,7 @@ class LLMAgent:
         self.system = None
         self.calls = CallLog()
         self.turn = None  # the game turn being played (for the call log)
+        self.cur = None   # synchronous games: the latest view (its phase and phase deadline)
 
     # ------------------------------------------------------------ Claude call
     def create(self, messages: list):
@@ -327,13 +349,18 @@ class LLMAgent:
 
     # ------------------------------------------------------------ tools
     def diplomacy(self, action: dict, turn: int) -> tuple[str, bool]:
+        ph = (self.cur or {}).get("phase")
         try:
-            res = self.game.diplomacy([action], turn=turn)
+            res = self.game.diplomacy([action], turn=turn, phase=ph["id"] if ph else None)
         except ApiError as e:
             return f"failed: {e.message}", True
         r = (res.get("results") or [{}])[0]
         if not r.get("ok"):
             return f"rejected: {r.get('error')}", True
+        if r.get("status") == "queued":
+            p = res.get("phase") or {}
+            return (f"queued for the end of negotiation round {p.get('round')} of {p.get('of')}; "
+                    "wait_for_replies ends your round and returns the results"), False
         extra = f" (replaces {r['countered']})" if r.get("countered") else ""
         return "ok" + (f", deal {r['deal']}{extra}" if r.get("deal") else "") + \
             (f", {r['status']}" if r.get("status") else ""), False
@@ -368,6 +395,8 @@ class LLMAgent:
             return self.diplomacy(action, turn)
         if name == "say":
             return self.diplomacy({"type": "say", "to": args.get("to"), "text": args.get("text")}, turn)
+        if name == "wait_for_replies" and self.cur is not None:
+            return self.end_round_and_wait(turn)
         if name == "wait_for_replies":
             try:
                 seconds = float(args.get("seconds") or 10)
@@ -385,11 +414,16 @@ class LLMAgent:
                 return "orders must be an array", True
             if isinstance(args.get("notes"), str):
                 self.notes = args["notes"][:4000]
+            before = []
+            if self.cur is not None and (self.cur.get("phase") or {}).get("kind") == "negotiate":
+                before = self.finish_negotiation(turn)  # orders open after the last round
+                if self.cur is None or self.cur.get("turn") != turn:
+                    return "The turn is already over.", True
             try:
                 res = self.game.submit_orders(orders, turn=turn)
             except ApiError as e:
                 return f"submit failed: {e.message}", True
-            lines = [f"{res['accepted']} accepted, {len(res['errors'])} rejected."]
+            lines = before + [f"{res['accepted']} accepted, {len(res['errors'])} rejected."]
             lines += [f"order #{e['index']}: {e['error']}" for e in res["errors"]]
             return "\n".join(lines), False
         return f"unknown tool {name}", True
@@ -402,13 +436,107 @@ class LLMAgent:
     def time_left(view: dict) -> float:
         return view["deadline"] - time.time() if view.get("deadline") else float("inf")
 
+    # ------------------------------------------------------------ synchronous games
+    def end_round_and_wait(self, turn: int) -> tuple[str, bool]:
+        """End our negotiation round, wait for its barrier, describe what it produced."""
+        ph = (self.cur or {}).get("phase") or {}
+        if ph.get("kind") != "negotiate":
+            return "Diplomacy is closed in the orders phase; call submit_orders.", True
+        seq = self.game.inbox_seq
+        if not ph.get("you_done"):
+            try:
+                self.game.end_round(phase=ph["id"], turn=turn)
+            except ApiError as e:
+                if e.status != 409:  # 409: the round already closed
+                    return f"failed: {e.message}", True
+        view = self.wait_phase_change(ph["id"])
+        if view.get("turn") != turn or view.get("status") != "running":
+            return "The turn is already over.", True
+        lines = [f"Negotiation round {ph.get('round')} of {ph.get('of')} closed."]
+        mine = phase_result_lines(view.get("phase") or {}, {ph.get("round")})
+        if mine:
+            lines += ["Your actions:"] + mine
+        try:
+            box = self.game.inbox(since=seq, timeout=0)
+            news = self.describe(box)
+        except (ApiError, OSError):
+            news = []
+        if news:
+            lines += ["New diplomacy:"] + [f"  {x}" for x in news]
+        nxt = view.get("phase") or {}
+        if nxt.get("kind") == "negotiate":
+            lines.append(f"Now: negotiation round {nxt.get('round')} of {nxt.get('of')} (your open deals are in "
+                         "get_full_state 'deals').")
+        else:
+            lines.append("Negotiation is over for this turn: call submit_orders.")
+        return "\n".join(lines), False
+
+    def wait_phase_change(self, phase_id: int) -> dict:
+        """Long-poll until another phase is open (or the game moved on); returns the fresh view."""
+        while True:
+            try:
+                w = self.game.wait_phase(phase_id, timeout=30)
+            except (ApiError, OSError):
+                time.sleep(1)
+                continue
+            if w.get("status") != "running" or (w.get("phase") or {}).get("id") != phase_id:
+                break
+        self.cur = self.game.state()
+        return self.cur
+
+    def finish_negotiation(self, turn: int) -> list[str]:
+        """End every remaining negotiation round of ``turn``; returns result lines for the model."""
+        lines: list[str] = []
+        while self.cur is not None and self.cur.get("turn") == turn and self.cur.get("status") == "running":
+            ph = self.cur.get("phase") or {}
+            if ph.get("kind") != "negotiate":
+                break
+            text, _ = self.end_round_and_wait(turn)
+            lines += [x for x in text.splitlines() if not x.startswith("Now:")]
+        return lines
+
+    def play_turn_sync(self, view: dict) -> None:
+        pid = view["you"]["id"]
+        turn = view["turn"]
+        self.turn = turn
+        self.cur = view
+        ph = view["phase"]
+        try:
+            inbox = self.describe(self.game.inbox(timeout=0))
+        except (ApiError, OSError):
+            inbox = []
+        news = "\n".join(inbox[-30:]) or "(nothing new)"
+        step = (f"Negotiation round {ph.get('round')} of {ph.get('of')} is open: queue diplomacy if useful and "
+                "call wait_for_replies to end the round, or call submit_orders." if ph.get("kind") == "negotiate"
+                else "Negotiation is over for this turn: call submit_orders.")
+        prompt = (f"Turn {turn} of {view['max_turns']}.\n\nYOUR NOTES FROM LAST TURN:\n{self.notes}\n\n"
+                  f"NEW DIPLOMACY (inbox):\n{news}\n\nSTATE:\n{summarize_view(view, pid)}\n\n"
+                  f"MAP:\n{ascii_map(view, pid)}\n\n{step}")
+        messages = [{"role": "user", "content": prompt}]
+        steps = self.args.max_steps
+        used, submitted = self.converse(messages, view, steps)
+        steps -= used
+        if not submitted:
+            lines = self.finish_negotiation(turn)
+            if self.cur is not None and self.cur.get("turn") == turn and self.cur.get("status") == "running":
+                if steps > 0:
+                    messages.append({"role": "user", "content": "\n".join(
+                        lines + ["Negotiation is over for this turn: call submit_orders with all of this "
+                                 "turn's orders."])})
+                    _, submitted = self.converse(messages, view, steps)
+                if not submitted:
+                    try:
+                        self.game.submit_orders([], turn=turn)  # don't hold the game up
+                    except ApiError:
+                        pass
+
     # ------------------------------------------------------------ one turn
     def converse(self, messages: list, view: dict, steps: int) -> tuple[int, bool]:
         """Let Claude call tools until it stops. Returns (steps used, orders submitted)."""
         submitted = False
         used = 0
         while used < steps:
-            if self.time_left(view) < DEADLINE_MARGIN:
+            if self.time_left(self.cur if self.cur is not None else view) < DEADLINE_MARGIN:
                 print("  (turn deadline passed)", file=sys.stderr)
                 break
             used += 1
@@ -448,6 +576,8 @@ class LLMAgent:
         return used, submitted
 
     def play_turn(self, view: dict) -> None:
+        if view.get("phase"):
+            return self.play_turn_sync(view)
         pid = view["you"]["id"]
         turn = view["turn"]
         self.turn = turn
@@ -502,7 +632,8 @@ class LLMAgent:
         if a.game:
             joined = self.game.join(a.game, a.name, agent=agent)
         else:
-            joined = self.game.quickmatch(a.name, players=a.players, turn_timeout=a.turn_timeout, agent=agent)
+            qm = {"sync": True} if getattr(a, "sync", False) else {}
+            joined = self.game.quickmatch(a.name, players=a.players, turn_timeout=a.turn_timeout, agent=agent, **qm)
         print(f"Joined {joined['game_id']} as {joined['player_id']} with model {a.model}"
               f"{' (refusal fallbacks on)' if a.fallback else ''}", file=sys.stderr)
         if a.log_dir:
@@ -510,7 +641,11 @@ class LLMAgent:
             safe = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in a.name)
             self.calls.path = os.path.join(a.log_dir, f"{joined['game_id']}-{safe}.jsonl")
             print(f"Logging model calls to {self.calls.path}", file=sys.stderr)
-        self.system = [{"type": "text", "text": SYSTEM_PROMPT.format(name=a.name, rules=self.game.rules()),
+        info = self.game.game()
+        diplomacy = (SYNC_DIPLOMACY.format(rounds=info.get("negotiation_rounds")) if info.get("sync")
+                     else LIVE_DIPLOMACY)
+        self.system = [{"type": "text", "text": SYSTEM_PROMPT.format(name=a.name, rules=self.game.rules(),
+                                                                     diplomacy=diplomacy),
                         "cache_control": {"type": "ephemeral"}}]  # identical every turn -> cached
         last = -1
         while True:
@@ -551,6 +686,7 @@ def main() -> None:
     ap.add_argument("--quickmatch", action="store_true", help="join a quickmatch lobby (the default)")
     ap.add_argument("--players", type=int, default=6, help="quickmatch lobby size")
     ap.add_argument("--turn-timeout", type=float, default=120.0, help="quickmatch turn timeout in seconds")
+    ap.add_argument("--sync", action="store_true", help="quickmatch: join a synchronous lobby")
     ap.add_argument("--max-steps", type=int, default=10, help="max model calls per game turn (incl. negotiation)")
     ap.add_argument("--fallback", action="store_true",
                     help="opt in to server-side refusal fallbacks (a declined request is re-run on another model; "

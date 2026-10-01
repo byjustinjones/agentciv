@@ -21,11 +21,15 @@ environment variables):
     next NAME                wait for your next turn and print your state
     map NAME                 ASCII map
     deal NAME '<json list>'  diplomacy actions (propose/counter/accept/reject/withdraw/say), applied immediately
+                             (synchronous games: queued until the round ends; add --done to end your round)
+    done NAME                synchronous games: end your negotiation round
     inbox NAME SECONDS       wait for new diplomacy addressed to you
     orders NAME '<json list>'  your orders for the current turn (resubmitting replaces them)
 
 Each turn: run `next`, take any actions you choose, and submit `orders` (an empty list `[]` is a valid
-submission). In games created with `fog: true`, some fields of other players are null and armies are
+submission). In synchronous games (the state shows a SYNCHRONOUS TURN line) each turn is a few negotiation
+rounds, then an orders phase: `deal` queues actions, `next` in a round you have already looked at ends it for
+you, and orders open after the last round. In games created with `fog: true`, some fields of other players are null and armies are
 listed only within your sight (rules §14). A turn resolves when all players have submitted or its deadline passes; a player who has not
 submitted does nothing that turn.
 
