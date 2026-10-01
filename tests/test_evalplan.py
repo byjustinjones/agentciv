@@ -7,6 +7,7 @@ import io
 import json
 import logging
 import os
+import re
 from collections import Counter
 from pathlib import Path
 
@@ -39,8 +40,16 @@ def test_full_rotation_puts_every_model_in_every_seat_on_every_seed():
         cover = Counter((name, k) for g in games for k, name in enumerate(g["seats"]))
         assert set(cover) == {(m, k) for m in MODELS for k in range(6)} and set(cover.values()) == {1}
     g = plan["games"][7]
-    assert g["body"] == {"track": "eval-6p-fog-v1", "name": f"eval-6p-fog-v1 seed {g['seed']} rotation "
-                                                            f"{g['rotation']}", "seed": g["seed"], "seats": g["seats"]}
+    assert g["body"] == {"track": "eval-6p-fog-v1", "name": g["body"]["name"], "seed": g["seed"],
+                         "seats": g["seats"]}
+    # the title is public while the game is live: it must not carry the hidden seed or the rotation
+    names = [x["body"]["name"] for x in plan["games"]]
+    assert len(set(names)) == 18 and all(re.fullmatch(r"eval-6p-fog-v1 [0-9a-f]{8}", n) for n in names)
+    assert not any("seed" in n or "rotation" in n for n in names)
+    # ... and neither does the order in which the games are created
+    assert sorted(plan["create_order"]) == list(range(18))
+    orders = {tuple(make_plan("eval-6p-fog-v1", MODELS, seeds=3)["create_order"]) for _ in range(5)}
+    assert len(orders) > 1
     assert all(sorted(g["seats"]) == sorted(MODELS) and g["game_id"] is None for g in plan["games"])
 
 
@@ -104,7 +113,7 @@ def agent(model, harness="h1", notes=None):
     return a
 
 
-def write_synthetic(tmp_path):
+def write_synthetic(tmp_path, g2_rules="r" * 64):
     """Seed 1, three seats, models Alpha/Beta/Gamma in a full rotation; the third game never finished.
 
     g1 seats Alpha, Beta, Gamma:  Alpha 1st, Beta 2nd, Gamma 3rd
@@ -127,7 +136,7 @@ def write_synthetic(tmp_path):
         replay("g1", 1, ["Alpha", "Beta", "Gamma"], ["p1", "p2", "p3"], {"p1": 30, "p2": 20, "p3": 10},
                agents=agents1, actions={"format": 1, "turns": []}),
         replay("g2", 1, ["Gamma", "Alpha", "Beta"], ["p2", "p1", "p3"], {"p1": 20, "p2": 30, "p3": 20},
-               agents=agents2, actions=actions, rules="s" * 64),
+               agents=agents2, actions=actions, rules=g2_rules),
     ]
     for doc in docs:
         (d / f"{doc['game_id']}.json").write_text(json.dumps(doc))
@@ -162,7 +171,7 @@ def test_report_on_synthetic_replays_has_the_known_answers(tmp_path):
     w = "\n".join(rep["warnings"])
     assert "Gamma: the agent manifest differs between games" in w
     assert "Beta in g1: the manifest notes say answers may come from another model" in w
-    assert "different rules" in w
+    assert "different rules" not in w and len(rep["groups"]) == 1 and rep["groups"][0]["games"] == 2
     assert "Beta: missed 1 turn deadline(s) and 2 phase limit(s) (1 in negotiation)" in w
     assert "g2 turn 0: Alpha (p2) names itself (Alpha, alpha-model-1) in a message" in w
     assert "hello" not in w
@@ -171,6 +180,41 @@ def test_report_on_synthetic_replays_has_the_known_answers(tmp_path):
     assert "3 games planned, 2 finished, 1 missing" in text and "Alpha vs Beta: -1.00" in text
     # deterministic: the same input gives the same report
     assert json.dumps(build_report(Source(data_dir=data), plan, nboot=500)) == json.dumps(rep)
+
+
+def test_games_under_different_rules_are_not_paired(tmp_path):
+    data, plan = write_synthetic(tmp_path, g2_rules="s" * 64)
+    rep = build_report(Source(data_dir=data), plan, nboot=200)
+    assert all(p["pairs"] == 0 and p["mean_diff"] is None for p in rep["paired"])
+    assert len(rep["groups"]) == 2 and "different rules" in "\n".join(rep["warnings"])
+    text = format_report(rep)
+    assert "2 groups that are not comparable" in text and "no matched pairs for 3 of 3 model pairs" in text
+    assert rep["models"]["Alpha"]["placement"]["mean"] == 1.0   # the per-model table still counts every game
+
+
+def test_different_opponent_fields_are_not_paired(tmp_path):
+    """A wins seat 1 on seed 7 against weak opponents, B loses seat 1 on seed 7
+    against other, strong ones: that is not a paired advantage for A."""
+    d = tmp_path / "data" / "replays"
+    d.mkdir(parents=True)
+    docs = [replay("g1", 7, ["A", "Weak1", "Weak2"], ["p1", "p2", "p3"], {"p1": 30, "p2": 20, "p3": 10}),
+            replay("g2", 7, ["B", "Strong1", "Strong2"], ["p2", "p3", "p1"], {"p1": 10, "p2": 30, "p3": 20}),
+            # the same field as g1, B in A's seat: this one is a matched pair
+            replay("g3", 7, ["Weak1", "A", "Weak2"], ["p2", "p1", "p3"], {"p1": 20, "p2": 30, "p3": 10})]
+    for doc in docs:
+        (d / f"{doc['game_id']}.json").write_text(json.dumps(doc))
+    rep = build_report(Source(data_dir=tmp_path / "data"), games=["g1", "g2", "g3"], nboot=200)
+    pairs = {(p["a"], p["b"]): p for p in rep["paired"]}
+    assert pairs[("A", "B")]["pairs"] == 0 and pairs[("A", "B")]["mean_diff"] is None
+    assert pairs[("A", "Weak1")]["pairs"] == 2 and pairs[("A", "Weak1")]["mean_diff"] == -1.0
+    assert [g["games"] for g in rep["groups"]] == [2, 1] or [g["games"] for g in rep["groups"]] == [1, 2]
+    # a rule change mid-game or other conditions also split the groups
+    changed = replay("g4", 7, ["Weak2", "Weak1", "A"], ["p3", "p2", "p1"], {"p1": 10, "p2": 20, "p3": 30})
+    changed["summary"]["rules_changed"] = ["t" * 64]
+    (d / "g4.json").write_text(json.dumps(changed))
+    rep = build_report(Source(data_dir=tmp_path / "data"), games=["g1", "g3", "g4"], nboot=200)
+    assert len(rep["groups"]) == 2 and "restarted with other rules" in "\n".join(rep["warnings"])
+    assert {(p["a"], p["b"]): p["pairs"] for p in rep["paired"]}[("A", "Weak2")] == 0
 
 
 def test_tie_for_first_splits_the_win_and_conditions_rank_alone():
@@ -242,7 +286,12 @@ def test_create_then_play_then_report_from_the_server(tmp_path, small_track):
             evalplan.create_games(evalplan.load_plan(pf), pf, srv.url, "wrong-key-0", out=io.StringIO())
         assert evalplan.main(["create", "--plan", str(pf), "--url", srv.url, "--spectator-key", KEY]) == 0
         plan = evalplan.load_plan(pf)
-        assert plan["games"][0]["game_id"] and plan["games"][1]["game_id"] is None
+        first, second = plan["create_order"]   # one game per call, in the plan's shuffled creation order
+        assert plan["games"][first]["game_id"] and plan["games"][second]["game_id"] is None
+        # nothing public about the game gives away its seed or its place in the schedule
+        public = call(srv, "GET", f"/api/games/{plan['games'][first]['game_id']}")[1]
+        assert public["seed"] is None and re.fullmatch(r"test-3p-v1 [0-9a-f]{8}", public["name"])
+        assert "rotation" not in json.dumps(public)
         rep = build_report(Source(url=srv.url), plan, nboot=100)
         assert rep["games"]["missing"] == 2 and rep["games"]["not_created"] == 1
         assert rep["games"]["unfinished"][0]["why"] == "not finished (lobby)"

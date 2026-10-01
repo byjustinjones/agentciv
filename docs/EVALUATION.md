@@ -38,10 +38,17 @@ prompt and effort the same across the games of an evaluation; the report warns w
 they drift.
 
 **Rules hash.** The first game created on a track in a data directory pins the track's
-pool to the server's `rules_sha256`. If the rules change later (any edit to
-docs/RULES.md or the constants), creating a game on that track is refused with 409:
+pool to the server's `rules_sha256`. The hash covers the rules text, every engine
+constant (including map generation, which the rules text does not quote) and the engine
+and protocol versions (`ENGINE_VERSION`, `PROTOCOL_VERSION` in
+`agentciv/engine/constants.py`; bump them when behaviour changes without a constant
+changing). If any of that changes later, creating a game on that track is refused with 409:
 add a new version to `TRACKS` in `agentciv/server/tracks.py` (`eval-6p-fog-v2`,
-one `Track(...)` entry) so old and new results never mix. A no-fog twin is a few lines:
+one `Track(...)` entry) so old and new results never mix. A track game that was
+already running when the server restarted under other rules keeps playing, but is no
+longer rated: its summary shows `rated: false` with the reason and lists the later
+hashes in `rules_changed`, and the report flags it and pairs it with nothing. A track
+lobby restored under other rules is unrated in the same way. A no-fog twin is a few lines:
 
 ```python
 Track(id="eval-6p-open-v1", title="Six remote seats, no fog, synchronous turns",
@@ -81,10 +88,16 @@ Each game in `plan.json` holds its seed, rotation, seat order and the exact
 
 ```json
 {"index": 1, "seed": 1, "rotation": 2, "seats": ["Ed", "Flo", "Ada", "Bo", "Cy", "Di"],
- "body": {"track": "eval-6p-fog-v1", "name": "eval-6p-fog-v1 seed 1 rotation 2", "seed": 1,
+ "body": {"track": "eval-6p-fog-v1", "name": "eval-6p-fog-v1 3f9a1c0e", "seed": 1,
           "seats": ["Ed", "Flo", "Ada", "Bo", "Cy", "Di"]},
  "game_id": null}
 ```
+
+**The plan file is operator-only.** A game's title is public while it is live, so it is
+an opaque token: the seed is hidden in live track games and the rotation says who sits
+where. The plan also holds a random `create_order`, so a game id does not give away a
+game's place in the schedule. Keep the seed, the rotation and the plan index out of
+anything a seat is told (its prompt, its game name, the order you start agents in).
 
 `seed` and `seats` on a track game are accepted only with the spectator key. Such
 games are rated in the track pool like any other track game.
@@ -93,7 +106,7 @@ games are rated in the track pool like any other track game.
 
 ```bash
 python -m agentciv.evalplan create --plan plan.json --url http://host:8765 --spectator-key "$KEY"
-# created g1 (plan #0, seed 1, rotation 0)
+# created g1 (plan #7, seed 2, rotation 1)        <- operator output; games are created in a random order
 #   seat 1 (p1): Ada  -> POST http://host:8765/api/games/g1/join {"name": "Ada", "agent": {...}}
 #   ...
 # 1 created; 5 not created yet
@@ -144,7 +157,12 @@ default, from a seeded RNG, so the same input gives the same report):
   placement of B over matched (seed, seat) cells: A in seat 3 on seed 1 against B in
   seat 3 on seed 1, in different games. This cancels the map and the seat, the two
   largest nuisance factors. Negative means A placed better; `n` is the number of
-  matched pairs, with a count of who placed better in each.
+  matched pairs, with a count of who placed better in each. Pairs are formed only
+  between **comparable** games: the same opponent field, track, rules hash (and no
+  rule change mid-game) and conditions (seats, fog, sync, rounds, turn limit). A win
+  against a weak field and a loss against a strong one on the same seed and seat is
+  not a pair. When the games fall into several such groups the report lists them
+  (`groups` in the JSON).
 * **Per start seat:** mean placement of each seat over all models (positional bias).
 * **Opponent field:** the set of models in a game. A plan with one field says so; a
   report over several plans or ad hoc games splits each model's results by field.
@@ -179,14 +197,14 @@ Per model (95% bootstrap CI, 2000 resamples, rng seed 0; placement: 1 = best, ti
   Ed         5  4.00 [2.00, 6.00]     0.40 [0.00, 0.80]     371.8 [260.0, 483.6]
   Flo        5  1.40 [1.00, 1.80]     0.60 [0.20, 1.00]     868.0 [824.6, 916.8]
 
-Paired placement differences on matched seed and seat (a minus b; negative = a placed better)
+Paired placement differences on matched seed and seat, within one opponent field, track, rules and conditions (a minus b; negative = a placed better)
   Ada vs Cy: -2.62 [-3.75, -1.12]  n=4 pairs (Ada better in 4, Cy in 0)
   Ada vs Ed: -1.50 [-3.25, 0.25]  n=4 pairs (Ada better in 3, Ed in 1)
   Bo vs Di: 0.12 [-0.75, 1.12]  n=4 pairs (Bo better in 1, Di in 1)
   Bo vs Flo: 2.75 [1.50, 4.25]  n=4 pairs (Bo better in 0, Flo in 4)
   Cy vs Ed: 1.38 [-1.25, 4.00]  n=4 pairs (Cy better in 2, Ed in 2)
   Di vs Flo: 2.38 [2.00, 3.12]  n=4 pairs (Di better in 0, Flo in 4)
-  no matched pairs for 9 of 15 model pairs (they never played the same seat on the same seed)
+  no matched pairs for 9 of 15 model pairs (they never played the same seat on the same seed in comparable games)
 
 Mean placement by start seat (positional bias; every seat averages the same in a fair game)
   seat 1: 4.80 [3.40, 5.80]  n=5

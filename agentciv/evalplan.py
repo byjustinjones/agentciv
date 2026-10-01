@@ -31,6 +31,7 @@ import json
 import math
 import os
 import random
+import secrets
 import re
 import sys
 import urllib.error
@@ -109,12 +110,19 @@ def make_plan(track_id: str, models: list[str], seeds: int, rotations: int | Non
         seed = seed_base + si
         for r in shifts:
             order = [lineup[(j - r) % seats] for j in range(seats)]   # lineup[i] sits in seat (i + r) % n
-            body = {"track": track_id, "name": f"{track_id} seed {seed} rotation {r}", "seed": seed,
+            # The title is public (summaries, player views), so it must say nothing about the schedule: the
+            # seed is hidden in live track games and the rotation tells a seat who sits where. Both stay
+            # here, in the operator's plan file.
+            body = {"track": track_id, "name": f"{track_id} {secrets.token_hex(4)}", "seed": seed,
                     "seats": order}
             games.append({"index": len(games), "seed": seed, "rotation": r, "seats": order, "body": body,
                           "game_id": None})
+    # games are created in a random order, so a game id does not give away its place in the schedule either
+    create_order = list(range(len(games)))
+    secrets.SystemRandom().shuffle(create_order)
     return {"format": PLAN_FORMAT, "track": track_id, "seats": seats, "models": models, "lineup": lineup,
-            "seeds": [seed_base + i for i in range(seeds)], "rotations": shifts, "games": games}
+            "seeds": [seed_base + i for i in range(seeds)], "rotations": shifts, "games": games,
+            "create_order": create_order}
 
 
 def load_plan(path) -> dict:
@@ -163,7 +171,10 @@ def create_games(plan: dict, plan_path, url: str, key: str, count: int | None = 
     created again; the old id is kept in ``closed_ids``."""
     base = url.rstrip("/")
     made = []
-    for g in plan["games"]:
+    order = plan.get("create_order")
+    if not (isinstance(order, list) and sorted(order) == list(range(len(plan["games"])))):
+        order = range(len(plan["games"]))   # a plan written before create_order existed
+    for g in (plan["games"][i] for i in order):
         if count is not None and len(made) >= count:
             break
         gid = g.get("game_id")
@@ -294,6 +305,8 @@ def game_rows(doc: dict) -> list[dict]:
     scores = result.get("scores") or {}
     players = summary.get("players") or []
     models = sorted(model_of(p.get("name", p.get("id"))) for p in players)
+    conditions = [len(players), bool(summary.get("fog")), bool(summary.get("sync")),
+                  summary.get("negotiation_rounds"), summary.get("max_turns")]
     rows = []
     for p in players:
         pid = p.get("id")
@@ -315,8 +328,19 @@ def game_rows(doc: dict) -> list[dict]:
             "field": models,
             "track": summary.get("track"),
             "rules_sha256": summary.get("rules_sha256"),
+            "rules_changed": summary.get("rules_changed") or None,
+            "conditions": conditions,
         })
     return rows
+
+
+def comparable(r: dict) -> tuple:
+    """What two seat rows must share to be a matched pair, besides seed and
+    seat: the opponent field, the track, the rules (and no rule change
+    mid-game), and the game conditions. Placing 1st against a weak field and
+    6th against a strong one is not a paired difference."""
+    return (tuple(r["field"]), r.get("track"), r.get("rules_sha256"), tuple(r.get("rules_changed") or ()),
+            tuple(r.get("conditions") or ()))
 
 
 # ================================================================ statistics
@@ -354,12 +378,14 @@ def analyse(rows: list[dict], rng_seed: int = 0, nboot: int = DEFAULT_BOOTSTRAP)
             "win_rate": _stat([r["win"] for r in mine], f"win:{m}", rng_seed, nboot),
             "score": _stat([r["score"] for r in mine], f"score:{m}", rng_seed, nboot),
         }
-    # paired: same seed and seat, different games (the rotation puts each model in each seat)
+    # paired: same seed and seat in different games of one comparable group (the rotation puts each
+    # model in each seat); games of different fields, tracks, rules or conditions are never paired
     cell: dict[tuple, dict[str, list[float]]] = {}
     for r in rows:
         if r["seed"] is None or r["seat"] is None:
             continue
-        cell.setdefault((r["seed"], r["seat"]), {}).setdefault(r["model"], []).append(r["place"])
+        cell.setdefault((comparable(r), r["seed"], r["seat"]), {}).setdefault(r["model"], []).append(r["place"])
+    groups = sorted({comparable(r) for r in rows}, key=repr)
     paired = []
     for a, b in combinations(models, 2):
         diffs = [mean(c[a]) - mean(c[b]) for c in cell.values() if a in c and b in c]
@@ -378,7 +404,10 @@ def analyse(rows: list[dict], rng_seed: int = 0, nboot: int = DEFAULT_BOOTSTRAP)
                 if xs:
                     by_field.append({"field": list(f), "model": m, "games": len(xs), "mean_placement": mean(xs)})
     return {"models": per_model, "paired": paired, "seats": per_seat, "fields": [list(f) for f in fields],
-            "by_field": by_field}
+            "by_field": by_field,
+            "groups": [{"field": list(g[0]), "track": g[1], "rules_sha256": g[2], "rules_changed": list(g[3]),
+                        "conditions": list(g[4]),
+                        "games": len({r["game_id"] for r in rows if comparable(r) == g})} for g in groups]}
 
 
 # ================================================================ provenance warnings
@@ -411,6 +440,14 @@ def provenance(docs: list[dict], rows: list[dict]) -> tuple[list[str], dict]:
                     "; ".join(f"{h[:12]} in {', '.join(g)}" for h, g in real.items()))
     if None in hashes and real:
         warn.append("no rules hash recorded in " + ", ".join(hashes[None]))
+    for d in docs:
+        summ = d.get("summary") or {}
+        if summ.get("rules_changed"):
+            warn.append(f"{d.get('game_id')}: the server was restarted with other rules during the game (started under "
+                        f"{str(summ.get('rules_sha256'))[:12]}, then "
+                        f"{', '.join(str(h)[:12] for h in summ['rules_changed'])}); it is not paired with other games")
+        if summ.get("track") and summ.get("rated") is False:
+            warn.append(f"{d.get('game_id')}: not rated in track {summ['track']} ({summ.get('unrated_reason')})")
     # action log: deadlines, phases and self-identifying messages
     deadlines: dict[str, dict] = {}
     no_log = []
@@ -548,7 +585,14 @@ def format_report(rep: dict) -> str:
                      f"{_f(s['score']['mean'], 1)} {_ci(s['score']['ci95'], 1)}")
     if rep["paired"]:
         lines.append("")
-        lines.append("Paired placement differences on matched seed and seat (a minus b; negative = a placed better)")
+        lines.append("Paired placement differences on matched seed and seat, within one opponent field, track, rules "
+                     "and conditions (a minus b; negative = a placed better)")
+        if len(rep.get("groups") or []) > 1:
+            lines.append(f"  the games fall into {len(rep['groups'])} groups that are not comparable (different field, "
+                         "track, rules or conditions); pairs are formed only inside a group:")
+            for gr in rep["groups"]:
+                lines.append(f"    {gr['games']} games: [{', '.join(gr['field'])}], track {gr['track']}, rules "
+                             f"{str(gr['rules_sha256'])[:12]}" + (" (changed mid-game)" if gr["rules_changed"] else ""))
         none = [p for p in rep["paired"] if not p["pairs"]]
         for p in rep["paired"]:
             if p["pairs"]:
@@ -556,7 +600,7 @@ def format_report(rep: dict) -> str:
                              f"n={p['pairs']} pairs ({p['a']} better in {p['a_better']}, {p['b']} in {p['b_better']})")
         if none:
             lines.append(f"  no matched pairs for {len(none)} of {len(rep['paired'])} model pairs (they never "
-                         "played the same seat on the same seed)")
+                         "played the same seat on the same seed in comparable games)")
     if rep["seats"]:
         lines.append("")
         lines.append("Mean placement by start seat (positional bias; every seat averages the same in a fair game)")
