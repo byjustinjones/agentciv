@@ -929,9 +929,7 @@ class GameSession:
             if ok and not self.saved:
                 with self.cond:
                     frames = self.frames.all_full() if self.frames is not None else []
-                    summary = self.summary()
-                    summary["rating"] = ({"pool": pool, "entries": [[n, r] for n, r in ranked]}
-                                         if ranked else None)
+                    summary = self.summary()  # carries "rating" (finished game), as the live replay does
                     result = self.game.result
                 try:
                     self.manager.storage.save_replay(self.game_id, summary, result, frames)
@@ -1054,6 +1052,11 @@ class GameSession:
                 "result": dict(g.result) if g.result else None,
                 "frames": len(self.frames) if self.frames is not None else g.turn + 1,
             }
+            if g.status == "finished":
+                # the same summary whether the replay is served from memory or from the saved file
+                ranked = self._rated_entries()
+                out["rating"] = ({"pool": "fog" if self.opts.get("fog") else "standard",
+                                  "entries": [[n, r] for n, r in ranked]} if ranked else None)
             if self.error:
                 out["error"] = self.error
             return out

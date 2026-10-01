@@ -209,3 +209,14 @@ def test_record_result_is_idempotent_and_transactional(tmp_path):
     assert st.record_result("g8", ["idle", "idle"]) is False  # one identity: nothing to rate
     assert st.record_result("g9", ["idle", "Alice", "idle"]) is True
     assert st.table["idle"]["games"] == 2 and st.table["Alice"]["games"] == 2
+
+
+def test_replay_is_the_same_before_and_after_it_is_saved(tmp_path, no_workers):
+    """A finished game's replay served from memory (before the finalization)
+    equals the saved file, ``rating`` in the summary included."""
+    manager, session = finished_session(tmp_path)
+    live = session.replay_bytes()
+    assert json.loads(live)["summary"]["rating"]["entries"]
+    assert session._finalize()
+    assert session.replay_bytes() == live == manager.storage.read_replay(session.game_id)
+    manager.shutdown()
