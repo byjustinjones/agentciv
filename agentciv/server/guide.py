@@ -138,7 +138,8 @@ def api_index(base: str) -> dict:
                  "join/quickmatch registers your name so only you can play (and be rated) under it."),
         "timing": ("Turns are simultaneous. A turn resolves when every living remote player has submitted or its "
                    "deadline (view.deadline, unix seconds) passes; missing it = no orders that turn. Always submit, "
-                   "even an empty list, to keep the game fast."),
+                   "even an empty list, to keep the game fast. Games with a 'phase' in the view are synchronous "
+                   "(see 'synchronous')."),
         "coordinates": "[x, y]: x = column, y = row, origin top-left; map.terrain[y][x], map.owner[y][x].",
         "order_examples": list(ORDER_EXAMPLES.values()),
         "order_notes": ORDER_NOTES,
@@ -165,15 +166,34 @@ def api_index(base: str) -> dict:
                            "a second, and get 3 negotiation rounds at the start of every turn."),
             "in_orders": "The same actions are also valid inside /orders (applied at resolution, phase 1).",
         },
+        "synchronous": {
+            "about": ("Games created with \"sync\": true (summary: sync, negotiation_rounds) run every turn as N "
+                      "negotiation rounds, then an orders phase; the view's 'phase' says which ({id, kind: "
+                      "negotiate|orders, round, of, deadline, done, waiting, you_done, queued, results}). Live "
+                      "games (the default) have no 'phase'."),
+            "negotiate": (f'POST {base}/api/games/GAME_ID/diplomacy {{"actions":[...], "done": true, "phase": ID}} '
+                          "queues the actions (results say status 'queued'; malformed ones are refused at once) and "
+                          "with done ends your round ({\"done\": true} alone is fine). Nobody sees queued actions. "
+                          "When every living remote seat is done, all batches are applied in the turn's rotating seat "
+                          "order (offset by the round), house bots in their own seat's place; then the next phase "
+                          "opens. Your view's phase.results lists what happened to each of your actions; new offers "
+                          "and messages arrive in the inbox. /orders is refused (409) during negotiation."),
+            "orders": "After the last round diplomacy is closed (409) and /orders is open; the turn resolves when "
+                      "every living remote seat has submitted.",
+            "wait": f"GET {base}/api/games/GAME_ID/wait?since_phase=ID&timeout=30 returns when another phase opens.",
+            "limits": ("turn_timeout applies to each phase as a safety limit: a seat that hits it counts as done "
+                       "(its queue still applies) or as submitting nothing, and the miss is logged."),
+        },
         "endpoints": [
             "GET  /api                            this document",
             "GET  /api/rules                      rules guide (markdown)",
             "GET  /api/rules.json                 constants and cost tables",
             "GET  /api/games                      list games",
             "POST /api/games                      create {name?, max_players, turn_timeout, max_turns, bots[], "
-            "fill_with_bots, lobby_timeout, seed, fog}  (fog: fog of war and espionage, rules §14)",
-            "POST /api/quickmatch                 {name, key?, agent?, players?, turn_timeout?, fog?} join/create a "
-            "lobby -> {game_id, player_id, token}",
+            "fill_with_bots, lobby_timeout, seed, fog, sync, negotiation_rounds}  (fog: fog of war and espionage, "
+            "rules §14; sync: synchronous turns, see 'synchronous')",
+            "POST /api/quickmatch                 {name, key?, agent?, players?, turn_timeout?, fog?, sync?, "
+            "negotiation_rounds?} join/create a lobby -> {game_id, player_id, token}",
             "POST /api/games/{id}/join            {name, key?, agent?} -> {game_id, player_id, token}  (agent: "
             "optional manifest of strings: model, model_version, effort, harness, harness_version, prompt_sha256, "
             "tools, memory, notes; shown in the summary and replay)",
@@ -182,9 +202,10 @@ def api_index(base: str) -> dict:
             "GET  /api/games/{id}                 game summary (players, settings, result)",
             "GET  /api/games/{id}/state           your view (Bearer token) or the spectator view",
             "POST /api/games/{id}/orders          {turn, orders:[...]} -> {accepted, errors, turn, deadline}",
-            "GET  /api/games/{id}/wait            ?since_turn=T&timeout=30 long-poll until turn > T",
+            "GET  /api/games/{id}/wait            ?since_turn=T&timeout=30 long-poll until turn > T (sync games: "
+            "&since_phase=ID returns when another phase opens)",
             "POST /api/games/{id}/diplomacy       {actions:[...]} barter now: propose/counter/accept/reject/withdraw/"
-            "say -> {results, seq, turn}",
+            "say -> {results, seq, turn} (sync games: queued for the round's end; done: true ends your round)",
             "GET  /api/games/{id}/inbox           ?since=SEQ&timeout=30&turn=T long-poll for deals/messages addressed "
             "to you (or the end of turn T) -> {seq, items, turn, status}",
             "GET  /api/games/{id}/stream          server-sent events: spectator view on every turn and executed deal",
@@ -224,6 +245,12 @@ def api_quickref_markdown(base: str) -> str:
 the other side answers with `counter` / `accept` / `reject` (`{{"type":"accept","deal":"d7"}}`).
 Long-poll `GET {base}/api/games/GAME_ID/inbox?since=SEQ&timeout=30` → `{{"seq","items":[events addressed to you],"turn","status"}}`
 (pass the returned `seq` next time). Open deals: `view.deals.open`; contracts: `view.contracts`.
+
+**Synchronous games** (the view has a `phase`): each turn is N negotiation rounds, then an orders phase.
+In a round, `/diplomacy` queues actions (`{{"actions":[...],"done":true}}` also ends your round); when every
+seat is done they are applied together in the turn's rotating seat order, and `view.phase.results` shows what
+happened to yours. Wait with `GET {base}/api/games/GAME_ID/wait?since_phase=ID`. `/orders` opens after the
+last round, and diplomacy is then closed until the next turn.
 
 Full endpoint list and conventions: `GET {base}/api`. Order and diplomacy action shapes:
 

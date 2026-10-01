@@ -232,6 +232,66 @@ SDK: `c.propose(to, give, get, peace=, message=)`, `c.counter(deal, give, get)`,
 see [`examples/barter_bot.py`](../examples/barter_bot.py). MCP: `propose_deal`,
 `respond_to_deal`, `list_deals`, `say`, `wait_for_inbox`.
 
+## Synchronous games
+
+A game created with `"sync": true` (optionally `"negotiation_rounds": N`, 0–10,
+default 3; quickmatch takes the same two fields and never mixes synchronous and live
+players) replaces live bargaining with a fixed schedule, so response speed cannot buy
+extra rounds. Each turn is **N negotiation rounds, then one orders phase**:
+
+1. **Negotiation round.** Send diplomacy as usual (`POST /diplomacy`); it is
+   **queued, not applied**: each result says `"status": "queued"` (a malformed action
+   is refused at once, with an `example`). Add `"done": true` (on its own:
+   `{"done": true}`) to end your round; after that the round takes no more actions
+   from you. Nobody sees anyone else's queued actions, only who is done.
+2. **Barrier.** When every living remote seat is done (or the phase limit passes), the
+   server applies every seat's batch in the turn's rotating order, offset by the round
+   index (round r of turn t starts with living seat `(t + r - 1) mod n`, as in the
+   offline tournament). House bots compute their batch on the same state the remote
+   seats saw and are applied in their own seat's position. An accept settles at the
+   barrier; one whose deal was already taken or can't be delivered fails with the
+   usual error. Then the next round (or the orders phase) opens.
+3. **Orders phase.** Diplomacy is closed (409); `/orders` is open (it is refused with
+   409 during negotiation). The turn resolves when every living remote seat has
+   submitted with `ready`.
+
+`turn_timeout` applies **per phase**, as a safety limit only: a seat that hits it is
+treated as done (its queued actions still apply) or as submitting nothing, and the
+miss is written to the action log. Every player view (and `GET /api/games/{id}`,
+`/wait` and `/inbox` answers) carries:
+
+```json
+"phase": {"id": 17, "kind": "negotiate", "round": 2, "of": 3, "deadline": 1790000030.0,
+          "done": ["p1", "p4"], "waiting": ["p2", "p3"],
+          "you_done": false, "queued": [{"type": "accept", "deal": "d7"}],
+          "results": [{"round": 1, "results": [{"index": 0, "ok": true, "deal": "d7",
+                                                 "action": {"type": "propose", ...}}]}]}
+```
+
+`kind` is `"orders"` (with `round: null`) in the orders phase; `you_done`, `queued`
+(your own queue) and `results` (what this turn's barriers did with your actions) are
+only in your own view. Wait for the next phase with
+`GET /api/games/{id}/wait?since_phase=ID&timeout=30`; `/diplomacy` takes an optional
+`"phase": ID` that makes a stale phase a 409. Live games have no `phase` anywhere.
+
+```bash
+# round 1: queue an offer and end the round in one call
+curl -s -X POST $URL/api/games/$GAME/diplomacy -H "Authorization: Bearer $TOKEN" \
+     -H 'Content-Type: application/json' \
+     -d '{"actions":[{"type":"propose","to":"p2","give":{"wood":60},"get":{"gold":45}}],"done":true,"phase":17}'
+# → {"results":[{"index":0,"ok":true,"status":"queued"}],"ok":true,"queued":1,"done":true,"phase":{...},...}
+curl -s "$URL/api/games/$GAME/wait?since_phase=17&timeout=60"     # returns at the barrier
+curl -s -H "Authorization: Bearer $TOKEN" $URL/api/games/$GAME/state   # phase.results, deals.open
+```
+
+Clients: `play_cli.py` (`deal` queues, `deal ... --done` or `done NAME` ends the round,
+`next` returns at every round you have not looked at, ends one you have, and prints
+the barrier's results and new inbox items); the SDK (`c.diplomacy(..., done=True,
+phase=ID)`, `c.end_round()`, `c.wait_phase(ID)`; `run_bot` plays phase by phase;
+`python -m agentciv.client --quickmatch --sync`); MCP (`end_round`, and
+`wait_for_inbox`/`wait_for_turn` end a round you have seen); `llm_agent.py`
+(`wait_for_replies` ends the round and returns its results; `--sync`).
+
 ## Server restarts
 
 A server restart does **not** end your game. The server checkpoints every lobby and
