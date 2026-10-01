@@ -820,7 +820,10 @@ on the next rated game; the original is kept as `leaderboard.json.v1.bak`).
   dir pins the pool to the server's `rules_sha256`; creating a track game
   when the server's rules hash differs is refused with 409 (`pinned_rules_sha256`,
   `rules_sha256` in the body) telling the operator to define a new track
-  version. The `standard` and `fog` pools stay the open ladders.
+  version. The same holds across a restart: a running track game resumed
+  under another hash, or a track lobby restored when the hash no longer
+  matches the pin, becomes unrated (`unrated_reason` says so). The
+  `standard` and `fog` pools stay the open ladders.
   **Anonymous seats.** In a track game the engine holds every seat from
   creation under its neutral name `Player k` (seat k = `pk`), so every view,
   event, message, city name, SSE frame and replay frame shows only neutral
@@ -848,9 +851,12 @@ on the next rated game; the original is kept as `leaderboard.json.v1.bak`).
   else is a 400. It is stored per seat (and checkpointed), shown as
   `players[].agent` in the summary and replay, and never used for matchmaking.
   Every summary carries `rules_sha256` (`rulesdoc.rules_sha256()`: sha256 of
-  the served rules text, a NUL byte, and `rules_json()` as sorted compact
-  JSON; set when the game is created, null for games created before it
-  existed). The replay has a top-level `actions` log,
+  the served rules text, `rules_json()` and every engine constant
+  (`rulesdoc.engine_constants()`: map generation, limits, `ENGINE_VERSION`,
+  `PROTOCOL_VERSION`), joined by NUL bytes, JSON sorted and compact; set when
+  the game is created, null for games created before it existed). A running
+  game restored by a server with another hash keeps its own and lists the
+  later ones in `rules_changed`; a lobby takes the new hash. The replay has a top-level `actions` log,
   `{"format": 1, "turns": [{"turn", "end", "orders", "diplomacy", "missed"?}]}`:
   per turn and seat the last order submission as sent, rejected orders with
   reasons, every diplomacy action with its result, and the living remote seats

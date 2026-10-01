@@ -1571,6 +1571,9 @@ class GameSession:
             }
             if self._anon:
                 out["seats_fixed"] = bool(self.opts.get("seats"))  # the operator assigned the seats
+            if self.opts.get("rules_changed"):
+                # the server was restarted with other rules while this game was running (rules_sha256 = at its start)
+                out["rules_changed"] = list(self.opts["rules_changed"])
             if self._sync and g.status == "running":
                 out["phase"] = self._phase_view()
             if isinstance(g, PuzzleGame):
@@ -1896,9 +1899,42 @@ class GameSession:
         elif g.status == "finished":
             g.deadline = None
             self.finished_mono = now
+        self._check_resumed_rules()
         self._ckpt_force = True  # re-checkpoint at once (new deadline; no longer a "clean" snapshot)
         self._ckpt_last = now
         return self
+
+    def _check_resumed_rules(self) -> None:
+        """A restored lobby or running game whose server now runs other rules
+        than the game was created under (``rules_sha256``). A lobby has
+        played nothing yet and simply takes the current hash. A running game
+        keeps the hash it started with and lists every later one in
+        ``rules_changed`` (shown in its summary and replay). A track game is
+        frozen to its pool's pinned rules, so one that no longer matches them
+        stops being rated: creation refuses this mismatch, a restart must not
+        let it through. Finished games and games from before the hash existed
+        are left alone."""
+        g = self.game
+        started, current = self.opts.get("rules_sha256"), rules_sha256()
+        if g.status == "finished" or started is None:
+            return
+        changed = list(self.opts.get("rules_changed") or [])
+        if current == (changed[-1] if changed else started):
+            return
+        if g.status == "lobby":
+            self.opts["rules_sha256"] = current
+        else:
+            self.opts["rules_changed"] = changed + [current]
+        if self.track_id and self.opts.get("rated"):
+            pinned = self.manager.storage.pinned_rules(self.track_id)
+            if g.status != "lobby" or (pinned is not None and pinned != current):
+                self.opts["rated"] = False
+                self.opts["unrated_reason"] = (
+                    f"rules changed: track {self.track_id} is pinned to rules {str(pinned or started)[:12]}, "
+                    f"and the server resumed this game under {current[:12]}")
+        log.warning("game %s (%s) was created under rules %s and resumed under %s%s", self.game_id, g.status,
+                    started[:12], current[:12],
+                    "" if self.opts.get("rated") else "; it is not rated: " + str(self.opts.get("unrated_reason")))
 
 
 class ArchivedGame:

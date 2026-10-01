@@ -390,3 +390,96 @@ def test_checkpoint_restore_keeps_anonymity_and_the_mapping(tmp_path, small_trac
         assert sorted(r["name"] for r in rows) == sorted(REAL[:3])
     finally:
         srv.stop()
+
+
+# ---------------------------------------------------------------- restart under other rules
+def _restart(data, monkeypatch, sha):
+    """A new server on the same data dir whose rules hash is ``sha``."""
+    monkeypatch.setattr(manager_mod, "rules_sha256", lambda: sha)
+    return create_server("127.0.0.1", 0, data_dir=data, spectator_key=KEY).start_background()
+
+
+def test_track_game_resumed_under_other_rules_is_not_rated(tmp_path, small_track, monkeypatch):
+    """Creation refuses a track game when the rules differ from the pool's
+    pin; a restart must not let a running one through either."""
+    data = str(tmp_path / "data")
+    srv = _restart(data, monkeypatch, "a" * 64)
+    try:
+        gid, seats = _finished_small_game(srv)
+        play_turn(srv, gid, seats)
+    finally:
+        srv.stop()
+    srv = _restart(data, monkeypatch, "b" * 64)
+    try:
+        assert gid in srv.manager.restored
+        summ = json.loads(raw(srv, f"/api/games/{gid}"))
+        assert summ["rules_sha256"] == "a" * 64 and summ["rules_changed"] == ["b" * 64]
+        assert summ["rated"] is False and "rules changed" in summ["unrated_reason"]
+        play_turn(srv, gid, seats)
+        assert wait_until(lambda: srv.manager.storage.summary(gid) is not None)
+        saved = srv.manager.storage.summary(gid)
+        assert saved["rating"] is None and saved["rules_changed"] == ["b" * 64] and saved["rated"] is False
+        assert not srv.manager.storage.is_applied(gid, SMALL)
+        assert json.loads(raw(srv, f"/api/leaderboard?track={SMALL}")) == []
+    finally:
+        srv.stop()
+
+
+def test_restart_under_the_same_rules_changes_nothing(tmp_path, small_track, monkeypatch):
+    data = str(tmp_path / "data")
+    srv = _restart(data, monkeypatch, "a" * 64)
+    try:
+        gid, seats = _finished_small_game(srv)
+        play_turn(srv, gid, seats)
+    finally:
+        srv.stop()
+    srv = _restart(data, monkeypatch, "a" * 64)
+    try:
+        summ = json.loads(raw(srv, f"/api/games/{gid}"))
+        assert summ["rules_sha256"] == "a" * 64 and "rules_changed" not in summ and summ["rated"] is True
+    finally:
+        srv.stop()
+
+
+def test_track_lobby_resumed_under_other_rules_is_not_rated(tmp_path, small_track, monkeypatch):
+    data = str(tmp_path / "data")
+    srv = _restart(data, monkeypatch, "a" * 64)
+    try:
+        s, r = call(srv, "POST", "/api/games", {"track": SMALL})
+        assert s == 200
+        gid = r["game_id"]
+    finally:
+        srv.stop()
+    srv = _restart(data, monkeypatch, "b" * 64)
+    try:
+        summ = json.loads(raw(srv, f"/api/games/{gid}"))
+        # nothing was played under the old rules: the lobby takes the new hash, but the pool is pinned to the old
+        assert summ["status"] == "lobby" and summ["rules_sha256"] == "b" * 64 and "rules_changed" not in summ
+        assert summ["rated"] is False and "pinned" in summ["unrated_reason"]
+    finally:
+        srv.stop()
+
+
+def test_open_game_resumed_under_other_rules_records_the_change(tmp_path, monkeypatch):
+    """The open ladders promise no frozen rules: the game stays rated, and its summary says what happened."""
+    data = str(tmp_path / "data")
+    srv = _restart(data, monkeypatch, "a" * 64)
+    try:
+        s, r = call(srv, "POST", "/api/games", {"max_players": 2, "turn_timeout": 60})
+        gid = r["game_id"]
+        for name in ("Ann", "Ben"):
+            assert call(srv, "POST", f"/api/games/{gid}/join", {"name": name})[0] == 200
+        assert wait_until(lambda: json.loads(raw(srv, f"/api/games/{gid}"))["status"] == "running")
+    finally:
+        srv.stop()
+    srv = _restart(data, monkeypatch, "b" * 64)
+    try:
+        summ = json.loads(raw(srv, f"/api/games/{gid}"))
+        assert summ["rules_sha256"] == "a" * 64 and summ["rules_changed"] == ["b" * 64] and summ["rated"] is True
+    finally:
+        srv.stop()
+    srv = _restart(data, monkeypatch, "b" * 64)   # a second restart under the same rules adds nothing
+    try:
+        assert json.loads(raw(srv, f"/api/games/{gid}"))["rules_changed"] == ["b" * 64]
+    finally:
+        srv.stop()
