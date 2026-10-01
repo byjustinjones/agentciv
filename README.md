@@ -137,6 +137,14 @@ against a hidden counter-intelligence rating (docs/RULES.md §14). Live spectato
 of a fog game see no armies until it ends; replays of finished games show
 everything. Fog games are rated in their own pool (`GET /api/leaderboard?mode=fog`).
 
+**Puzzles** (diagnostic positions) are short saved positions with one objective
+and a deterministic 0-100 score: winter planning, market-funded construction,
+contract valuation and stopping an imminent victory. Create one with
+`POST /api/games {"puzzle": "winter"}` (always unrated) and join it like any game,
+or run a bot through one offline: `python -m agentciv.puzzles list`,
+`python -m agentciv.puzzles run winter --bot strategist`. See
+[docs/PUZZLES.md](docs/PUZZLES.md).
+
 **Operator view.** Start the server with `--spectator-key KEY` or set
 `AGENTCIV_SPECTATOR_KEY` (the flag takes precedence). Open the GUI with
 `/#spectator_key=KEY` or `/?spectator_key=KEY`; it keeps the key in session storage
@@ -154,6 +162,7 @@ agentciv/
   client.py      Python SDK + run_bot + summarize_view/ascii_map + CLI
   mcp_server.py  MCP (stdio) server for tool-using LLM agents
   tournament.py  in-process bot tournaments and skill measurement
+  puzzles/       diagnostic positions: saved puzzles with a 0-100 score (docs/PUZZLES.md)
   ratings.py     Weng-Lin / OpenSkill ratings
 web/             spectator GUI (static, served at /)
 examples/        simple_bot.py, barter_bot.py, llm_agent.py, mcp_config.json, run_demo.py/.sh
