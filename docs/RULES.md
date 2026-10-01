@@ -209,6 +209,8 @@ A stack can be split with several move orders (the total per unit type can't exc
    First steps clash first; then crossings that involve the second step of a cavalry move (cavalry can't slip past a stack coming the other way).
 2. All moves land. On each tile with hostile sides, sides are sorted by raw power (Σ count·strength, + garrison) ascending; the weakest side fights the weakest side hostile to it; the winner (with losses) re-enters the queue; repeat until no hostile pairs remain.
    Ties: the defender (a side that was on the tile at the start of the turn, or the city owner) wins; otherwise both are destroyed.
+   Sides of equal raw power are queued defenders first, then in this turn's rotating player order (defined in step 4). With three hostile attackers of equal power,
+   the first two in that order destroy each other and the third keeps its units; which player is third changes every turn. In a border clash, equal sides moving in the same direction are queued in that rotating order too.
 3. Duel with powers Pw > Pl: the loser is destroyed; the winner loses round(count · (1 − sqrt(1 − (Pl/Pw)²))) of each unit type (Lanchester square law):
 
 | Pl/Pw | winner loses | of 10 units |

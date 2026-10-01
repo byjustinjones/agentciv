@@ -1093,7 +1093,10 @@ class Game:
                     avail[u] -= k
                 groups.append(_Group(p.id, src, list(o["path"]), take, o))
 
-        self._border_clashes(groups)
+        # equal-power battle sides queue in this turn's rotating order (§7),
+        # so no seat wins every tie
+        rank = self._turn_rank()
+        self._border_clashes(groups, rank)
 
         # land every move
         new: dict = {}
@@ -1131,7 +1134,7 @@ class Game:
                     pid=q, units=dict(per.get(q, {})), defender=defender, city_owner=is_owner,
                     garrison=float(city.garrison) if is_owner else 0.0,
                     terrain_bonus=defender and defensive,
-                    order=(0 if defender else 1, self._by_id[q].index)))
+                    order=(0 if defender else 1, rank.get(q, len(rank)))))
             records = combat.resolve(sides, self.hostile, walls=city.walls if city is not None else 0)
             for rec in records:
                 self._emit("battle", **self._xy_fields(i), clash=False, **rec)
@@ -1182,17 +1185,23 @@ class Game:
         cands = [q for q in per if own is None or self.hostile(q, own)]
         if not cands:
             return None
-        rank = {p.id: k for k, p in enumerate(self._rotated())}
+        rank = self._turn_rank()
         return min(cands, key=lambda q: (-combat.military_power(per[q]), rank.get(q, len(rank))))
 
-    def _border_clashes(self, groups: list) -> None:
+    def _turn_rank(self) -> dict:
+        """Player id -> position in this turn's rotating order (``_rotated``).
+        Tie-break for equal-power battle sides and captures; players not in
+        the rotation (eliminated city owners) sort last."""
+        return {p.id: k for k, p in enumerate(self._rotated())}
+
+    def _border_clashes(self, groups: list, rank: dict) -> None:
         """Hostile groups crossing the same edge in opposite directions fight
         there: first steps against first steps, then every crossing that
         involves the second step of a cavalry move (survivors only)."""
         by_edge: dict = {}
         for g in groups:
             by_edge.setdefault((g.src, g.path[0]), []).append(g)
-        self._clash_edges(by_edge)
+        self._clash_edges(by_edge, rank)
         by_edge = {}
         for g in groups:
             if not g.units:
@@ -1203,9 +1212,9 @@ class Game:
                 if g not in lst and g not in by_edge.get((step, prev), ()):
                     lst.append(g)
                 prev = step
-        self._clash_edges(by_edge)
+        self._clash_edges(by_edge, rank)
 
-    def _clash_edges(self, by_edge: dict) -> None:
+    def _clash_edges(self, by_edge: dict, rank: dict) -> None:
         for (a, b) in sorted(by_edge):
             if a > b or (b, a) not in by_edge:
                 continue
@@ -1221,7 +1230,7 @@ class Game:
                     for g in gs:
                         for u, c in g.units.items():
                             units[u] = units.get(u, 0) + c
-                    sides.append(combat.Side(pid=q, units=units, order=(d, self._by_id[q].index), payload=gs))
+                    sides.append(combat.Side(pid=q, units=units, order=(d, rank.get(q, len(rank))), payload=gs))
             fwd = [s for s in sides if s.order[0] == 0]
             back = [s for s in sides if s.order[0] == 1]
             if not any(self.hostile(s.pid, r.pid) for s in fwd for r in back):

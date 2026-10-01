@@ -312,6 +312,14 @@ subject to the walls multiplier.
    start of the turn, or the city owner) wins ties (its units are still lost by
    the formula below, but a garrison survives); otherwise both are destroyed.
    A city owner's garrison stays in the queue for as long as it keeps winning.
+   Sides of equal raw power are queued defenders first, then by the player's
+   position in the turn's rotating order `_rotated()` (as in phase 1 and
+   capture). With three equal hostile attackers the first two in that order
+   destroy each other and the third keeps its units; which seat is third
+   rotates every turn. (The tie-break used to be the fixed seat index, so the
+   last seat won every such three-way tie.) Border clashes queue equal sides
+   by direction of movement, then by the same rotating order. Symmetric
+   simultaneous resolution and pooling allied power are not implemented.
 3. A battle between sides with powers `Pw > Pl`: the loser is destroyed; the
    winner loses `round(count_t · (1 − sqrt(1 − (Pl/Pw)²)))` of each unit type
    (Lanchester square law).

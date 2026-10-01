@@ -222,6 +222,87 @@ def test_three_way_battle_on_one_tile():
     assert g.armies[g.idx(8, 8)] == {"p3": {"infantry": 8}}
 
 
+THREE_WAY = [("p1", (7, 8)), ("p2", (9, 8)), ("p3", (8, 9))]
+
+
+@pytest.mark.parametrize("turn,survivor", [(0, "p3"), (1, "p1"), (2, "p2")])
+def test_equal_three_way_tie_follows_the_rotating_order(turn, survivor):
+    """Three equal hostile attackers: the first two in this turn's rotating
+    order annihilate each other and the last keeps its units. The seat that
+    is last rotates every turn (it used to be p3 on every turn)."""
+    g = world()
+    g.turn = turn
+    for q, src in THREE_WAY:
+        g.place_units(*src, q, {"infantry": 5})
+    ev = run_turn(g, {q: [{"type": "move", "from": list(src), "to": [8, 8]}] for q, src in THREE_WAY})
+    b = events_of(ev, "battle")
+    assert len(b) == 1 and b[0]["winner"] is None
+    assert survivor not in b[0]["sides"]
+    assert g.armies[g.idx(8, 8)] == {survivor: {"infantry": 5}}
+
+
+def test_equal_three_way_survivor_differs_on_consecutive_turns():
+    survivors = set()
+    for turn in (0, 1, 2):
+        g = world()
+        g.turn = turn
+        for q, src in THREE_WAY:
+            g.place_units(*src, q, {"infantry": 5})
+        run_turn(g, {q: [{"type": "move", "from": list(src), "to": [8, 8]}] for q, src in THREE_WAY})
+        survivors |= set(g.armies[g.idx(8, 8)])
+    assert survivors == {"p1", "p2", "p3"}
+
+
+@pytest.mark.parametrize("turn", [0, 1, 2])
+def test_equal_two_way_tie_still_annihilates_both(turn):
+    g = world()
+    g.turn = turn
+    g.place_units(7, 8, "p1", {"infantry": 5})
+    g.place_units(9, 8, "p2", {"infantry": 5})
+    ev = run_turn(g, {
+        "p1": [{"type": "move", "from": [7, 8], "to": [8, 8]}],
+        "p2": [{"type": "move", "from": [9, 8], "to": [8, 8]}],
+    })
+    b = events_of(ev, "battle")
+    assert len(b) == 1 and b[0]["winner"] is None
+    assert g.idx(8, 8) not in g.armies
+
+
+@pytest.mark.parametrize("turn", [0, 1, 2])
+def test_defender_wins_ties_whatever_the_rotation(turn):
+    """Defenders queue before attackers and win equal duels, even on turns
+    where the attacker comes first in the rotating order."""
+    g = world()
+    g.turn = turn
+    set_terrain(g, 8, 8, ".")
+    g.place_units(8, 8, "p2", {"infantry": 5})
+    g.place_units(7, 8, "p1", {"infantry": 5})
+    ev = run_turn(g, {"p1": [{"type": "move", "from": [7, 8], "to": [8, 8]}]})
+    b = events_of(ev, "battle")
+    assert len(b) == 1 and b[0]["winner"] == "p2"
+    assert "p1" not in g.armies.get(g.idx(8, 8), {})
+
+
+@pytest.mark.parametrize("turn,first", [(0, "p1"), (1, "p2")])
+def test_border_clash_equal_sides_queue_in_the_rotating_order(turn, first):
+    """Two equal allied stacks crossing an edge against a stronger enemy:
+    the one first in this turn's rotating order fights first."""
+    g = world()
+    g.turn = turn
+    g.treaties[("p1", "p2")] = 99
+    g.place_units(5, 5, "p1", {"infantry": 3})
+    g.place_units(5, 5, "p2", {"infantry": 3})
+    g.place_units(6, 5, "p3", {"infantry": 5})
+    ev = run_turn(g, {
+        "p1": [{"type": "move", "from": [5, 5], "to": [6, 5]}],
+        "p2": [{"type": "move", "from": [5, 5], "to": [6, 5]}],
+        "p3": [{"type": "move", "from": [6, 5], "to": [5, 5]}],
+    })
+    b = events_of(ev, "battle")
+    assert b and all(x["clash"] for x in b)
+    assert b[0]["sides"] == [first, "p3"]
+
+
 def test_capture_skips_tiles_with_foreign_units():
     g = world()
     city = g.add_city(8, 8, "p2")
