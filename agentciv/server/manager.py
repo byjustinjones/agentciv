@@ -408,7 +408,7 @@ class GameSession:
         self._bots_queued: set[str] = set()      # house bots whose batch for this round is queued
         self._sync_results: dict[str, list] = {}  # pid -> [{"round", "results"}] of this turn's barriers
         self._neg_spent = 0.0          # seconds of house-bot negotiate() this turn (NEGOTIATION_BUDGET)
-        self._thread =threading.Thread(target=self._run, name=f"game-{game_id}", daemon=True)
+        self._thread = threading.Thread(target=self._run, name=f"game-{game_id}", daemon=True)
         # checkpoints (see checkpoint())
         self._ckpt_io = threading.Lock()   # serialises checkpoint writes; taken before (never inside) self.lock
         self._ckpt_dirty = True            # state changed since the last checkpoint
