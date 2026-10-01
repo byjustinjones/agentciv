@@ -223,14 +223,15 @@ A stack can be split with several move orders (the total per unit type can't exc
 | 1 | 100% | 10 |
 
 4. **Capture**: after the battles all units left on a tile belong to players at peace with each other. If the tile is owned by a player hostile to (some of) them
-   and the owner has no units there, it goes to the one of them hostile to the owner with the largest military power (no capture on a tie, below) — so allies attacking together can capture.
+   and the owner has no units there, it goes to the one of them hostile to the owner with the largest military power (ties: below) — so allies attacking together can capture.
    A city is captured only if its garrison was defeated. On city capture: walls drop one level; the victim's tiles in radius 1 (without other players' units) transfer;
    a wonder there is destroyed; and if it was the victim's **original capital**, the captor plunders 50% of the victim's food, wood, stone and gold.
    Capturing an original capital from its original owner also moves floor(bank·0.5) of that player's bank to the captor as gold (`plunder.bank`)
    and lowers that player's legacy by floor(legacy·0.25) (`legacy_lost` on the `city_captured` event). A recapture by the original owner does neither.
    The capture of **any** city sets the economic and influence streaks of the player who lost it to 0 (§11).
    Relic tiles are never handed over with a city.
-   If two or more players could capture a tile and the largest military powers among them are equal, nobody captures it.
+   If two or more players could capture a tile and the largest military powers among them are equal, the tile goes to the one of them that comes first in
+   this turn's rotating player order: the living players in seat order, starting from the one at position (turn mod number of living players), counting from 0.
 
 **Relics** are taken only by **occupation**: when, after the battles, the relic's owner has no units on it and some player with units there is hostile to the owner (or the relic is unowned), the capturer chosen as above becomes its owner (`tile_captured` event with `"relic": true`).
 An owned relic yields 15 score and 3 influence per turn while it is **guarded** — its owner has units on it at the end of the turn (`map.relics[].guarded`, `players[].relics_guarded`) — and 1 influence per turn otherwise. Relics are not a victory condition.

@@ -339,3 +339,20 @@ def test_mcp_accept_includes_warnings_computed_before_deal_executes(monkeypatch)
     client.diplomacy.assert_called_once_with([{"type": "accept", "deal": "d1"}])
     assert "Deal d1 accepted and executed" in text
     assert "400 food exceeds projected stock 315 food" in text
+
+
+def test_mcp_peace_proposal_on_a_streak_adds_free_break_notes(monkeypatch):
+    client = Mock(spec=AgentCivClient)
+    client.token = "token"
+    view = tooling_view()
+    view["players"][0]["influence_streak"] = 2
+    client.state.return_value = view
+    client.diplomacy.return_value = {"results": [{"ok": True, "deal": "d4"}]}
+    monkeypatch.setattr("agentciv.mcp_server.AgentCivClient", Mock(return_value=client))
+    mcp = AgentCivMCP("http://unused.invalid")
+    text = mcp.propose_deal("p2", give={"gold": 100}, peace=20)
+    assert "Deal d4 proposed" in text and "p2 can break this treaty for free" in text
+    client.state.reset_mock()
+    text = mcp.propose_deal("p2", give={"gold": 100})            # no peace: no notes, no state fetch
+    assert "Notes" not in text
+    client.state.assert_not_called()

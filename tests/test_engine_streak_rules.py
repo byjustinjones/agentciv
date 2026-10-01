@@ -221,3 +221,45 @@ def test_mutual_break_with_one_side_streaking():
     assert bb["p1"]["free"] and bb["p1"]["removed"] == 0 and p1.betrayals == 0
     assert not bb["p2"]["free"] and bb["p2"]["removed"] == 500 * C.TREATY_BREAK_PCT // 100 and p2.betrayals == 1
     assert g.player_view("p3")["treaty_cooldowns"][0]["notice_until"] == bb["p1"]["turn"] + C.TREATY_BREAK_NOTICE
+
+
+def test_full_summary_lists_a_rivals_streak_pause():
+    """summarize_view (play_cli state/next, MCP get_state) shows streak_paused
+    among the notable events, for the player and for rivals (retune review)."""
+    from agentciv.client import summarize_view
+    g = world()
+    p1 = g.player("p1")
+    p1.bank = C.BANK_VICTORY
+    run_turn(g, {"p1": deposit(g)})
+    run_turn(g)                                         # p1 banks nothing: paused
+    for viewer in ("p1", "p2"):
+        text = summarize_view(g.player_view(viewer))
+        assert "streak_paused" in text.split("Notable events last turn:")[1], viewer
+
+
+def test_peace_deal_notes_for_a_streak_holder_handing_something_over():
+    """Client notes (play_cli deal, MCP deal tools): a streak holder who buys
+    peace is told the partner can break it for free and what comes back."""
+    from agentciv.client import peace_deal_notes
+    g = world()
+    p1 = g.player("p1")
+    p1.resources["gold"] += 500
+    offer = {"type": "propose", "to": "p2", "give": {"gold": 400}, "get": {}, "peace": 20}
+    assert peace_deal_notes(g.player_view("p1"), [offer]) == []          # no streak yet
+    p1.bank = C.BANK_VICTORY
+    run_turn(g, {"p1": deposit(g)})
+    assert p1.economic_streak == 1
+    v = g.player_view("p1")
+    notes = peace_deal_notes(v, [offer])
+    assert len(notes) == 1 and "p2 can break this treaty for free" in notes[0] and "400 gold" in notes[0]
+    assert peace_deal_notes(v, [{**offer, "peace": None}]) == []           # no peace in the deal
+    assert peace_deal_notes(v, [{**offer, "give": {}, "get": {"gold": 5}}]) == []   # nothing handed over
+    notes = peace_deal_notes(v, [{**offer, "give": {"tiles": [[3, 2]]}}])
+    assert len(notes) == 1 and "1 tile(s)" in notes[0]
+    # accepting p2's peace offer that asks for wood and a contract
+    d = g.diplomacy("p2", [{"type": "propose", "to": "p1", "give": {}, "peace": 20,
+                            "get": {"wood": 10, "per_turn": {"gold": 5}, "turns": 10}}])[0]
+    assert d["ok"], d
+    notes = peace_deal_notes(g.player_view("p1"), [{"type": "accept", "deal": d["deal"]}])
+    assert len(notes) == 1 and "10 wood" in notes[0] and "a contract" in notes[0]
+    assert peace_deal_notes(g.player_view("p2"), [{"type": "accept", "deal": d["deal"]}]) == []

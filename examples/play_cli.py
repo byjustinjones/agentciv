@@ -24,6 +24,7 @@ Orders and diplomacy action formats: see ``rules`` (docs/RULES.md).
 Deal propose/counter/reject ``message`` fields have a 300-character limit;
 say/message text has a 500-character limit. ``deal --help`` prints this help.
 Deal accepts with projected contract shortfalls are not sent unless ``--force`` is present.
+Peace deals that hand something over while you are on a streak print a NOTE (sent anyway).
 State summaries print factual ALERT lines first. Compact summaries include
 changes from the latest turn events and the previous saved view.
 
@@ -44,7 +45,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agentciv.client import (AgentCivClient, ApiError, ascii_map, deal_warnings, describe_event,  # noqa: E402
+from agentciv.client import (AgentCivClient, ApiError, ascii_map, deal_warnings, describe_event, peace_deal_notes,  # noqa: E402
                              order_warning_details, summarize_view, summarize_compact, view_alerts, view_changes)
 from agentciv.engine.constants import DEAL_MESSAGE_MAX_LENGTH  # noqa: E402
 
@@ -219,9 +220,15 @@ def cmd_deal(name: str, text: str, force: bool = False) -> None:
                 and isinstance(action.get("message"), str)
                 and len(action["message"]) > DEAL_MESSAGE_MAX_LENGTH):
             sys.exit(f"NOT SENT: deal action #{i} message exceeds the {DEAL_MESSAGE_MAX_LENGTH}-character limit.")
-    warnings = []
-    if any(isinstance(action, dict) and action.get("type") == "accept" for action in actions):
-        warnings = deal_warnings(c.state(), actions)
+    warnings, notes = [], []
+    if any(isinstance(action, dict) and (action.get("type") == "accept"
+                                         or action.get("type") in ("propose", "counter") and action.get("peace"))
+           for action in actions):
+        view = c.state()
+        warnings = deal_warnings(view, actions)
+        notes = peace_deal_notes(view, actions)
+    for note in notes:
+        print(f"NOTE: {note}")
     if warnings:
         print("WARNINGS (projected contract payments):")
         for warning in warnings:

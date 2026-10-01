@@ -293,14 +293,48 @@ def test_coalition_capture_goes_to_the_larger_power():
     assert g.owner[g.idx(8, 8)] == "p3"
 
 
-def test_coalition_capture_tie_captures_nothing():
+@pytest.mark.parametrize("turn,winner", [(3, "p1"), (5, "p3")])
+def test_coalition_capture_tie_goes_to_the_first_in_the_rotating_order(turn, winner):
+    """Equal power: the capturer is the first of them in this turn's
+    rotating player order (turn % living players), never nobody."""
     g = world()
+    g.turn = turn
     g.set_owner(8, 8, "p2")
     g.treaties[("p1", "p3")] = 99
     g.place_units(8, 8, "p1", {"infantry": 1})
     g.place_units(8, 8, "p3", {"infantry": 1})
     ev = run_turn(g)
-    assert g.owner[g.idx(8, 8)] == "p2" and not events_of(ev, "tile_captured")
+    cap = events_of(ev, "tile_captured")
+    assert g.owner[g.idx(8, 8)] == winner and cap and cap[0]["to"] == winner
+
+
+def test_equal_partner_stacks_take_an_unowned_relic():
+    g = world()
+    g.turn = 4                                   # rotating order [p2, p3, p1]
+    r = g.relics[0]
+    x, y = g.xy(r)
+    g.treaties[("p1", "p3")] = 99
+    g.place_units(x, y, "p1", {"infantry": 1})
+    g.place_units(x, y, "p3", {"infantry": 1})
+    run_turn(g)
+    assert g.owner[r] == "p3"
+
+
+def test_equal_coalition_stacks_capture_a_streak_holders_city():
+    """Regression (retune review): two treaty partners with equal stacks on a
+    city whose garrison they defeated must capture it, which resets the
+    owner's streaks; a tie used to leave the city with its owner."""
+    g = world()
+    p1 = g.player("p1")
+    g.add_city(6, 2, "p1")
+    g.treaties[("p2", "p3")] = 99
+    p1.economic_streak, p1.influence_streak = 3, 5
+    g.place_units(6, 2, "p2", {"infantry": 8})
+    g.place_units(6, 2, "p3", {"infantry": 8})
+    ev = run_turn(g)
+    cap = events_of(ev, "city_captured")
+    assert cap and g.cities[g.idx(6, 2)].owner in ("p2", "p3")
+    assert p1.economic_streak == 0 and p1.influence_streak == 0
 
 
 def test_cavalry_cannot_swap_places_with_hostile_cavalry():

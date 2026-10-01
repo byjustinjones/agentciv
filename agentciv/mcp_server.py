@@ -26,7 +26,7 @@ from typing import Any
 
 from .engine import constants as C
 from .client import (AgentCivClient, ApiError, _deals_lines, ascii_map, deal_warnings, describe_event, order_warnings,
-                     summarize_view)
+                     peace_deal_notes, summarize_view)
 
 PROTOCOL_VERSION = "2025-06-18"
 SUPPORTED_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
@@ -221,8 +221,19 @@ class AgentCivMCP:
         return (f"Joined game {res['game_id']} as {res['player_id']} (status: {res.get('status')}). "
                 f"Next: call wait_for_turn (it returns when the game starts), then get_state.")
 
-    def _diplomacy(self, action: dict) -> str:
+    def _diplomacy(self, action: dict, view: dict | None = None) -> str:
+        """Send one diplomacy action; ``view``: the state it is written
+        against (fetched here only when the peace notes need it)."""
         self._need_game()
+        notes = []
+        if action.get("type") == "accept" or (action.get("type") in ("propose", "counter") and action.get("peace")):
+            notes = peace_deal_notes(view if view is not None else self.client.state(), [action])
+        text = self._send_diplomacy(action)
+        if notes:
+            text += "\nNotes (peace while on a streak):\n" + "\n".join(f"  - {n}" for n in notes)
+        return text
+
+    def _send_diplomacy(self, action: dict) -> str:
         try:
             res = self.client.diplomacy([action])
         except ApiError as e:
@@ -276,8 +287,9 @@ class AgentCivMCP:
         if response == "accept":
             self._need_game()
             action = {"type": "accept", "deal": deal}
-            warnings = deal_warnings(self.client.state(), [action])
-            text = self._diplomacy(action)
+            view = self.client.state()
+            warnings = deal_warnings(view, [action])
+            text = self._diplomacy(action, view)
             if warnings:
                 text += "\nWarnings (projected contract payments):\n" + "\n".join(f"  - {w}" for w in warnings)
             return text

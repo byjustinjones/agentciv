@@ -1172,18 +1172,18 @@ class Game:
         """Who captures tile ``i`` given the units on it after the battles
         (all of them belong to players at peace with each other): among the
         players hostile to the tile's owner (any player for an unowned tile),
-        the one with the largest raw power, then the lowest seat. None if the
-        owner itself (or nobody hostile to it) is there."""
+        the one with the largest raw power; on equal power, the one first in
+        this turn's rotating player order (``_rotated``, as in phase 1), so
+        no seat is favoured and an occupied tile never stays with its owner.
+        None if the owner itself (or nobody hostile to it) is there."""
         own = self.owner[i]
         if not per or own in per:
             return None
         cands = [q for q in per if own is None or self.hostile(q, own)]
         if not cands:
             return None
-        cands.sort(key=lambda q: (-combat.military_power(per[q]), self._by_id[q].index))
-        if len(cands) > 1 and combat.military_power(per[cands[0]]) == combat.military_power(per[cands[1]]):
-            return None          # equal top power: nobody captures (the tile stays as it was)
-        return cands[0]
+        rank = {p.id: k for k, p in enumerate(self._rotated())}
+        return min(cands, key=lambda q: (-combat.military_power(per[q]), rank.get(q, len(rank))))
 
     def _border_clashes(self, groups: list) -> None:
         """Hostile groups crossing the same edge in opposite directions fight

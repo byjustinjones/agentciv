@@ -973,6 +973,53 @@ def deal_warnings(view: dict, actions: list) -> list[str]:
     return out
 
 
+def peace_deal_notes(view: dict, actions: list) -> list[str]:
+    """Facts about peace deals in which you hand something over while your
+    economic or influence streak is at least 1 (rules §9 free break, §10
+    refunds): ``propose``/``counter`` with ``peace`` and ``accept`` of a deal
+    with ``peace``. Informational; nothing is blocked."""
+    you = view.get("you") or {}
+    pid = you.get("id")
+    if not pid or not isinstance(actions, list):
+        return []
+    row = next((p for p in view.get("players", []) if p.get("id") == pid), {})
+    if (row.get("economic_streak") or 0) < 1 and (row.get("influence_streak") or 0) < 1:
+        return []
+    deals = {d["id"]: d for d in (view.get("deals") or {}).get("open", [])}
+    out = []
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        t, did = action.get("type"), action.get("deal")
+        deal = deals.get(did) if isinstance(did, str) else None
+        if t == "accept" and deal and deal.get("to") == pid:
+            peace, handed, partner, label = deal.get("peace"), deal.get("get") or {}, deal.get("from"), f"Deal {did}"
+        elif t == "propose":
+            peace, handed, partner, label = action.get("peace"), action.get("give") or {}, action.get("to"), \
+                f"Proposal to {action.get('to')}"
+        elif t == "counter" and deal:
+            peace, handed, partner, label = action.get("peace"), action.get("give") or {}, deal.get("from"), \
+                f"Counter to {did}"
+        else:
+            continue
+        if not peace or not isinstance(handed, dict):
+            continue
+        parts = [f"{v} {r}" for r, v in handed.items() if r in RESOURCES and isinstance(v, (int, float)) and v > 0]
+        if handed.get("tiles"):
+            parts.append(f"{len(handed['tiles'])} tile(s)")
+        if handed.get("per_turn"):
+            parts.append("a contract")
+        if not parts:
+            continue
+        out.append(f"{label} (peace {peace}, you hand over {', '.join(parts)}): while your economic_streak or "
+                   f"influence_streak is at least 1, {partner} can break this treaty for free (no influence, legacy "
+                   f"or betrayal; movement onto your tiles from the next turn). Only the start-price value of the "
+                   f"resources you hand over comes back, times the unexpired share of the peace, and only as far as "
+                   f"{partner}'s bank and gold cover it (the rest becomes {partner}'s influence_debt); tiles and "
+                   f"contract instalments already paid do not come back (rules §9).")
+    return out
+
+
 _BOND_PER_BETRAYAL = 50   # rules §9: required bond per betrayal (rules.json diplomacy.treaty_bond_per_betrayal)
 
 
@@ -1711,7 +1758,7 @@ def summarize_view(view: dict, pid: str | None = None, max_events: int = 12, max
         others = [e for e in events if e not in mine and e.get("type") in (
             "battle", "city_captured", "city_founded", "eliminated", "treaty_signed", "treaty_broken",
             "wonder_stage", "starvation", "trade_executed", "victory", "tile_captured", "contract_default",
-            "streak_started", "streak_ended")]
+            "streak_started", "streak_ended", "streak_paused")]
         if others:
             out.append("Notable events last turn:")
             for e in others[:max_events]:

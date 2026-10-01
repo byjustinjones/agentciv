@@ -549,3 +549,122 @@ The turtle loses its blanket protection (F1 wins 5 → 1).
 * The cooldown also stops a victim from buying peace from its breaker for 15
   turns. If LLM games show victims trapped, exempt peace proposed by the
   victim.
+
+## 9. The g7–g10 retune: relics, bank allowance, streak resets
+
+Agent games g7–g10 showed two problems. Relic wins came early (T45–T68) and
+were hard to contest. Economic wins came to whoever passed the bank target
+first and then sat on it, with nothing a rival could do. The retune changes:
+
+* **Relics are no longer a victory condition.** An owned relic gives 15 score
+  and 3 influence per turn while guarded, 1 unguarded.
+* **Bank:** each turn you may bank at most 50 + 10 per city with a market hall
+  (0 without a city). Banked gold earns no interest. B stays 3600.
+* **Streaks:** an economic streak turn counts only if at least half the
+  allowance (`streak_deposit`) was banked that turn. Otherwise the turn is a
+  `streak_paused`. Losing any city sets both streaks to 0 (`city_lost`).
+  L = 2700 (was 2400).
+* **Treaty breaks:** the bank share and bond are removed from the game
+  instead of paid to the victim. A break against a partner whose streak is at
+  least 1 is free (no influence, legacy, bank share, bond or betrayal) and
+  has no notice turn.
+* **Capture ties:** equal top power goes to the first player in the turn's
+  rotating order (below). Passage rights for treaty partners are deferred.
+
+### Judge runs (5 fields × 48 games per row)
+
+Fields: A std and fog (`strategist,economist,rusher,turtle,random,random`),
+F1 std and fog (`strategist,strategist,rusher,turtle,economist,strategist_lite`),
+S fog (`strategist,strategist,strategist,strategist_lite,strategist_lite,strategist_notrade`).
+Win columns: economic / influence / wonder / conquest / relics, as win % and
+median turn.
+
+| Run (seeds 11–15) | Median end | Wins | Battles on / next to a relic | Streaks broken by a city capture (econ / infl) |
+|---|---|---|---|---|
+| Baseline 29fdb0a | t85.5 | 25% t85 / 31% t93 / 20% t78 / 9% t73.5 / **15% t50** | 10% / 15% | 0 / 0 |
+| bank 4000, L 2400 | t89 | 4% / 68% / 15% / 14% / 0% | 4% / 12% | 2 / 54 |
+| bank 3600, L 2400 | t90 | 17% / 53% / 15% / 15% / 0% | 4% / 12% | 9 / 49 |
+| **bank 3600, L 2700** | t92.5 | 35% t93 / 28% t96 / 19% t83 / 18% t83 / 0% | 4% / 12% | 21 / 47 |
+
+Confirmation on seeds 21–25: baseline 23 / 28 / 15 / 12 / **21% (t45)**; final
+38% t93 / 31% t96 / 15% t80 / 16% t77 / 0%. Battles on / next to a relic went
+from 9% / 16% to 3% / 8%. Captures of streak holders went from 35 to 48.
+
+### Verification of the implementation (seeds 31–35, 240 games per column)
+
+| | Base 29fdb0a | Retune |
+|---|---|---|
+| Median end | t86 | t93 |
+| Economic | 20.8% (t86) | 38.3% (t94) |
+| Influence | 33.8% (t93) | 27.1% (t95) |
+| Wonder | 18.8% (t75) | 19.6% (t77) |
+| Conquest | 7.1% (t75) | 15.0% (t76) |
+| Relics | 19.6% (t48) | — |
+| Battles on / next to a relic | 9.5% / 15.4% | 4.1% / 9.6% |
+| Relic owner changes per game | 5.9 | 4.0 |
+| Streaks started (econ / infl) | 105 / 243 | 231 / 284 |
+| Streaks broken by a city capture (econ / infl) | 0 / 0 | 22 / 29 |
+| Economic turns paused (deposit short) | — | 68 |
+| Captures of a streak holder's city | 24 | 50 |
+| Treaty breaks (free) | 40 (0) | 52 (6) |
+| Bot errors / games to t150 | 0 / 0 | 0 / 0 |
+
+Per field (economic / influence / wonder / conquest / relics, %):
+
+| Field | Base | Retune |
+|---|---|---|
+| A std | 27 / 6 / 38 / 19 / 10 | 19 / 13 / 38 / 31 / — |
+| A fog | 23 / 4 / 33 / 15 / 25 | 29 / 17 / 25 / 29 / — |
+| F1 std | 21 / 50 / 21 / 2 / 6 | 65 / 13 / 19 / 4 / — |
+| F1 fog | 25 / 48 / 2 / 0 / 25 | 48 / 29 / 17 / 6 / — |
+| S fog | 8 / 60 / 0 / 0 / 31 | 31 / 65 / 0 / 4 / — |
+
+The bots are only a crash and pacing check here. They build temples
+steadily and never stack relics the way the LLMs did, so the LLM games decide
+the final numbers.
+
+**Garrison variant (not shipped).** A variant had the economist and the
+strategist recruit up to 2 archers in unthreatened non-capital cities while on
+or near a streak. On the same seeds, 30 of 240 games played out differently
+and 14 had a different outcome, in both directions. Economic wins went from
+38.3% to 36.2% and influence from 27.1% to 29.2%. Streaks broken by a city
+capture stayed at 51, captures of streak holders at 50 and economist wins at
+55. That is noise, and `STREAK_CITY_GARRISON` in `lock_garrison` already
+keeps 2 units in those cities.
+
+### Review fixes
+
+* **Capture ties.** The judge's "no capture on a tie" rule was dropped.
+  Capture candidates are chosen after the battles, so they are always at
+  peace with each other. The rule therefore never settled a contest between
+  rivals. It only let two treaty partners with equal stacks sit on a streak
+  holder's city without taking it, and that city then never reset the
+  holder's streaks. It also let a third player veto a capture by moving in a
+  matching stack. A tie now goes to the first in the turn's rotating order
+  (RULES §8). A re-run of F1 std (seed 33, 48 games) gave the same result in
+  every game: bots never produce a tie.
+* The spectator feed no longer reports a fog-redacted break's bank share as
+  gold paid to the partner. The full summary lists `streak_paused`. Clients
+  print a note when a streak holder proposes, counters or accepts peace that
+  it pays for (DESIGN §7, free break).
+
+### Watch in LLM games
+
+* **Uncontested banking.** In F1 std, economic wins rose from 21% to 65%, and
+  the economist's seat won 18 of 48 games (base 6). The wins fall in a narrow
+  window (median t93–94), because a player who banks the full allowance every
+  turn from about T25 and loses no city finishes on a fixed schedule. The
+  bot fields have at most one aggressor and no bot raids streak holders on
+  purpose, so they do not test the counterplay. Nothing was retuned on bot
+  numbers alone. If LLM bankers win unopposed, the fallbacks are a smaller
+  allowance, a higher B, or a strategist that raids streak holders, which
+  would also make the bot fields test the counterplay.
+* **Temple influence** decides about two thirds of all-strategist games
+  (S fog 65%, base 60%). This predates the retune, but relic wins no longer
+  dilute it. If a temple rush wins before about T70, raise L to 3000.
+* **No economic win in 2–3 LLM games:** make a city loss cost 3 streak
+  turns, or count only cities held for 10 turns or more. The siege pause is
+  the next fallback after that.
+* **Contract defaults** are now the only way bank gold reaches another player
+  (DESIGN §8). A losing player could default on purpose to give a leader its
+  bank.

@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from agentciv import mcp_server
-from agentciv.client import (ascii_map, describe_event, order_warnings, summarize_view,
+from agentciv.client import (ascii_map, describe_event, order_warnings, peace_deal_notes, summarize_view,
                              summarize_compact, view_alerts, view_changes)
 from agentciv.engine import rulesdoc
 from agentciv.server import guide
@@ -52,7 +52,7 @@ TEXTS = {
     "play_cli_output_literals": lambda: (ROOT / "examples" / "play_cli.py").read_text(),
     "play_cli_summaries": _cli_summaries,
     "client_new_text_branches": lambda: "\n".join(inspect.getsource(f) for f in
-        (view_alerts, view_changes, summarize_compact, describe_event, order_warnings)),
+        (view_alerts, view_changes, summarize_compact, describe_event, order_warnings, peace_deal_notes)),
 }
 
 

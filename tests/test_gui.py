@@ -231,6 +231,31 @@ def test_every_deal_event_has_readable_text(server, page):
         assert needle in joined, (needle, joined)
 
 
+def test_treaty_broken_text_old_new_and_fog_redacted(server, page):
+    """A new-rules break seen by a fog spectator has no `removed`/`paid`
+    (redacted) but keeps `free`: its bank share and bond must read as removed,
+    never as gold to the partner (retune review)."""
+    gid = running_game(server, "TBR")
+    page.goto(server.url + f"/#/game/{gid}")
+    page.wait_for_function("document.querySelector('#players-table').textContent.includes('TBR-one')")
+    texts = page.evaluate("""() => {
+      const G = AgentCivGUI.GameView;
+      const evs = [
+        {type: 'treaty_broken', turn: 5, by: 'p1', with: 'p2', cost: 50, legacy_lost: 0, bank_share: 40, bond: 0,
+         free: false, betrayals: 1},
+        {type: 'treaty_broken', turn: 5, by: 'p1', with: 'p2', cost: 50, legacy_lost: 0, bank_share: 40, bond: 0,
+         refund: 0, paid: 0, removed: 40, bank_fee: 0, debt: 0, free: false, cancelled: [], betrayals: 1},
+        {type: 'treaty_broken', turn: 5, by: 'p1', with: 'p2', cost: 50, legacy_lost: 0, bank_share: 40, bond: 0,
+         betrayals: 1},
+      ];
+      return evs.map((e) => { const el = document.createElement('div'); el.innerHTML = G.describe(e).html; return el.textContent; });
+    }""")
+    redacted, full, old = texts
+    assert "up to 40 gold removed" in redacted and "gold to" not in redacted, redacted
+    assert "40 gold removed" in full and "gold to" not in full, full
+    assert "≥40 gold to" in old, old
+
+
 def test_finished_game_reveals_negotiation_threads(server, page):
     c = AgentCivClient(server.url)
     gid = c.create_game(max_players=2, turn_timeout=600, max_turns=3, name="Threads")

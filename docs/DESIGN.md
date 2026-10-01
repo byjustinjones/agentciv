@@ -318,9 +318,12 @@ subject to the walls multiplier.
 4. **Capture**: after battles all units left on a tile belong to players at
    peace with each other. If the tile is owned by Q, Q has no units there and
    some of them are hostile to Q, the tile becomes P's, where P is the one of
-   those hostile to Q with the largest military power (Σ count·strength; if
-   the two largest are equal, nobody captures the tile that turn) — so allies
-   attacking a city together capture it. A city is
+   those hostile to Q with the largest military power (Σ count·strength; on
+   equal power, the one first in the turn's rotating order `_rotated()`, as in
+   phase 1) — so allies attacking a city together capture it. (A "no capture
+   on a tie" rule was tried in the retune and dropped: the candidates are
+   always at peace with each other, so it could only let treaty partners
+   block each other's capture, or let a third player veto one.) A city is
    captured only if its garrison was defeated. On city capture: the city's
    walls drop one level; tiles owned by Q in the city's Chebyshev radius 1
    transfer to P (except tiles holding units of another player); a wonder in
@@ -404,6 +407,14 @@ Treaties are scarce and breaking one is priced (constants `TREATY_*`):
   and `cancelled` only to the two parties; the public bank still shows the bank
   part of the payment, so when the bank covers it all a third party can derive
   them (RULES §14 lists this).
+  Peace a streak holder pays for is therefore unprotected. The partner can
+  accept, pass the gold on through another deal and break for free the same
+  turn. Only the refundable part comes back (start-price value of resources,
+  never tiles), and only as far as the breaker's bank and gold cover it; the
+  rest becomes the breaker's `influence_debt`. The engine leaves this as it
+  is. The clients (`client.peace_deal_notes`, used by play_cli `deal` and the
+  MCP deal tools) print a NOTE when a player with a streak ≥ 1 proposes,
+  counters or accepts peace in which it hands something over.
 
 **Disband** `{at, units}` removes your units (no refund).
 
@@ -443,6 +454,13 @@ pool_init gold/resource), not the spot price, so neither party can move the
 seizure with same-turn market orders. Because the seizure is paid as gold on
 hand, a default with a cooperating payee is the one way banked gold leaves the
 bank; the fine (1 influence per 2 gold of that value) is what prices it.
+Since the g7–g10 retune burns a break's bank share and bond, it is also the
+only way bank gold reaches another player. It stays on purpose because it
+secures contracts. A player with nothing left to lose can still default on
+purpose to hand its whole bank to a leader as gold, which costs it only the
+fine and its own economic streak. If LLM games show that, the fallback is to
+pay the payee at most one instalment's value and remove the rest of the
+seizure from the game.
 Elimination ends every streak (`streak_ended` with `reason: "eliminated"`). B = 3600 and L = 2700 at max_turns 150, scaled by
 min(1, max(0.5, max_turns/150)) and floored to a multiple of 10. Streaks
 (`economic_streak`, `influence_streak`) update in phase 8 after eliminations;

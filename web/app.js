@@ -2362,13 +2362,18 @@
         case 'treaty_broken': {
           const breaker = e.by ?? e.player ?? e.breaker ?? e.a;
           const other = e.with ?? e.other ?? e.b ?? e.victim;
-          // `removed` (rules after g10): the bank share and bond leave the game; `paid` is the refund to the partner
-          const gone = e.removed != null ? num(e.removed) : null;
-          const toPartner = e.removed != null ? (num(e.paid) ? `, ${fmt(e.paid)} gold refunded to ${esc(this.pname(other))}` : '')
+          // Rules after g10 (events carry `free`; `removed` too unless redacted for a fog spectator):
+          // the bank share and bond leave the game and `paid` is the refund to the partner.
+          // Older events: the bank share and bond went to the partner.
+          const newRules = e.removed != null || 'free' in e;
+          const owedOut = num(e.bank_share) + num(e.bond);
+          const gone = !newRules ? '' : e.removed != null ? (num(e.removed) ? `, ${fmt(e.removed)} gold removed` : '')
+            : owedOut ? `, up to ${fmt(owedOut)} gold removed` : '';
+          const toPartner = newRules ? (num(e.paid) ? `, ${fmt(e.paid)} gold refunded to ${esc(this.pname(other))}` : '')
             : e.paid != null ? `, ${fmt(e.paid)} gold to ${esc(this.pname(other))}`
-              : num(e.bank_share) + num(e.bond) ? `, ≥${fmt(num(e.bank_share) + num(e.bond))} gold to ${esc(this.pname(other))}` : '';
+              : owedOut ? `, ≥${fmt(owedOut)} gold to ${esc(this.pname(other))}` : '';
           const cost = e.free ? ` <span class="muted">(free: ${esc(this.pname(other))} was on a victory streak${toPartner})</span>`
-            : e.cost != null ? ` <span class="muted">(−${esc(e.cost)} influence, −${fmt(e.legacy_lost)} legacy${gone ? `, ${fmt(gone)} gold removed` : ''}${toPartner})</span>` : ' <span class="muted">(betrayal)</span>';
+            : e.cost != null ? ` <span class="muted">(−${esc(e.cost)} influence, −${fmt(e.legacy_lost)} legacy${gone}${toPartner})</span>` : ' <span class="muted">(betrayal)</span>';
           return { icon: 'broken', color: e.free ? '#fbbf24' : '#f87171', major: true, html: `${P(breaker)} <span class="betray">broke</span> their treaty with ${P(other)}${cost}` };
         }
         case 'deal_proposed': {

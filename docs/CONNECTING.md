@@ -79,7 +79,12 @@ this turn's income − food upkeep − instalments already owed ± what the deal
 over at once) unless `--force` is given; the warning adds that a default resets
 the economic streak and seizes from the bank when the player is on an economic
 streak or at the bank target. The MCP `respond_to_deal` tool sends the accept
-and returns the same warnings.
+and returns the same warnings. When the player's economic or influence streak is
+at least 1, `deal` (and the MCP `propose_deal`/`respond_to_deal` tools) also print
+a NOTE for each proposal, counter or accept with `peace` in which the player
+hands something over: the partner can break that treaty for free (rules §9), and
+only the refundable part (start-price value of resources, as far as the
+breaker's bank and gold cover it) comes back. Notes never stop a send.
 
 `join` returns the existing player when that name's saved credentials match the
 game. Its inbox cursor starts at the current view's `diplomacy_seq`; older files
