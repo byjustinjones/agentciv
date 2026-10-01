@@ -21,18 +21,32 @@ are carried to the next turn as memory.
 
 Model: ``--model`` or ``$AGENTCIV_MODEL`` (default: claude-opus-5-5).
 Games with LLM players should use a generous ``turn_timeout`` (e.g. 120 s).
+
+Provenance: the agent joins with a manifest (model, effort, harness, a sha256
+of its prompt template and tool definitions, tools, memory) that the server
+shows in the game summary and replay; ``$AGENTCIV_AGENT`` (a JSON object) adds
+or overrides fields. Server-side refusal fallbacks are **off** unless
+``--fallback`` is given, so every answer comes from the requested model.
+``--log-dir DIR`` writes one JSON line per model call to
+``DIR/<game>-<name>.jsonl`` (turn, requested model, the model that answered,
+stop reason, token usage, latency, tool calls, refusal/fallback flags, API
+errors) and a final ``summary`` line with totals.
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))  # run from a checkout
-from agentciv.client import AgentCivClient, ApiError, ascii_map, describe_event, summarize_view  # noqa: E402
+from agentciv.client import (AgentCivClient, ApiError, agent_from_env, ascii_map, describe_event,  # noqa: E402
+                             summarize_view)
 
+HARNESS = "agentciv examples/llm_agent.py"
+HARNESS_VERSION = "2"
 DEFAULT_MODEL = "claude-opus-5-5"
 # Models that accept server-side refusal fallbacks (fallbacks="default").
 FALLBACK_MODELS = {"claude-opus-5-5", "claude-opus-5", "claude-fable-5-1", "claude-fable-5", "claude-sonnet-5-5"}
@@ -144,6 +158,116 @@ TOOLS = [
 ]
 
 
+def prompt_sha256() -> str:
+    """sha256 of what this harness sends besides the game: the system prompt
+    template (before the rules and name are filled in) and the tool definitions."""
+    blob = SYSTEM_PROMPT + "\0" + json.dumps(TOOLS, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def agent_manifest(args, sdk_version: str | None = None) -> dict:
+    """The manifest sent with join/quickmatch; ``$AGENTCIV_AGENT`` fields override."""
+    out = {
+        "model": args.model,
+        "effort": args.effort,
+        "harness": HARNESS,
+        "harness_version": HARNESS_VERSION + (f"; anthropic {sdk_version}" if sdk_version else ""),
+        "prompt_sha256": prompt_sha256(),
+        "tools": ",".join(t["name"] for t in TOOLS),
+        "memory": "fresh conversation each turn; own notes (<= 4000 chars) carried to the next turn",
+        "notes": f"refusal fallbacks {'on' if args.fallback else 'off'}; max {args.max_steps} model calls per turn",
+    }
+    out.update(agent_from_env() or {})
+    return out
+
+
+def _get(obj, name, default=None):
+    """Attribute or dict key (SDK objects and plain dicts alike)."""
+    if isinstance(obj, dict):
+        return obj.get(name, default)
+    return getattr(obj, name, default)
+
+
+class CallLog:
+    """Per-call JSONL log of the model calls (``--log-dir``). ``path`` None:
+    totals are still kept (for the summary), nothing is written."""
+
+    USAGE_FIELDS = ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
+
+    def __init__(self, path: str | None = None):
+        self.path = path
+        self.calls = 0
+        self.errors = 0
+        self.refusals = 0
+        self.fallbacks = 0
+        self.other_model = 0          # calls answered by a model other than the requested one
+        self.models: dict[str, int] = {}
+        self.usage = {k: 0 for k in self.USAGE_FIELDS}
+        self.latency = 0.0
+        self.tool_calls = 0
+
+    def _write(self, rec: dict) -> None:
+        if self.path:
+            with open(self.path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, separators=(",", ":"), default=str) + "\n")
+
+    @staticmethod
+    def fallback_used(response) -> bool:
+        """True if a server-side fallback model ran for this response: a
+        ``fallback`` content block, or a ``fallback_message`` usage iteration."""
+        if any(_get(b, "type") == "fallback" for b in _get(response, "content") or []):
+            return True
+        iterations = _get(_get(response, "usage"), "iterations") or []
+        return any(_get(it, "type") == "fallback_message" for it in iterations)
+
+    def record(self, turn, requested: str, response, latency: float) -> dict:
+        usage_obj = _get(response, "usage")
+        usage = {k: _get(usage_obj, k) for k in self.USAGE_FIELDS}
+        model = _get(response, "model")
+        stop = _get(response, "stop_reason")
+        tools = [_get(b, "name") for b in _get(response, "content") or [] if _get(b, "type") == "tool_use"]
+        fallback = self.fallback_used(response)
+        different = bool(model) and model != requested
+        rec = {"type": "call", "time": round(time.time(), 3), "turn": turn, "requested_model": requested,
+               "model": model, "stop_reason": stop, "usage": usage, "latency_s": round(latency, 3),
+               "tool_calls": tools, "refusal": stop == "refusal", "fallback": fallback,
+               "different_model": different}
+        self.calls += 1
+        self.refusals += stop == "refusal"
+        self.fallbacks += fallback
+        self.other_model += different
+        if model:
+            self.models[model] = self.models.get(model, 0) + 1
+        for k, v in usage.items():
+            if isinstance(v, int):
+                self.usage[k] += v
+        self.latency += latency
+        self.tool_calls += len(tools)
+        self._write(rec)
+        return rec
+
+    def record_error(self, turn, requested: str, exc: BaseException, latency: float) -> dict:
+        rec = {"type": "call", "time": round(time.time(), 3), "turn": turn, "requested_model": requested,
+               "latency_s": round(latency, 3),
+               "error": {"type": type(exc).__name__, "status": getattr(exc, "status_code", None),
+                         "message": str(getattr(exc, "message", exc))[:1000]}}
+        self.calls += 1
+        self.errors += 1
+        self.latency += latency
+        self._write(rec)
+        return rec
+
+    def summary(self, **extra) -> dict:
+        rec = {"type": "summary", "time": round(time.time(), 3), "calls": self.calls, "errors": self.errors,
+               "refusals": self.refusals, "fallback_calls": self.fallbacks,
+               "calls_answered_by_other_model": self.other_model,
+               "any_call_answered_by_other_model": self.other_model > 0 or self.fallbacks > 0,
+               "models": dict(self.models), "usage": dict(self.usage), "latency_s": round(self.latency, 3),
+               "tool_calls": self.tool_calls, **extra}
+        self._write(rec)
+        return rec
+
+
 def fail(msg: str) -> None:
     print(msg, file=sys.stderr)
     sys.exit(2)
@@ -171,9 +295,21 @@ class LLMAgent:
         self.game = AgentCivClient(args.url)
         self.notes = "(first turn: no notes yet)"
         self.system = None
+        self.calls = CallLog()
+        self.turn = None  # the game turn being played (for the call log)
 
     # ------------------------------------------------------------ Claude call
     def create(self, messages: list):
+        t0 = time.monotonic()
+        try:
+            response = self._create(messages)
+        except Exception as e:
+            self.calls.record_error(self.turn, self.args.model, e, time.monotonic() - t0)
+            raise
+        self.calls.record(self.turn, self.args.model, response, time.monotonic() - t0)
+        return response
+
+    def _create(self, messages: list):
         kwargs = dict(
             model=self.args.model,
             max_tokens=16000,
@@ -183,8 +319,9 @@ class LLMAgent:
             thinking={"type": "adaptive"},
             output_config={"effort": self.args.effort},
         )
-        if self.args.model in FALLBACK_MODELS and not self.args.no_fallback:
-            # Server-side refusal fallback: a declined request is re-run on a fallback model.
+        if self.args.fallback and self.args.model in FALLBACK_MODELS:
+            # Opt-in server-side refusal fallback: a declined request is re-run on a fallback model,
+            # so some turns may be played by another model (the call log records which).
             return self.llm.beta.messages.create(betas=[FALLBACK_BETA], fallbacks="default", **kwargs)
         return self.llm.messages.create(**kwargs)
 
@@ -313,6 +450,7 @@ class LLMAgent:
     def play_turn(self, view: dict) -> None:
         pid = view["you"]["id"]
         turn = view["turn"]
+        self.turn = turn
         # what arrived since we last looked (answers to last turn's offers, messages...)
         try:
             inbox = self.describe(self.game.inbox(timeout=0))
@@ -357,11 +495,21 @@ class LLMAgent:
     # ------------------------------------------------------------ game loop
     def run(self) -> None:
         a = self.args
+        try:
+            agent = agent_manifest(a, getattr(self.anthropic, "__version__", None))
+        except ValueError as e:
+            fail(f"AGENTCIV_AGENT: {e}")
         if a.game:
-            joined = self.game.join(a.game, a.name)
+            joined = self.game.join(a.game, a.name, agent=agent)
         else:
-            joined = self.game.quickmatch(a.name, players=a.players, turn_timeout=a.turn_timeout)
-        print(f"Joined {joined['game_id']} as {joined['player_id']} with model {a.model}", file=sys.stderr)
+            joined = self.game.quickmatch(a.name, players=a.players, turn_timeout=a.turn_timeout, agent=agent)
+        print(f"Joined {joined['game_id']} as {joined['player_id']} with model {a.model}"
+              f"{' (refusal fallbacks on)' if a.fallback else ''}", file=sys.stderr)
+        if a.log_dir:
+            os.makedirs(a.log_dir, exist_ok=True)
+            safe = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in a.name)
+            self.calls.path = os.path.join(a.log_dir, f"{joined['game_id']}-{safe}.jsonl")
+            print(f"Logging model calls to {self.calls.path}", file=sys.stderr)
         self.system = [{"type": "text", "text": SYSTEM_PROMPT.format(name=a.name, rules=self.game.rules()),
                         "cache_control": {"type": "ephemeral"}}]  # identical every turn -> cached
         last = -1
@@ -382,6 +530,12 @@ class LLMAgent:
         result = view["victory"]["result"] or {}
         places = result.get("placements", [])
         me = self.game.player_id
+        totals = self.calls.summary(game_id=self.game.game_id, player_id=me, requested_model=a.model,
+                                    fallback_enabled=bool(a.fallback),
+                                    place=places.index(me) + 1 if me in places else None)
+        if totals["any_call_answered_by_other_model"]:
+            print(f"note: {totals['calls_answered_by_other_model']} call(s) were answered by a model other than "
+                  f"{a.model} ({totals['fallback_calls']} via fallback)", file=sys.stderr)
         print(f"Game over: winner {result.get('winner')} by {result.get('condition')}; "
               f"you placed {places.index(me) + 1 if me in places else '?'} of {len(places)}.")
 
@@ -398,7 +552,12 @@ def main() -> None:
     ap.add_argument("--players", type=int, default=6, help="quickmatch lobby size")
     ap.add_argument("--turn-timeout", type=float, default=120.0, help="quickmatch turn timeout in seconds")
     ap.add_argument("--max-steps", type=int, default=10, help="max model calls per game turn (incl. negotiation)")
-    ap.add_argument("--no-fallback", action="store_true", help="disable server-side refusal fallbacks")
+    ap.add_argument("--fallback", action="store_true",
+                    help="opt in to server-side refusal fallbacks (a declined request is re-run on another model; "
+                         "off by default so every call is answered by --model)")
+    ap.add_argument("--no-fallback", action="store_true", help=argparse.SUPPRESS)  # old flag: now the default
+    ap.add_argument("--log-dir", default=os.environ.get("AGENTCIV_LOG_DIR") or None,
+                    help="write a JSONL log of every model call to DIR/<game>-<name>.jsonl (default $AGENTCIV_LOG_DIR)")
     LLMAgent(ap.parse_args()).run()
 
 

@@ -3,9 +3,11 @@ log in the replay (operator-only while live), and their checkpoint round trip.""
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import logging
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -320,6 +322,90 @@ def test_old_replay_without_actions_still_serves(tmp_path, no_workers):
         doc = json.loads(manager.archived_replay_bytes("g77", compact, lo, hi))
         assert "actions" not in doc and doc["frames"]
     manager.shutdown()
+
+
+# ---------------------------------------------------------------- llm_agent call log
+def _llm_agent():
+    spec = importlib.util.spec_from_file_location("llm_agent", ROOT / "examples" / "llm_agent.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _response(model, stop="tool_use", content=None, iterations=None):
+    usage = SimpleNamespace(input_tokens=10, output_tokens=5, cache_creation_input_tokens=3,
+                            cache_read_input_tokens=7, iterations=iterations)
+    return SimpleNamespace(model=model, stop_reason=stop, usage=usage,
+                           content=content if content is not None else
+                           [SimpleNamespace(type="tool_use", name="submit_orders")])
+
+
+def test_llm_call_log_flags_fallbacks_and_errors(tmp_path):
+    llm = _llm_agent()
+    path = tmp_path / "log.jsonl"
+    log = llm.CallLog(str(path))
+    req = "claude-opus-5-5"
+    plain = log.record(3, req, _response(req), 1.23456)
+    assert plain["fallback"] is False and plain["different_model"] is False and plain["latency_s"] == 1.235
+    assert plain["usage"] == {"input_tokens": 10, "output_tokens": 5, "cache_creation_input_tokens": 3,
+                              "cache_read_input_tokens": 7}
+    blocks = [SimpleNamespace(type="fallback"), SimpleNamespace(type="text")]
+    fb = log.record(4, req, _response("claude-opus-4-8", stop="end_turn", content=blocks), 2.0)
+    assert fb["fallback"] is True and fb["different_model"] is True and fb["tool_calls"] == []
+    sticky = log.record(5, req, _response("claude-opus-4-8", iterations=[{"type": "fallback_message"}]), 1.0)
+    assert sticky["fallback"] is True
+    refused = log.record(6, req, _response(req, stop="refusal", content=[]), 0.5)
+    assert refused["refusal"] is True
+
+    class APIStatusError(Exception):
+        status_code = 529
+        message = "overloaded"
+    err = log.record_error(7, req, APIStatusError(), 0.1)
+    assert err["error"] == {"type": "APIStatusError", "status": 529, "message": "overloaded"}
+    total = log.summary(game_id="g1")
+    assert total["calls"] == 5 and total["errors"] == 1 and total["refusals"] == 1
+    assert total["fallback_calls"] == 2 and total["calls_answered_by_other_model"] == 2
+    assert total["any_call_answered_by_other_model"] is True
+    assert total["models"] == {req: 2, "claude-opus-4-8": 2} and total["usage"]["input_tokens"] == 40
+    lines = [json.loads(x) for x in path.read_text().splitlines()]
+    assert [x["type"] for x in lines] == ["call"] * 5 + ["summary"] and lines[-1]["game_id"] == "g1"
+
+
+def test_llm_agent_fallbacks_are_opt_in_and_manifest(monkeypatch):
+    llm = _llm_agent()
+    monkeypatch.delenv("AGENTCIV_AGENT", raising=False)
+    monkeypatch.delenv("AGENTCIV_LOG_DIR", raising=False)
+    calls = []
+
+    class Endpoint:
+        def __init__(self, beta):
+            self.beta = beta
+
+        def create(self, **kw):
+            calls.append((self.beta, kw))
+            return _response(kw["model"], stop="end_turn", content=[])
+
+    agent = llm.LLMAgent.__new__(llm.LLMAgent)
+    agent.llm = SimpleNamespace(messages=Endpoint(False), beta=SimpleNamespace(messages=Endpoint(True)))
+    agent.system, agent.turn, agent.calls = [], 0, llm.CallLog()
+    for fallback, beta in ((False, False), (True, True)):
+        agent.args = SimpleNamespace(model="claude-opus-5-5", effort="low", fallback=fallback, no_fallback=False,
+                                     max_steps=4)
+        agent.create([{"role": "user", "content": "hi"}])
+        assert calls[-1][0] is beta and ("fallbacks" in calls[-1][1]) is beta
+    ns = SimpleNamespace(model="claude-opus-5-5", effort="low", fallback=False, max_steps=4)
+    manifest = llm.agent_manifest(ns, "1.2.3")
+    assert validate_agent(manifest) == manifest
+    assert manifest["harness_version"].endswith("anthropic 1.2.3") and "fallbacks off" in manifest["notes"]
+    monkeypatch.setenv("AGENTCIV_AGENT", '{"notes": "run 7", "model_version": "2026-09"}')
+    manifest = llm.agent_manifest(ns)
+    assert manifest["notes"] == "run 7" and manifest["model_version"] == "2026-09"
+    ap_args = ["--no-fallback"]  # the old flag is still accepted (a no-op)
+    with patch("sys.argv", ["llm_agent.py", *ap_args]), patch.object(llm, "LLMAgent") as cls:
+        llm.main()
+    parsed = cls.call_args[0][0]
+    assert parsed.fallback is False and parsed.log_dir is None
+
 
 
 def test_mcp_join_tools_pass_the_manifest(server, monkeypatch):

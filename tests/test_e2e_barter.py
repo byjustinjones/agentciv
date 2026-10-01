@@ -3,6 +3,7 @@ other mid-turn, and a remote run_bot agent trades with a house bot."""
 from __future__ import annotations
 
 import importlib.util
+import json
 import threading
 import time
 from pathlib import Path
@@ -224,10 +225,13 @@ class _FakeAnthropic:
                 blocks = [_Block(type="text", text="done")]
         else:
             blocks = [tool("submit_orders", orders=[])] if n == 0 else [_Block(type="text", text="ok")]
-        return _Block(content=blocks, stop_reason="tool_use" if blocks[0].type == "tool_use" else "end_turn")
+        usage = _Block(input_tokens=100, output_tokens=20, cache_creation_input_tokens=0,
+                       cache_read_input_tokens=80)
+        return _Block(content=blocks, stop_reason="tool_use" if blocks[0].type == "tool_use" else "end_turn",
+                      model=kw["model"], usage=usage)
 
 
-def test_llm_agent_example_barters_with_a_fake_model(server, monkeypatch):
+def test_llm_agent_example_barters_with_a_fake_model(server, monkeypatch, tmp_path):
     import argparse
     import sys
     import types
@@ -246,8 +250,10 @@ def test_llm_agent_example_barters_with_a_fake_model(server, monkeypatch):
     mod.Anthropic = lambda: fake
     monkeypatch.setitem(sys.modules, "anthropic", mod)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+    monkeypatch.delenv("AGENTCIV_AGENT", raising=False)
     args = argparse.Namespace(url=server.url, model="claude-opus-5-5", effort="low", name="Claude", game=gid,
-                              quickmatch=False, players=2, turn_timeout=20.0, max_steps=10, no_fallback=False)
+                              quickmatch=False, players=2, turn_timeout=20.0, max_steps=10, fallback=False,
+                              no_fallback=False, log_dir=str(tmp_path / "calls"))
     llm.LLMAgent(args).run()
     assert [(e["id"], e["turn"], e["give"], e["get"]) for e in session.game.deal_log] == [
         ("d2", 0, {"gold": 5}, {"wood": 12})]
@@ -255,3 +261,19 @@ def test_llm_agent_example_barters_with_a_fake_model(server, monkeypatch):
     tool_names = {t["name"] for t in fake.requests[0]["tools"]}
     assert {"propose_deal", "respond_to_deal", "say", "wait_for_replies", "submit_orders"} <= tool_names
     assert fake.requests[0]["model"] == "claude-opus-5-5"
+    # provenance: no fallbacks unless --fallback; every call logged; the manifest and the action log
+    assert all("fallbacks" not in r and "betas" not in r for r in fake.requests)
+    lines = [json.loads(x) for x in (tmp_path / "calls" / f"{gid}-Claude.jsonl").read_text().splitlines()]
+    calls, summary = lines[:-1], lines[-1]
+    assert len(calls) == len(fake.requests) and summary["type"] == "summary"
+    assert calls[0]["turn"] == 0 and calls[0]["tool_calls"] == ["propose_deal"]
+    assert calls[0]["usage"]["cache_read_input_tokens"] == 80 and calls[0]["model"] == "claude-opus-5-5"
+    assert summary["calls"] == len(calls) and summary["any_call_answered_by_other_model"] is False
+    assert summary["usage"]["input_tokens"] == 100 * len(calls)
+    info = host.game(gid)
+    me = next(p for p in info["players"] if p["name"] == "Claude")
+    assert me["agent"]["model"] == "claude-opus-5-5" and me["agent"]["effort"] == "low"
+    assert me["agent"]["prompt_sha256"] == llm.prompt_sha256()
+    assert "fallbacks off" in me["agent"]["notes"]
+    actions = host.replay(gid)["actions"]["turns"]
+    assert [d["action"]["type"] for d in actions[0]["diplomacy"] if d["by"] == me["id"]][:1] == ["propose"]

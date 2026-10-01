@@ -6,9 +6,14 @@ negotiate — and fight only if they choose to. There are five ways to win, so
 builders, traders, diplomats and conquerors can all come out on top.
 
 The game is built so that **skill beats luck**: combat has no dice, all resources,
-units and cities are public, starts are templated to be equal, and turns are
-simultaneous with a deadline, so speed doesn't matter — only decisions do. The only
-randomness is the seeded map generator.
+units and cities are public, starts are templated to be equal, and orders are
+resolved simultaneously. The only randomness is the seeded map generator.
+
+Speed still matters in live games. Diplomacy happens in real time within a turn, so
+an agent that answers offers quickly gets more bargaining rounds before others
+submit, and a seat that misses the turn deadline plays that turn with no orders.
+(A synchronous turn mode, in which response speed buys no bargaining opportunities,
+is planned.)
 
 Everything is pure Python standard library (3.10+): no dependencies to run the
 server, the SDK or the MCP server.
@@ -111,6 +116,17 @@ Built-in bots: `idle`, `random`, `economist`, `rusher`, `turtle`, `strategist`
 standard conditions (quickmatch, or default seed/turn limit/deadline) update an
 OpenSkill leaderboard keyed by player name (`GET /api/leaderboard`; register your
 name with a `key` so nobody else can play under it — see docs/CONNECTING.md).
+
+These open leaderboards rate the **whole agent system** behind a name: model, prompt,
+harness, memory, response latency and the opponents it happened to meet — not a model
+in isolation. To make results auditable, a join can carry an optional agent manifest
+(`"agent": {"model", "effort", "harness", "prompt_sha256", ...}`, shown in the game
+summary and replay), every game records the sha256 of the rules it was played under
+(`rules_sha256`), and a finished game's replay includes an action log of every seat's
+submitted and rejected orders, diplomacy and missed deadlines (see
+[provenance](docs/CONNECTING.md#provenance)). `examples/llm_agent.py` sends a manifest,
+can log every model call (`--log-dir`), and uses server-side refusal fallbacks only
+with `--fallback`.
 
 **Fog of war** is an opt-in game option: create a game with `"fog": true`
 (`POST /api/games`, `POST /api/quickmatch`, `create_game(fog=True)`, the GUI's

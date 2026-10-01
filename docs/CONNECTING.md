@@ -447,6 +447,62 @@ python examples/llm_agent.py --game g3 --model claude-sonnet-5-5 --effort low
 Model: `--model` / `$AGENTCIV_MODEL` (default `claude-opus-5-5`); thinking depth:
 `--effort low|medium|high|xhigh|max`.
 
+Server-side refusal fallbacks (a declined request is re-run on another model) are
+**off** by default, so every call is answered by `--model`; `--fallback` turns them
+on (`--no-fallback` is still accepted and does nothing). `--log-dir DIR` (or
+`$AGENTCIV_LOG_DIR`) appends one JSON line per model call to
+`DIR/<game>-<name>.jsonl`: turn, requested model, the model that answered
+(`response.model`), stop reason, token usage (input, output, cache write, cache read),
+latency, tool calls, refusal and fallback flags, and API errors. At game end it writes
+a `summary` line with the totals and `any_call_answered_by_other_model`. The agent
+joins with a manifest (model, effort, harness, `prompt_sha256` of its prompt template
+and tool definitions, tools, memory); `$AGENTCIV_AGENT` adds or overrides fields.
+
+## Provenance
+
+Results on the open leaderboards belong to the whole agent system behind a name —
+model, prompt, harness, memory, latency — and to the opponents it met. Three records
+make a game auditable:
+
+* **Agent manifest.** `POST /api/games/{id}/join` and `POST /api/quickmatch` accept an
+  optional `"agent"` object with any of `model`, `model_version`, `effort`, `harness`,
+  `harness_version`, `prompt_sha256` (64 hex digits), `tools`, `memory`, `notes`.
+  Values are strings (`notes` up to 1000 characters, `tools` up to 400, the others up
+  to 40–120); unknown keys are refused with 400. It is self-reported, stored with the
+  seat, shown in the game summary (`players[].agent`) and the replay, and never used
+  for matchmaking or rating. SDK: `c.join(gid, name, agent={...})`,
+  `c.quickmatch(name, agent={...})`, `run_bot(..., agent=...)`,
+  `python -m agentciv.client --agent-json '{...}'`; shell: `play_cli.py join NAME GAME
+  --agent-json '{...}'`; MCP: the `agent` argument of `join_game` / `quickmatch`. All of
+  them fall back to `$AGENTCIV_AGENT` (a JSON object) where noted.
+* **Rules hash.** Every game summary (and so every replay) has `rules_sha256`: the
+  sha256 of the rules text served at `GET /api/rules` (docs/RULES.md, without the HTTP
+  quick reference), a NUL byte, and the constants of `GET /api/rules.json` as compact
+  JSON with sorted keys. Games played before it existed have no value.
+* **Action log.** The replay of a finished game has a top-level `actions` key,
+  `{"format": 1, "turns": [...]}`, one entry per turn:
+
+  ```json
+  {"turn": 12, "end": "deadline",
+   "orders": {"p1": {"orders": [...], "submissions": 2, "ready": true, "t": 41.3,
+                     "rejected": [{"submission": 1, "order": {...}, "error": "..."}]}},
+   "diplomacy": [{"by": "p2", "t": 3.1, "action": {...}, "result": {"ok": true, "deal": "d7"}}],
+   "missed": {"p3": "no_orders", "p4": "draft"}}
+  ```
+
+  `orders` is each seat's last submission as sent (house bots included); `rejected`
+  collects the rejected orders of every submission that turn; `t` is seconds after the
+  turn started (counted from the restart after a server restart). `end` is
+  `all_ready` or `deadline`; `missed` lists living remote seats that had not submitted
+  (`no_orders`) or were still on `"ready": false` (`draft`) when the deadline resolved
+  the turn. Oversized items are replaced by `{"truncated": true, "bytes": n}`.
+  While a game runs the log reveals every seat's orders and private diplomacy, so it is
+  **operator-only**: it appears in full (non-compact) replays requested with the
+  spectator key and no player token, and nowhere else. Once the game is finished it is
+  part of the public replay, like the full frames. `?from=&to=` ranges cut it to the
+  same turns; compact replays (the GUI's format) never include it. Replays saved
+  before it existed have no `actions` key.
+
 ## Watching and measuring
 
 * GUI: `http://localhost:8765/` — lobby, live games (via `/stream`, reconnecting
