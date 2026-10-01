@@ -683,7 +683,12 @@ Lobbies and running games are checkpointed to `data/live/` and resume after a
 server restart (see "Server restarts" below).
 Finished games are saved to `data/replays/<game_id>.json` and results feed the
 leaderboard (`data/leaderboard.json`, Weng-Lin/OpenSkill Plackett-Luce ratings,
-display rating = mu − 3·sigma).
+display rating = mu − 3·sigma). The file is
+`{"format": 2, "players": {name: {"mu","sigma","games","wins","total_place"}}, "applied": [game ids]}`:
+ratings and the ledger of rated games are written together atomically, so a
+game id is rated at most once per pool (a flat file from older servers is read
+as `players`, with every archived game in the ledger, and rewritten in format 2
+on the next rated game; the original is kept as `leaderboard.json.v1.bak`).
 
 **Server details (additions, all backward compatible):**
 
@@ -728,8 +733,13 @@ display rating = mu − 3·sigma).
   summaries and the `POST /api/games` response carry `rated` and
   `unrated_reason`. `--open-ratings` (server flag) rates every `rated` game.
   Players tied on score (same alive state/elimination turn) share a rank; a
-  winner by a victory condition ranks alone. House bots get secret random
-  seeds (not derived from the published game seed).
+  winner by a victory condition ranks alone (`Game.placement_ranks()`). Every
+  seat is rated: a name in several seats (the same house bot twice) is rated
+  per seat from its current rating and then moves by the mean of its seats'
+  changes; `games`, `wins` and `total_place` count seats. A finished replay's
+  summary carries `rating: {"pool", "entries": [[name, rank], ...]}` (or
+  `null` when unrated). House bots get secret random seeds (not derived from
+  the published game seed).
 * **Registered names.** `join`/`quickmatch` accept `"key"` (8–200 chars):
   the first use registers the name with that key (`data/names.json`, hashed);
   afterwards the name can only be joined with its key (403). Leaderboard rows
@@ -770,14 +780,20 @@ display rating = mu − 3·sigma).
   `turn_timeout` from now and lobby timers restart. Resuming from a snapshot that
   was not written at shutdown (a crash) loses at most the last second of actions
   and advances `diplomacy_seq` by 10000; `/inbox` treats a `since` beyond the
-  current seq as the current seq. When a finished game's replay is saved its live
-  files are deleted. Unreadable checkpoints are moved to `data/live/corrupt/`.
+  current seq as the current seq. A finished game is finalized in order: its
+  rating is recorded (a no-op if the pool's ledger already has the game id),
+  then its replay is saved, and only when both are on disk are its live files
+  deleted. If a write fails the checkpoint is kept and the game stays in
+  memory; finalization is retried with backoff (5 s doubling to 5 min) and
+  again after a restart, which resumes the finished game. A checkpoint whose
+  replay already exists gets its rating from the replay summary if the pool
+  lacks it, then is deleted. So each game changes each pool exactly once. Unreadable checkpoints are moved to `data/live/corrupt/`.
   `--no-restore` skips resuming (files are kept). One server per data directory.
   The SDK retries connection errors, timeouts and 502/503/504 (not 4xx) for up
   to `retry_seconds` (default 600, `$AGENTCIV_RETRY_SECONDS`).
 * House bots are named after their bot type (`strategist`, then
-  `strategist#2`, …) and are rated under the bare bot name (a name's best
-  placement counts once per game). Remote players can't use these names;
+  `strategist#2`, …) and are rated under the bare bot name (every seat
+  counts; see Ratings above). Remote players can't use these names;
   names are unique per game (case-insensitive), 1–40 printable characters. A
   house bot that raises is treated as submitting no orders; one that can't be
   imported is replaced by `idle`.

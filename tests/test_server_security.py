@@ -181,7 +181,7 @@ def test_registered_names_cannot_be_impersonated(server, tmp_path):
     assert call(server, "POST", f"/api/games/{gid}/join", {"name": "Z", "key": "short"})[0] == 400
     st = Storage(tmp_path / "data")  # persisted, and leaderboard rows carry "verified"
     assert st.is_registered("famousagent") and not st.is_registered("Mallory")
-    st.record_result(["FamousAgent", "Mallory"])
+    st.record_result("g-test", ["FamousAgent", "Mallory"])
     assert {r["name"]: r["verified"] for r in st.leaderboard()} == {"FamousAgent": True, "Mallory": False}
 
 

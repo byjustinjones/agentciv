@@ -279,7 +279,11 @@ def test_full_game_two_sdk_players_four_house_bots(server, tmp_path):
     assert {"Claimer", "Lazy", "idle"} <= names
     assert "idle#2" not in names
     lb = json.loads((tmp_path / "data" / "leaderboard.json").read_text())
-    assert lb["Claimer"]["games"] == 1
+    assert lb["format"] == 2 and lb["applied"] == [gid]
+    assert lb["players"]["Claimer"]["games"] == 1
+    idle_seats = sum(1 for b in bots if b == "idle")  # every seat of a repeated bot is rated
+    assert lb["players"]["idle"]["games"] == idle_seats
+    assert c.replay(gid)["summary"]["rating"]["pool"] == "standard"
 
     # a restarted server still lists and serves the finished game
     srv2 = create_server("127.0.0.1", 0, data_dir=str(tmp_path / "data")).start_background()
@@ -290,7 +294,7 @@ def test_full_game_two_sdk_players_four_house_bots(server, tmp_path):
         assert c2.replay(gid)["result"] == res
         assert c2.state(gid)["status"] == "finished"
         assert c2.wait(0, timeout=1, game_id=gid)["status"] == "finished"
-        assert c2.leaderboard()[0]["games"] == 1
+        assert {r["name"]: r["games"] for r in c2.leaderboard()}["Claimer"] == 1
         new_gid = c2.create_game(max_players=2)
         assert new_gid != gid  # ids continue after archived ones
     finally:

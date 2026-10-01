@@ -4,7 +4,9 @@ Layout under ``data_dir``::
 
     replays/<game_id>.json   {"game_id","summary","result","frames":[...]}
     replays/index.json       {game_id: summary}   (rebuilt from the files if missing)
-    leaderboard.json         {name: {"mu","sigma","games","wins","total_place"}}
+    leaderboard.json         {"format": 2, "players": {name: {"mu","sigma","games","wins","total_place"}},
+                              "applied": [game ids already rated in this pool]}
+    leaderboard_fog.json     the same for fog-of-war games (own pool)
     names.json               {casefolded name: sha256(key)}   (names registered with a key)
     live/                    checkpoints of lobbies and running games (see persist.py)
 
@@ -54,8 +56,9 @@ class Storage:
         self._write_lock = threading.Lock()  # serialises replay-file writes (outside the index lock)
         self.replay_dir.mkdir(parents=True, exist_ok=True)
         self.index: dict[str, dict] = self._load_index()
-        self.table: dict[str, dict] = self._load_json(self.leaderboard_path, {})
-        self.fog_table: dict[str, dict] = self._load_json(self.fog_leaderboard_path, {})
+        self._legacy: set[Path] = set()  # flat (pre-format-2) leaderboard files, backed up before the first rewrite
+        self.table, self._applied = self._load_pool(self.leaderboard_path)
+        self.fog_table, self._fog_applied = self._load_pool(self.fog_leaderboard_path)
         self.claims: dict[str, str] = self._load_json(self.names_path, {})
 
     # ------------------------------------------------------------ helpers
@@ -70,6 +73,21 @@ class Storage:
         except (OSError, ValueError) as e:
             log.warning("could not read %s (%s); starting fresh", path, e)
             return default
+
+    def _load_pool(self, path: Path) -> tuple[dict, set]:
+        """(players, applied game ids) of one leaderboard file. A legacy flat
+        file ({name: entry}, before format 2) or a missing one gets every
+        archived game in its ledger: those were rated (or not) by the old code.
+        The file is rewritten in format 2 on the next rated game."""
+        data = self._load_json(path, {})
+        if isinstance(data.get("format"), int):
+            players = data.get("players")
+            applied = data.get("applied")
+            return (players if isinstance(players, dict) else {},
+                    {g for g in applied if isinstance(g, str)} if isinstance(applied, list) else set())
+        if data:
+            self._legacy.add(path)
+        return data, set(self.index)
 
     def _load_index(self) -> dict:
         index = self._load_json(self.index_path, {})
@@ -176,33 +194,56 @@ class Storage:
             return self.fog_table, self.fog_leaderboard_path
         raise ValueError(f"unknown leaderboard pool {pool!r}")
 
-    def record_result(self, placements: list[str], ranks: list[int] | None = None,
-                      pool: str = "standard") -> None:
-        """Update ratings from an ordered list of player names (winner first);
-        ``ranks`` (optional, 1 = best, equal = tie). Duplicate names keep
-        their best placement; < 2 names is ignored. ``pool``: ``standard``
-        (leaderboard.json) or ``fog`` (leaderboard_fog.json, fog-of-war games)."""
+    def _ledger(self, pool: str) -> set:
+        return self._applied if pool == "standard" else self._fog_applied
+
+    def is_applied(self, game_id: str, pool: str = "standard") -> bool:
+        """Has ``game_id`` already changed the ``pool`` ratings?"""
+        self._pool(pool)
+        with self._lock:
+            return game_id in self._ledger(pool)
+
+    def record_result(self, game_id: str, placements: list[str], ranks: list[int] | None = None,
+                      pool: str = "standard") -> bool:
+        """Rate one game: ``placements`` holds one rating name per seat (winner
+        first; a name may repeat, see :func:`ratings.update`), ``ranks``
+        (optional, 1 = best, equal = tie). ``pool``: ``standard``
+        (leaderboard.json) or ``fog`` (leaderboard_fog.json, fog-of-war games).
+
+        Idempotent: a ``game_id`` already in the pool's ledger changes nothing.
+        The ratings and the ledger are written together in one atomic file and
+        the in-memory table changes only once that write succeeded, so a failed
+        write (OSError, raised) can simply be retried. Fewer than two distinct
+        names is ignored. Returns True if the ratings changed."""
         table, path = self._pool(pool)
         if ranks is None:
             ranks = list(range(1, len(placements) + 1))
-        seen: list[str] = []
-        seen_ranks: list[int] = []
-        for name, rank in zip(placements, ranks):
-            if name not in seen:
-                seen.append(name)
-                seen_ranks.append(rank)
-        if len(seen) < 2:
-            return
-        # re-number so ranks stay 1..n with ties preserved after dropping duplicates
-        dense, prev, out = 0, None, []
-        for i, r in enumerate(seen_ranks):
-            if r != prev:
-                dense = i + 1
-                prev = r
-            out.append(dense)
+        if len(set(placements)) < 2:
+            return False
         with self._lock:
-            ratings.update(table, seen, out)
-            _atomic_write(path, json.dumps(table, indent=1, sort_keys=True).encode())
+            applied = self._ledger(pool)
+            if game_id in applied:
+                return False
+            work = {name: dict(table[name]) for name in placements if name in table}
+            ratings.update(work, list(placements), list(ranks))
+            players = {**table, **work}
+            ledger = sorted(applied | {game_id})
+            self._migrate_backup(path)
+            _atomic_write(path, json.dumps({"format": 2, "players": players, "applied": ledger},
+                                           indent=1, sort_keys=True).encode())
+            table.update(work)
+            applied.add(game_id)
+            return True
+
+    def _migrate_backup(self, path: Path) -> None:
+        """Before the first format-2 write over a legacy flat file, keep a copy of it."""
+        if path not in self._legacy:
+            return
+        backup = path.with_name(path.name + ".v1.bak")
+        if not backup.exists():
+            with open(path, "rb") as f:
+                _atomic_write(backup, f.read())
+        self._legacy.discard(path)
 
     def leaderboard(self, pool: str = "standard") -> list[dict]:
         table, _ = self._pool(pool)
