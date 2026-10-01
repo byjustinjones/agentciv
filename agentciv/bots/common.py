@@ -145,9 +145,12 @@ class World:
             a, b = t["a"], t["b"]
             self.treaty_bonds[(a, b) if a < b else (b, a)] = dict(t.get("bond") or {})
         self.cooldowns = {}               # pair -> first turn the pair may sign again
+        self.notice_until = {}            # pair -> last movement-restricted turn after a break
         for c in view.get("treaty_cooldowns", []) or []:
             a, b = c["a"], c["b"]
             self.cooldowns[(a, b) if a < b else (b, a)] = c["until_turn"]
+            if c.get("notice_until") is not None:
+                self.notice_until[(a, b) if a < b else (b, a)] = c["notice_until"]
         self.res = dict(you.get("resources", {}))
         self.caps = dict(you.get("caps", {r: C.STORAGE_BASE for r in CAPPED}))
         self.income = dict(you.get("income", {}))
@@ -204,7 +207,10 @@ class World:
 
     def break_notice(self, a: str, b: str) -> bool:
         """Still movement-restricted after a treaty break (rules §9)?"""
-        until = self.cooldowns.get((a, b) if a < b else (b, a))
+        key = (a, b) if a < b else (b, a)
+        if key in self.notice_until:
+            return self.turn <= self.notice_until[key]
+        until = self.cooldowns.get(key)
         return until is not None and self.turn - (until - C.TREATY_RESIGN_COOLDOWN) <= C.TREATY_BREAK_NOTICE
 
     def hostile(self, a: str, b: str) -> bool:
@@ -220,7 +226,15 @@ class World:
     def betrayals(self, q: str) -> int:
         return int((self.players.get(q) or {}).get("betrayals", 0) or 0)
 
-    def break_influence(self, q: str | None = None) -> int:
+    def streaking(self, q: str) -> bool:
+        """Is ``q`` on an economic or influence streak (public)? A treaty with
+        such a partner can be broken for free (rules §9)."""
+        pl = self.players.get(q) or {}
+        return bool(pl.get("economic_streak") or pl.get("influence_streak"))
+
+    def break_influence(self, q: str | None = None, partner: str | None = None) -> int:
+        if partner is not None and self.streaking(partner):
+            return 0
         return C.TREATY_BREAK_COST * (1 + self.betrayals(q or self.me))
 
     def bond_required(self, q: str) -> int:
@@ -477,7 +491,7 @@ def tile_yield(world: World, i: int, improvement: str | None = "__current__") ->
         if rem <= 0:
             y[dep[0]] = 0
     if i in world.relic_set:
-        y["influence"] = y.get("influence", 0) + C.RELIC_INFLUENCE
+        y["influence"] = y.get("influence", 0) + C.RELIC_INFLUENCE      # guarded rate
     return {r: v for r, v in y.items() if v}
 
 
@@ -926,6 +940,8 @@ def break_cost(world: World, q: str) -> tuple:
     afterwards."""
     w = world
     me = w.players.get(w.me) or {}
+    if w.streaking(q):
+        return 0, 0.0          # free break: the partner is on a victory streak
     b = w.betrayals(w.me)
     infl = C.TREATY_BREAK_COST * (1 + b)
     pct = min(C.TREATY_BREAK_MAX_PCT, C.TREATY_BREAK_PCT * (1 + b))

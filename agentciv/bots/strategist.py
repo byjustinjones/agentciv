@@ -86,6 +86,7 @@ class StrategistBot(PlannerBot):
     GARRISON_THREAT_SHARE = 0.4   # armies sitting in their own cities are mostly garrisons
     MIN_GARRISON = 2
     CITY_GARRISON = 1
+    STREAK_CITY_GARRISON = 2   # a city loss resets our economic/influence streak
     SELL_FLOOR = 0.7
     HISTORY = 6
     COMMIT_HORIZON = 30           # only divert resources to a victory path this close
@@ -497,7 +498,7 @@ class StrategistBot(PlannerBot):
         if rp is None or mine_g > rp[1] or self.memory.get("path") != "relics":
             self.memory["relic_progress"] = (w.turn, mine_g)
         self.etas = {q: self.eta(q) for q in w.alive}
-        paths = self.PATHS + (("relics",) if self.USE_RELICS else ())
+        paths = self.PATHS + (("relics",) if self.USE_RELICS and "relic_turns" in w.thresholds else ())
         mine = {k: v for k, v in self.etas.get(w.me, {}).items() if k in paths}
         if "relics" in mine:
             # relic streaks get contested: only prefer them when clearly faster
@@ -587,9 +588,11 @@ class StrategistBot(PlannerBot):
         # relics (only relics with units on them count for the streak)
         streak = pl.get("relic_streak", 0)
         need_r = th.get("relics_needed", 99)
-        hold_turns = th.get("relic_turns", C.RELIC_VICTORY_TURNS)
+        hold_turns = th.get("relic_turns", 16)
         held = pl.get("relics_guarded", pl.get("relics_held", 0))
-        if held >= need_r:
+        if "relic_turns" not in th:
+            out["relics"] = INF
+        elif held >= need_r:
             out["relics"] = max(0, hold_turns - streak)
         elif me:
             out["relics"] = self.relic_acquire_turns(need_r - held) + hold_turns
@@ -877,7 +880,7 @@ class StrategistBot(PlannerBot):
         """Note held relics that a hostile army threatens (guarded in
         :meth:`field_army`) and whether we campaign for the relic victory."""
         w = self.w
-        self.relic_campaign_on = (self.USE_RELICS and self.my_path == "relics"
+        self.relic_campaign_on = (self.USE_RELICS and self.my_path == "relics" and "relic_turns" in w.thresholds
                                   and self.my_eta < w.max_turns - w.turn
                                   and self.my_eta <= self.COMMIT_HORIZON + 10)
         self.relic_guard_targets = []
@@ -942,7 +945,7 @@ class StrategistBot(PlannerBot):
         self.reserve_for_force(tgt, plain=w.at_peace(w.me, rival))
         if w.at_peace(w.me, rival):
             # keep enough influence to break the treaty when ready
-            self.INFLUENCE_RESERVE = max(self.INFLUENCE_RESERVE, w.break_influence() + 2)
+            self.INFLUENCE_RESERVE = max(self.INFLUENCE_RESERVE, w.break_influence(partner=rival) + 2)
 
     def block_feasible(self, tgt: int, rival: str, path: str) -> bool:
         """Can we assemble and deliver the strike force before ``rival``
@@ -1149,7 +1152,7 @@ class StrategistBot(PlannerBot):
         mem["force"] = force
         self.reserve_missing(tgt, force)
         if w.at_peace(w.me, owner):
-            self.INFLUENCE_RESERVE = max(self.INFLUENCE_RESERVE, w.break_influence() + 2)
+            self.INFLUENCE_RESERVE = max(self.INFLUENCE_RESERVE, w.break_influence(partner=owner) + 2)
 
     def raid_value(self, tgt: int, owner: str) -> float:
         w = self.w
@@ -1185,11 +1188,12 @@ class StrategistBot(PlannerBot):
             owner = cc["owner"]
             if owner == w.me or owner not in w.rivals or cool.get(owner, -1) >= w.turn:
                 continue
-            if not (cc.get("capital") or cc.get("wonder_stage", 0) > 0):
+            # any city of a player on an economic/influence streak: its capture resets the streak
+            if not (cc.get("capital") or cc.get("wonder_stage", 0) > 0 or w.streaking(owner)):
                 continue
             if c not in dist:
                 continue
-            if w.at_peace(w.me, owner) and w.res.get("influence", 0) < w.break_influence():
+            if w.at_peace(w.me, owner) and w.res.get("influence", 0) < w.break_influence(partner=owner):
                 continue
             value = self.raid_value(c, owner)
             if w.at_peace(w.me, owner):
@@ -1252,7 +1256,7 @@ class StrategistBot(PlannerBot):
             ready = self.raid_wins(tgt, owner, close)
             if ready:
                 if at_peace:
-                    if w.res.get("influence", 0) >= w.break_influence() and self.memory.get("broke") != w.turn:
+                    if w.res.get("influence", 0) >= w.break_influence(partner=owner) and self.memory.get("broke") != w.turn:
                         p.orders.append({"type": "break_treaty", "with": owner})
                         self.memory["broke"] = w.turn
                     # hold position this turn; strike next turn
@@ -1527,7 +1531,7 @@ class StrategistBot(PlannerBot):
             if not moved and d <= 7:
                 # staged at the border: hold position
                 self.locked[i] = add_units(self.locked.get(i, {}), free)
-        if not near or w.res.get("influence", 0) < w.break_influence():
+        if not near or w.res.get("influence", 0) < w.break_influence(partner=owner):
             return
         win, _, ratio = simulate_attack(w, w.me, near, tgt, assume_war=True)
         if win and ratio >= 1.4 and self.memory.get("broke") != w.turn:

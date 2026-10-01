@@ -12,8 +12,9 @@ byte-identical views, diplomacy results and inboxes (the only allowed
 difference is the static ``costs.fog`` rules block).
 
 First recorded at the base commit before fog existed (0d4a71c). Re-recorded
-with the working tree's package when the bank/legacy victory rules changed
-no-fog outcomes on purpose (``RECORDED_AT``). To record at another commit:
+with the working tree's package when the bank/legacy victory rules, the
+treaty rules and the g7-g10 retune changed no-fog outcomes on purpose
+(``RECORDED_AT``). To record at another commit:
   git archive <commit> | tar -x -C /tmp/base
   PYTHONPATH=/tmp/base python tests/data/make_nofog_golden.py
 """
@@ -32,8 +33,10 @@ TURNS = 24
 BOTS = ("strategist", "rusher", "economist", "turtle", "random")
 NEGOTIATION_ROUNDS = 3
 OUT = Path(__file__).with_name("nofog_golden.json")
-RECORDED_AT = ("treaties (slots, bonds, cooldowns and priced breaks with the bank fee, rules §9; on win-conditions "
-               "with contract defaults valued at start prices; fog code from da635b7)")
+RECORDED_AT = ("g7-g10 retune: no relic victory, relic income 3 guarded / 1 unguarded, bank allowance 50 + 10 per "
+               "market hall without interest, streak deposit, city loss resets streaks, legacy 2700, treaty-break "
+               "share and bond removed, free breaks against streaking partners, tied captures void "
+               "(on treaties from 29fdb0a; fog code from da635b7)")
 
 
 def digest(obj) -> str:

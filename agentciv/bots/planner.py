@@ -43,6 +43,8 @@ class PlannerBot(Trader, SafeBot):
     GARRISON_THREAT_SHARE = 1.0   # share of units inside their own city counted as a threat
     MIN_GARRISON = 1              # units kept in the capital at all times
     CITY_GARRISON = 0             # units kept in other cities
+    STREAK_CITY_GARRISON = 0      # ... at least this many while on or near a victory streak
+    STREAK_GUARD_SHARE = 0.85     # "near": bank or legacy at this share of its target
     SELL_FLOOR = 0.65             # never sell below this fraction of base price
     SELL_SURPLUS = True           # sell stock above reserves (not only overflow)
     MIN_ROI = 1 / 45.0            # improvements must repay within ~45 turns
@@ -76,7 +78,11 @@ class PlannerBot(Trader, SafeBot):
         if not self.bank_wanted() or self.p.full():
             return
         p = self.p
-        amt = min(bank_limit(self.w), int(p.budget.get("gold", 0)) - self.BANK_KEEP - self.contract_gold)
+        keep = self.BANK_KEEP
+        me = self.w.players.get(self.w.me) or {}
+        if int(me.get("bank", 0) or 0) >= self.w.thresholds.get("bank", 10 ** 9):
+            keep = 0            # at the target: a streak turn needs a deposit of half the allowance
+        amt = min(bank_limit(self.w), int(p.budget.get("gold", 0)) - keep - self.contract_gold)
         if amt >= 1:
             p.budget["gold"] -= amt
             p.orders.append({"type": "bank", "gold": amt})
@@ -254,6 +260,8 @@ class PlannerBot(Trader, SafeBot):
         """Is ``q`` holding (nearly) enough guarded relics for the relic
         victory? Such a player gets no treaty: we may have to hit a relic."""
         w = self.w
+        if "relic_turns" not in w.thresholds:
+            return False        # no relic victory in these rules
         need = w.thresholds.get("relics_needed", 99)
         pl = w.players.get(q, {})
         return pl.get("relics_guarded", 0) >= need - 1 or pl.get("relic_streak", 0) > 0
@@ -270,10 +278,10 @@ class PlannerBot(Trader, SafeBot):
         when our units are alone on it, which resets the rival's streak)."""
         w, p = self.w, self.p
         self.relic_target = None
-        if not self.COUNTER_RELICS or not w.my_cities:
+        if not self.COUNTER_RELICS or not w.my_cities or "relic_turns" not in w.thresholds:
             return
         need = w.thresholds.get("relics_needed", 99)
-        hold = w.thresholds.get("relic_turns", C.RELIC_VICTORY_TURNS)
+        hold = w.thresholds["relic_turns"]
         worst = None
         for q in w.rivals:
             pl = w.players.get(q, {})
@@ -782,7 +790,10 @@ class PlannerBot(Trader, SafeBot):
         if not avail:
             return
         is_cap = w.cities[c].get("capital")
-        need = (self.MIN_GARRISON if is_cap else self.CITY_GARRISON) if minimum else 0
+        city_min = self.CITY_GARRISON
+        if self.STREAK_CITY_GARRISON > city_min and self.streak_guard():
+            city_min = self.STREAK_CITY_GARRISON
+        need = (self.MIN_GARRISON if is_cap else city_min) if minimum else 0
         keep: dict = {}
         left = need
         for t in ("archer", "infantry", "cavalry", "siege"):
@@ -818,6 +829,17 @@ class PlannerBot(Trader, SafeBot):
                 step = min(step + 1, 5)
         if keep:
             self.locked[c] = add_units(self.locked.get(c, {}), keep)
+
+    def streak_guard(self) -> bool:
+        """Are we on (or close to) an economic or influence streak? The loss
+        of any of our cities resets both (rules §11)."""
+        w = self.w
+        me = w.players.get(w.me) or {}
+        if me.get("economic_streak") or me.get("influence_streak"):
+            return True
+        th, share = w.thresholds, self.STREAK_GUARD_SHARE
+        return (int(me.get("bank") or 0) >= share * th.get("bank", 10 ** 9)
+                or int(me.get("legacy") or 0) >= share * th.get("legacy", 10 ** 9))
 
     def free_units(self, i: int) -> dict:
         """Units on tile i that are neither moved nor locked."""

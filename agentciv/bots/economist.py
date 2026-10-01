@@ -45,6 +45,7 @@ class EconomistBot(PlannerBot):
     DEFENSE_REACH = 2
     DEFENSE_MARGIN = 1.0
     MIN_GARRISON = 2
+    STREAK_CITY_GARRISON = 2   # every city held while the bank race is close (a city loss resets it)
     SELL_FLOOR = 0.6
     BANK_START = 10            # banks from this turn on
     DEFENSIVE_WALLS = False    # a pure builder: never raises walls and spends

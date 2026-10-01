@@ -2,8 +2,9 @@
 
 ``tests/data/nofog_golden.json`` was recorded at the base commit (before fog
 existed) by ``tests/data/make_nofog_golden.py``, and re-recorded when the
-bank/legacy victory rules and later the treaty rules (§9) changed
-standard-game outcomes on purpose: the orders five bots
+bank/legacy victory rules, later the treaty rules (§9) and then the g7-g10
+retune of relics, bank and treaty breaks changed standard-game outcomes on
+purpose: the orders five bots
 submitted over 12 turns on two seeds (each turn preceded by rounds of live
 diplomacy through ``Game.diplomacy``), and a digest of every player view, the
 public and full spectator views, every diplomacy result, every inbox after

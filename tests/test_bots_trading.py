@@ -188,13 +188,14 @@ def test_guard_projects_wonder_and_net_gold():
     g._invalidate()
     v = DealValuer(World(g.player_view("p1")))
     assert danger(v.w, "p3") == pytest.approx(0.64)
-    assert not v.helps_winner("p3", {"gold": 1000})     # one city: 10 x 10 gold can reach the bank
+    assert not v.helps_winner("p3", {"gold": 100})      # +100 -> 0.662
+    assert v.helps_winner("p3", {"gold": 1000})         # 10 turns of the 50 allowance: +500 -> 0.751
     g.add_city(9, 14, "p3")
     c = g.add_city(4, 9, "p3")
     c.market_hall = 1
     g._invalidate()
     v = DealValuer(World(g.player_view("p1")))
-    assert v.helps_winner("p3", {"gold": 1000})         # limit 40/turn: +400 -> 0.729
+    assert v.helps_winner("p3", {"gold": 300})          # limit 60/turn: +300 -> 0.707
     # net gold counts: a loan handed out is not "help" for an economic racer
     assert not v.helps_winner("p3", {"per_turn": {"gold": 30}, "turns": 30}, 0.7, {"gold": 1000})
 
