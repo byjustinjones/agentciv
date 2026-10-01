@@ -738,9 +738,11 @@ Stream F's findings, checked on other seeds:
 * **The spoiler against a banker at target:** the banker reached B in 29 /
   34 games (CPb std / fog) and its streak was reset by a spoiler capture
   after that in 10 / 9 of them (34% / 26%; MIX 26% / 19%). F's 15–25% is at
-  the low end of this. A reset works when it lands: a banker at B whose
-  streak was reset won 10 of 40 such games (CPb and MIX pooled), one that
-  was never hit 51 of 86. The zealot: reset 9 of 54, not hit 53 of 114.
+  the low end of this. A banker at B whose streak was reset won 10 of 40
+  such games (CPb and MIX pooled), one that was never hit 51 of 86. The
+  zealot: reset 9 of 54, not hit 53 of 114. These are observed outcomes,
+  not a controlled estimate of what a raid does: the spoiler picks the
+  cities it can take, so the bankers that get hit are also the weaker ones.
 * **Two bankers, no spoiler (BB):** a banker wins 88% at a median t68, and
   only 5 / 4 streak resets happen in 48 games. With nobody assigned to
   raid, nothing in the bot pool stops a banker.
@@ -852,14 +854,32 @@ games (BB 97%), wonder 6%, conquest 5%. No relic variant was run.
   influence racers more than the temple rush. It also flips the all-strategist field (S fog
   influence 65% → 29%).
 * B 4000 or a 40-gold base move economic wins to influence in the mixed
-  fields, but the banker's own share moves within noise in either
-  direction (CPb std 23 → 31%, CPb fog 40 → 25–33%) and not at all where
-  it already dominates (BB 81–88%, A'b 56 → 60%): the banker banks from
-  turn 6 whatever B is, and the other economic racers fall out first.
+  fields. The banker's own win **share** moves within noise in either
+  direction (CPb std 23 → 31%, CPb fog 40 → 25–33%) and barely where it
+  already dominates (BB 81–88%, A'b 56 → 60%): the banker banks from turn 6
+  whatever B is, and the other economic racers fall out first.
+* Both do **slow the banker down**. Its median win turn, today → B 4000 →
+  base 40:
+
+  | Run | today | B 4000 | bank base 40 |
+  |---|---|---|---|
+  | BB std | t67 | t71 | t70.5 |
+  | BB fog | t68 | t75 | t73 |
+  | A'b std | t65 | t69 | t69 |
+  | CPb std | t76 | t82 | t80 |
+  | CPb fog | t73 | t76.5 | t78 |
+  | MIX std | t69.5 | t71 | t72 |
+  | MIX fog | t67 | t71 | t71 |
+
+  That is 2–7 turns later in every run. Win share and win timing answer
+  different questions: a later win gives rivals more turns to raid, which
+  these fields cannot use because almost nobody raids. Whether the extra
+  turns matter is a question for games with players who do.
 
 ### What the data supports
 
-* No change on bot data. The thresholds do not slow the specialist bots,
+* No change on bot data. The thresholds delay the banker by a few turns
+  without lowering its win share, and L 3000 raises the zealot's share,
   `held:10` is inert with bots, `minus:3` mainly makes raids on influence
   leaders weaker, and the combat variants almost never trigger.
 * The bot pool still has no counter to an unopposed banker (BB): only a
