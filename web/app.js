@@ -91,9 +91,14 @@
   const PALETTE = ['#e6194b', '#3cb44b', '#ffe119', '#4363d8', '#f58231', '#911eb4',
     '#46f0f0', '#f032e6', '#bcf60c', '#fabebe', '#008080', '#e6beff'];
   const CONDITIONS = ['conquest', 'wonder', 'influence', 'relics', 'economic'];
+  // relics were a victory condition only in games whose thresholds carry `relic_turns` (replays g1-g10)
+  const conditionsFor = (th) => CONDITIONS.filter((c) => c !== 'relics' || th?.relic_turns != null);
   const COND_LABEL = {
     conquest: 'Conquest', wonder: 'Wonder', influence: 'Influence', relics: 'Relics',
     economic: 'Economic', score: 'Score (turn limit)', last_standing: 'Last standing',
+  };
+  const STREAK_END = {
+    contract_default: 'contract default', eliminated: 'eliminated', treaty_broken: 'broke a treaty', city_lost: 'lost a city',
   };
   const SEASON_COLOR = { spring: '#9fd356', summer: '#fbbf24', autumn: '#f97316', winter: '#93c5fd' };
   const TERRAIN = {
@@ -152,6 +157,8 @@
       return imp?.bonus ? '+' + bagText(imp.bonus) : (BUILDING_INFO[b] || '');
     },
     relicInfluence() { return num(this.costs?.influence?.relic, 3); },
+    /** Influence of an owned relic nobody of its owner stands on (null in rules without the distinction). */
+    relicInfluenceUnguarded() { const v = this.costs?.influence?.relic_unguarded; return v == null ? null : num(v); },
     wonderMax(th) { return num(th?.wonder_stage, num(this.costs?.buildings?.city?.wonder?.max, 5)); },
     hallFee() { return this.costs?.market?.market_hall_fee; },
     diplo(k, d) { return num(this.costs?.diplomacy?.[k], d); },
@@ -1999,7 +2006,7 @@
           <div><span class="tt-k">Held by</span> ${this.chip(city.owner)}${city.original_owner && city.original_owner !== city.owner ? ` <span class="muted">(founded by</span> ${this.chip(city.original_owner)}<span class="muted">)</span>` : ''}</div>
           <div class="muted">${bits.length ? bits.join(' · ') : 'no buildings'}${city.garrison != null ? ` · garrison ${city.garrison}` : ''}</div></div>`);
       }
-      if (relic) parts.push(`<div class="tt-sec"><b style="color:#67e8f9">◆ Relic</b> — ${relic.owner ? 'held by ' + this.chip(relic.owner) : '<span class="muted">unclaimed</span>'}<div class="muted">+${Rules.relicInfluence()} influence/turn to its holder</div></div>`);
+      if (relic) parts.push(`<div class="tt-sec"><b style="color:#67e8f9">◆ Relic</b> — ${relic.owner ? 'held by ' + this.chip(relic.owner) : '<span class="muted">unclaimed</span>'}<div class="muted">${Rules.relicInfluenceUnguarded() == null ? `+${Rules.relicInfluence()} influence/turn to its holder` : `+${Rules.relicInfluence()} influence/turn guarded / +${Rules.relicInfluenceUnguarded()} unguarded${relic.owner ? (relic.guarded ? ' (guarded now)' : ' (unguarded now)') : ''}`}</div></div>`);
       for (const a of armies) {
         const u = a.units || {};
         const power = Object.entries(u).reduce((s, [k, n]) => s + num(n) * Rules.strength(k), 0);
@@ -2109,6 +2116,7 @@
       // replays recorded before the bank/legacy rules carry `influence` / `economic_gold` thresholds
       const legacyRules = th.bank == null && th.economic_gold != null;
       const streakT = th.streak_turns ?? '?';
+      const conds = conditionsFor(th);
       const need = {
         conquest: `${th.conquest_capitals ?? '?'} capitals`,
         wonder: `stage ${wmax}`,
@@ -2130,7 +2138,7 @@
         }
       };
       const lead = {};
-      for (const c of CONDITIONS) {
+      for (const c of conds) {
         let best = null;
         for (const p of rows) {
           if (p.alive === false) continue;
@@ -2139,14 +2147,14 @@
         }
         lead[c] = best;
       }
-      const chips = CONDITIONS.filter((c) => lead[c]).sort((a, b) => lead[b].val - lead[a].val).map((c) =>
+      const chips = conds.filter((c) => lead[c]).sort((a, b) => lead[b].val - lead[a].val).map((c) =>
         `<span class="race-chip${lead[c].val >= 0.75 ? ' hot' : ''}">${esc(COND_LABEL[c])}: ${this.chip(lead[c].pid)} <b>${pct(lead[c].val)}</b></span>`).join('');
-      const header = `<div></div>${CONDITIONS.map((c) => `<div class="rhd" title="${esc(COND_LABEL[c])}: ${esc(need[c])}">${esc(COND_LABEL[c])}<small>${esc(need[c])}</small></div>`).join('')}`;
+      const header = `<div></div>${conds.map((c) => `<div class="rhd" title="${esc(COND_LABEL[c])}: ${esc(need[c])}">${esc(COND_LABEL[c])}<small>${esc(need[c])}</small></div>`).join('')}`;
       const body = rows.map((p) => {
         const dead = p.alive === false;
         const col = this.color(p.id);
         return `<div class="rp${dead ? ' dead' : ''}" data-pid="${esc(p.id)}"><i class="swatch" style="background:${esc(col)}"></i><span>${esc(p.name || p.id)}</span></div>` +
-          CONDITIONS.map((c) => {
+          conds.map((c) => {
             const val = clamp(num(p.victory_progress?.[c]), 0, 1);
             const isLead = !dead && lead[c]?.pid === p.id;
             return `<div class="bar${isLead ? ' lead' : ''}${val === 0 ? ' zero' : ''}" title="${esc(p.name)} — ${esc(detail(p, c))}"><i style="width:${(val * 100).toFixed(1)}%;background:${esc(col)}"></i><b>${pct(val)}</b></div>`;
@@ -2354,8 +2362,14 @@
         case 'treaty_broken': {
           const breaker = e.by ?? e.player ?? e.breaker ?? e.a;
           const other = e.with ?? e.other ?? e.b ?? e.victim;
-          const cost = e.cost != null ? ` <span class="muted">(−${esc(e.cost)} influence, −${fmt(e.legacy_lost)} legacy${e.paid != null ? `, ${fmt(e.paid)} gold to ${esc(other)}` : num(e.bank_share) + num(e.bond) ? `, ≥${fmt(num(e.bank_share) + num(e.bond))} gold to ${esc(other)}` : ''})</span>` : ' <span class="muted">(betrayal)</span>';
-          return { icon: 'broken', color: '#f87171', major: true, html: `${P(breaker)} <span class="betray">broke</span> their treaty with ${P(other)}${cost}` };
+          // `removed` (rules after g10): the bank share and bond leave the game; `paid` is the refund to the partner
+          const gone = e.removed != null ? num(e.removed) : null;
+          const toPartner = e.removed != null ? (num(e.paid) ? `, ${fmt(e.paid)} gold refunded to ${esc(this.pname(other))}` : '')
+            : e.paid != null ? `, ${fmt(e.paid)} gold to ${esc(this.pname(other))}`
+              : num(e.bank_share) + num(e.bond) ? `, ≥${fmt(num(e.bank_share) + num(e.bond))} gold to ${esc(this.pname(other))}` : '';
+          const cost = e.free ? ` <span class="muted">(free: ${esc(this.pname(other))} was on a victory streak${toPartner})</span>`
+            : e.cost != null ? ` <span class="muted">(−${esc(e.cost)} influence, −${fmt(e.legacy_lost)} legacy${gone ? `, ${fmt(gone)} gold removed` : ''}${toPartner})</span>` : ' <span class="muted">(betrayal)</span>';
+          return { icon: 'broken', color: e.free ? '#fbbf24' : '#f87171', major: true, html: `${P(breaker)} <span class="betray">broke</span> their treaty with ${P(other)}${cost}` };
         }
         case 'deal_proposed': {
           const d = e.deal && typeof e.deal === 'object' ? e.deal : e;
@@ -2394,7 +2408,9 @@
         case 'streak_started':
           return { icon: 'clock', color: '#f3c969', major: true, html: `${P(who)} started a <b>${esc(COND_LABEL[e.condition] || human(e.condition))}</b> victory streak` };
         case 'streak_ended':
-          return { icon: 'clock', color: '#94a3b8', major: true, html: `${P(who)}'s ${esc(COND_LABEL[e.condition] || human(e.condition))} victory streak ended${e.reason === 'contract_default' ? ' <span class="muted">(contract default)</span>' : e.reason === 'eliminated' ? ' <span class="muted">(eliminated)</span>' : ''}` };
+          return { icon: 'clock', color: '#94a3b8', major: true, html: `${P(who)}'s ${esc(COND_LABEL[e.condition] || human(e.condition))} victory streak ended${STREAK_END[e.reason] ? ` <span class="muted">(${STREAK_END[e.reason]})</span>` : ''}` };
+        case 'streak_paused':
+          return { icon: 'clock', color: '#7d8494', html: `${P(who)}'s ${esc(COND_LABEL[e.condition] || human(e.condition))} streak did not advance <span class="muted">(banked ${fmt(num(e.banked))} of ${fmt(num(e.needed))} gold needed)</span>` };
         case 'say':
           return { icon: 'chat', color: e.to === 'all' ? '#60a5fa' : '#c084fc', html: `${P(e.from ?? e.by)} → ${e.to === 'all' || e.to == null ? 'everyone' : P(e.to)}: <span class="quote">“${esc(e.text)}”</span>` };
         case 'trade_offered':

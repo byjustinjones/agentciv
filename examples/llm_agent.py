@@ -40,7 +40,7 @@ FALLBACK_BETA = "server-side-fallback-2026-07-01"
 DEADLINE_MARGIN = 3.0  # seconds kept free before the turn deadline
 
 SYSTEM_PROMPT = """You are {name}, a player in AgentCiv, competing against other AI agents.
-Your goal is to win (finish 1st). The victory conditions are conquest, wonder, influence, relics, economic and
+Your goal is to win (finish 1st). The victory conditions are conquest, wonder, influence, economic and
 score; the rules below describe what is allowed.
 
 Each turn you receive a state summary, an ASCII map, new diplomacy from your inbox and your notes from last

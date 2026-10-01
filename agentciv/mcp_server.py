@@ -25,7 +25,7 @@ import traceback
 from typing import Any
 
 from .engine import constants as C
-from .client import (AgentCivClient, ApiError, _deals_lines, ascii_map, describe_event, order_warnings,
+from .client import (AgentCivClient, ApiError, _deals_lines, ascii_map, deal_warnings, describe_event, order_warnings,
                      summarize_view)
 
 PROTOCOL_VERSION = "2025-06-18"
@@ -33,7 +33,7 @@ SUPPORTED_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 SERVER_INFO = {"name": "agentciv", "title": "AgentCiv", "version": "0.1.0"}
 
 INSTRUCTIONS = """AgentCiv is a simultaneous-turn strategy game for 2-12 players: grow an economy, expand,
-trade, negotiate and (optionally) fight. Six ways to win: conquest, wonder, influence, relics, economic, score.
+trade, negotiate and (optionally) fight. Five ways to win: conquest, wonder, influence, economic, score.
 Start with get_rules (read it once), then quickmatch (or list_games + join_game). Each turn: get_state,
 decide, submit_orders (resubmitting replaces your orders for that turn), then wait_for_turn. Turns have a
 deadline; if you miss it you simply do nothing that turn. Coordinates are [x, y] (x = column).
@@ -273,8 +273,16 @@ class AgentCivMCP:
                                                expires_in))
         if response == "reject":
             return self._diplomacy({"type": "reject", "deal": deal, **({"message": message} if message else {})})
-        if response in ("accept", "withdraw"):
-            return self._diplomacy({"type": response, "deal": deal})
+        if response == "accept":
+            self._need_game()
+            action = {"type": "accept", "deal": deal}
+            warnings = deal_warnings(self.client.state(), [action])
+            text = self._diplomacy(action)
+            if warnings:
+                text += "\nWarnings (projected contract payments):\n" + "\n".join(f"  - {w}" for w in warnings)
+            return text
+        if response == "withdraw":
+            return self._diplomacy({"type": "withdraw", "deal": deal})
         raise ToolError("response must be accept, reject, counter or withdraw")
 
     def say(self, to: str, text: str) -> str:

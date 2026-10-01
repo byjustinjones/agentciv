@@ -16,8 +16,8 @@ from agentciv.client import run_bot  # noqa: E402
 
 # Which improvement to build on which terrain (see the rules for costs).
 IMPROVEMENT = {".": "farm", "f": "lumber_mill", "h": "quarry", "g": "mine"}
-# Claim preference: relics first (a victory path!), then gold, hills, forest, plains.
-CLAIM_ORDER = "*ghf."
+# Claim preference: gold, hills, forest, plains (relics cannot be claimed, only occupied).
+CLAIM_ORDER = "ghf."
 
 
 def decide(view: dict) -> list:

@@ -10,18 +10,20 @@ command only needs your player name.
     python examples/play_cli.py state  NAME [--compact]  # summary of your view
     python examples/play_cli.py map    NAME              # ASCII map
     python examples/play_cli.py orders NAME '<json list of orders>'
-    python examples/play_cli.py deal   NAME '<json list of diplomacy actions>'
+    python examples/play_cli.py deal   NAME '<json list of diplomacy actions>' [--force]
     python examples/play_cli.py inbox  NAME [SECONDS] [--all]  # new items; --all: full history
     python examples/play_cli.py next   NAME [--compact]  # wait for the next turn, then print state
     python examples/play_cli.py rules                    # full rules (markdown)
 
-When some orders are rejected, the turn is held open for ``$AGENTCIV_FIX_WINDOW``
+When some orders are rejected or market sequencing warnings occur,
+the turn is held open for ``$AGENTCIV_FIX_WINDOW``
 seconds (default 60) so a corrected list can be resubmitted; after that the
 accepted orders are confirmed automatically by a small background process.
 
 Orders and diplomacy action formats: see ``rules`` (docs/RULES.md).
 Deal propose/counter/reject ``message`` fields have a 300-character limit;
 say/message text has a 500-character limit. ``deal --help`` prints this help.
+Deal accepts with projected contract shortfalls are not sent unless ``--force`` is present.
 State summaries print factual ALERT lines first. Compact summaries include
 changes from the latest turn events and the previous saved view.
 
@@ -42,8 +44,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agentciv.client import (AgentCivClient, ApiError, ascii_map, describe_event, order_warnings,  # noqa: E402
-                             summarize_view, summarize_compact, view_alerts, view_changes)
+from agentciv.client import (AgentCivClient, ApiError, ascii_map, deal_warnings, describe_event,  # noqa: E402
+                             order_warning_details, summarize_view, summarize_compact, view_alerts, view_changes)
 from agentciv.engine.constants import DEAL_MESSAGE_MAX_LENGTH  # noqa: E402
 
 URL = os.environ.get("AGENTCIV_URL", "http://localhost:8765")
@@ -142,11 +144,13 @@ def cmd_orders(name: str, text: str) -> None:
         return
     if turn is None:
         turn = before["turn"]
+    warnings, flags = order_warning_details(before, orders) if before.get("turn") == turn else ([], set())
+    sequencing = "market_sequencing" in flags
     # Submit as a draft first so the turn cannot resolve while rejected orders are being fixed;
-    # a clean list is then confirmed at once, a list with rejections stays open for FIX_WINDOW seconds.
+    # rejections and market sequencing warnings keep the draft open for FIX_WINDOW seconds.
     try:
         res = c.submit_orders(orders, turn=turn, ready=False)
-        if not res.get("errors"):
+        if not res.get("errors") and not sequencing:
             res = c.submit_orders(orders, turn=turn)
     except ApiError as e:
         if e.status == 409 and "stale turn" in e.message:
@@ -157,10 +161,14 @@ def cmd_orders(name: str, text: str) -> None:
     stamp = time.time_ns()
     creds.update(acted_turn=turn, submit_stamp=stamp)
     errors = res.get("errors", [])
-    if errors:
+    held = bool(errors) or sequencing
+    if held:
         creds.update(pending_orders=orders, pending_turn=turn)
+    else:
+        creds.pop("pending_orders", None)
+        creds.pop("pending_turn", None)
     _save(name, creds)
-    if errors:
+    if held:
         _spawn_release(name, stamp)
     print(f"Turn {res.get('turn')}: {res.get('accepted')} order(s) accepted, {len(errors)} rejected.")
     for err in errors:
@@ -169,7 +177,6 @@ def cmd_orders(name: str, text: str) -> None:
             print(f"    example: {json.dumps(err['example'])}")
         if err.get("hint"):
             print(f"    hint: {err['hint']}")
-    warnings = order_warnings(before, orders) if before.get("turn") == turn else []
     if warnings:
         print("WARNINGS (estimates; accepted orders that may not work out):")
         for w in warnings:
@@ -179,6 +186,10 @@ def cmd_orders(name: str, text: str) -> None:
               f"Turn {turn} is held open for up to {FIX_WINDOW:g}s so you can fix them: run `orders` again "
               "with the full corrected list, including the accepted orders (it replaces everything queued). "
               f"If you don't, the accepted orders are confirmed automatically after {FIX_WINDOW:g}s.")
+    elif sequencing:
+        print(f"The {res.get('accepted')} accepted order(s) are queued. Turn {turn} is held open for up to "
+              f"{FIX_WINDOW:g}s; the queued orders are confirmed automatically afterwards unless replaced "
+              "by another `orders` command with the full list.")
 
 
 def _spawn_release(name: str, stamp: int) -> None:
@@ -200,7 +211,7 @@ def cmd_release(name: str, stamp: str) -> None:
         pass  # the turn already resolved
 
 
-def cmd_deal(name: str, text: str) -> None:
+def cmd_deal(name: str, text: str, force: bool = False) -> None:
     c, _ = _client(name)
     actions = _parse_json(text)
     for i, action in enumerate(actions):
@@ -208,6 +219,17 @@ def cmd_deal(name: str, text: str) -> None:
                 and isinstance(action.get("message"), str)
                 and len(action["message"]) > DEAL_MESSAGE_MAX_LENGTH):
             sys.exit(f"NOT SENT: deal action #{i} message exceeds the {DEAL_MESSAGE_MAX_LENGTH}-character limit.")
+    warnings = []
+    if any(isinstance(action, dict) and action.get("type") == "accept" for action in actions):
+        warnings = deal_warnings(c.state(), actions)
+    if warnings:
+        print("WARNINGS (projected contract payments):")
+        for warning in warnings:
+            print(f"  - {warning}")
+        if not force:
+            print("NOT SENT: these actions have projected contract shortfalls; `deal NAME '<json>' --force` "
+                  "sends them despite these warnings.")
+            return
     res = c.diplomacy(actions)
     for r in res.get("results", []):
         if r.get("ok"):
@@ -306,7 +328,8 @@ def main(argv: list[str]) -> None:
         elif cmd == "orders":
             cmd_orders(args[0], args[1])
         elif cmd == "deal":
-            cmd_deal(args[0], args[1])
+            rest = [arg for arg in args[1:] if arg != "--force"]
+            cmd_deal(args[0], rest[0], "--force" in args[1:])
         elif cmd == "inbox":
             rest = [arg for arg in args[1:] if arg != "--all"]
             cmd_inbox(args[0], float(rest[0]) if rest else 0.0, "--all" in args[1:])

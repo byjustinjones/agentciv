@@ -678,13 +678,27 @@ def _next_season_food_mod(view: dict) -> tuple[str | None, float]:
     return None, 1.0
 
 
+def _contract_food(view: dict, pid: str, offset: int = 0, turns: int = 1) -> tuple[int, int]:
+    paid, received = 0, 0
+    for c in view.get("contracts", []):
+        count = max(0, min(turns, c.get("turns_left", 0) - offset))
+        amount = (c.get("per_turn") or {}).get("food", 0) * count
+        if c.get("payer") == pid:
+            paid += amount
+        if c.get("payee") == pid:
+            received += amount
+    return paid, received
+
+
 def _food_outlook(view: dict, pid: str, food: int, upkeep: int, extra_upkeep: int = 0) -> list[str]:
     """Food balance at the end of this turn and a starvation warning (§ upkeep)."""
-    you = view.get("you") or {}
     gain = seasonal_income(view, pid).get("food", 0)
     upkeep += extra_upkeep
-    end = food + gain - upkeep
-    lines = [f"Food this turn: {food} + {gain} income - {upkeep} upkeep = {end} at turn end."]
+    paid, received = _contract_food(view, pid)
+    terms = (f" - {paid} contract instalments" if paid else "")
+    terms += (f" + {received} contract receipts" if received else "")
+    end = food + gain - upkeep - paid + received
+    lines = [f"Food this turn: {food} + {gain} income - {upkeep} upkeep{terms} = {end} at turn end."]
     if end < 0:
         lines.append(f"WARNING: food runs out this turn; about {math.ceil(-end / 2)} unit(s) will starve "
                      "(highest-upkeep units first) unless you add food or disband units.")
@@ -692,13 +706,19 @@ def _food_outlook(view: dict, pid: str, food: int, upkeep: int, extra_upkeep: in
     nxt, mod = _next_season_food_mod(view)
     cur_mod = ((season.get("modifiers") or {}).get("food") or 1.0)
     base_food = gain / cur_mod  # income in the view is already seasoned
-    next_net = int(math.floor(base_food * mod + 1e-9)) - upkeep
+    remaining = max(1, season.get("turns_left") or 1)
+    next_paid, next_received = _contract_food(view, pid, offset=remaining)
+    next_gain = int(math.floor(base_food * mod + 1e-9))
+    next_net = next_gain - upkeep - next_paid + next_received
     if nxt and next_net < 0:
-        at_switch = end + max(0, (season.get("turns_left") or 1) - 1) * (gain - upkeep)
+        later_paid, later_received = _contract_food(view, pid, offset=1, turns=remaining - 1)
+        at_switch = end + (remaining - 1) * (gain - upkeep) - later_paid + later_received
         turns = max(at_switch, 0) // -next_net
         lasts = f"stored food lasts about {turns} turn(s) of {nxt}" if turns else "units start starving at once"
+        terms = (f", -{next_paid} contract instalments" if next_paid else "")
+        terms += (f", +{next_received} contract receipts" if next_received else "")
         lines.append(f"Next season ({nxt}, in {season.get('turns_left')} turn(s)) food income becomes "
-                     f"{next_net + upkeep}/turn against {upkeep} upkeep: {next_net:+d}/turn, so {lasts}.")
+                     f"{next_gain}/turn against {upkeep} upkeep{terms}: {next_net:+d}/turn, so {lasts}.")
     return lines
 
 
@@ -718,12 +738,10 @@ def _my_last_turn_problems(view: dict, pid: str, max_events: int) -> list[str]:
 
 def _progress_str(p: dict, thr: dict) -> str:
     vp = p.get("victory_progress") or {}
-    rt = thr.get("relic_turns") or 16
     st = thr.get("streak_turns") or 10
     return (f"capitals {p.get('capitals_held', 0)}/{thr.get('conquest_capitals', '?')}, "
             f"wonder {p.get('wonder_stage', 0)}/{thr.get('wonder_stage', 5)}, "
-            f"relics {p.get('relics_held', 0)} held {p.get('relics_guarded', 0)} guarded "
-            f"(need {thr.get('relics_needed', '?')}) streak {p.get('relic_streak', 0)}/{rt}, "
+            f"relics {p.get('relics_held', 0)} held {p.get('relics_guarded', 0)} guarded, "
             f"legacy {p.get('legacy', 0)}/{thr.get('legacy', '?')} streak {p.get('influence_streak', 0)}/{st} "
             f"({vp.get('influence', 0) * 100:.0f}%), "
             f"bank {p.get('bank', 0)}/{thr.get('bank', '?')} streak {p.get('economic_streak', 0)}/{st} "
@@ -737,16 +755,22 @@ def _relic_lines(view: dict, players: dict, rules: dict) -> list[str]:
     on_tile: dict = {}
     for a in view.get("armies", []):
         on_tile.setdefault((a["x"], a["y"]), []).append(a)
-    out = ["Relics (units are listed on tiles in your sight):" if _fog_active(view)
-           else "Relics (units standing on each tile are public):"]
+    fog = _fog_active(view)
+    visible = (view.get("map") or {}).get("visible") if fog else None
+    inf = (rules.get("influence") or {})
+    out = [("Relics (units are listed on tiles in your sight):" if fog
+            else "Relics (units standing on each tile are public):")
+           + f" influence/turn {inf.get('relic', '?')} guarded, {inf.get('relic_unguarded', '?')} unguarded."]
     for r in relics:
         stacks = on_tile.get((r["x"], r["y"]), [])
         units = "; ".join(f"{a['owner']} {_units_str(a['units'])} (power {_power(a['units'], rules)})"
-                          for a in stacks if any(a["units"].values())) or "no units"
+                          for a in stacks if any(a["units"].values()))
+        if not units:
+            seen = visible is None or (r["y"] < len(visible) and visible[r["y"]][r["x"]:r["x"] + 1] == "1")
+            units = "no units" if seen else "tile not in sight"
         owner = r.get("owner")
-        streak = f", owner's streak {players[owner].get('relic_streak', 0)}" if owner in players else ""
         out.append(f"  [{r['x']},{r['y']}] owner {owner or 'none'}, "
-                   f"{'guarded' if r.get('guarded') else 'unguarded'}: {units}{streak}")
+                   f"{'guarded' if r.get('guarded') else 'unguarded'}: {units}")
     return out
 
 
@@ -784,10 +808,15 @@ def order_warnings(view: dict, orders: list) -> list[str]:
     won't cover; food running out once new units' upkeep is added; and open
     offers of yours whose acceptance would take resources before your orders
     run. Estimates use current pool prices and your orders alone."""
+    return order_warning_details(view, orders)[0]
+
+
+def order_warning_details(view: dict, orders: list) -> tuple[list[str], set[str]]:
+    """Order warnings and machine-readable flags; market_sequencing marks a held CLI draft."""
     you = view.get("you") or {}
     pid = you.get("id")
     if not pid or not isinstance(orders, list):
-        return []
+        return [], set()
     rules = view.get("costs") or {}
     res = dict(you.get("resources") or {})
     fee = you.get("market_fee") or 0.05
@@ -795,9 +824,10 @@ def order_warnings(view: dict, orders: list) -> list[str]:
     market_order = (rules.get("market") or {}).get("resources") or ["food", "wood", "stone"]
     orders = [o for o in orders if isinstance(o, dict)]
     warnings = []
+    flags = set()
     after = dict(res)  # resources once the market has cleared
-    failed_at = None   # position in market_order of the first buy that likely fails
-    sold_at = []       # positions of resources sold
+    failed_buys = []   # warning index, clearing position, quantity, cost, available gold
+    sales = []        # clearing position, resource, estimated proceeds
     for i, r in enumerate(market_order):
         mine = [o for o in orders if o.get("type") == "market" and o.get("resource") == r]
         buy = sum(int(o.get("qty") or 0) for o in mine if o.get("side") == "buy")
@@ -823,15 +853,32 @@ def order_warnings(view: dict, orders: list) -> list[str]:
                 sell -= int(o.get("qty") or 0)
         cost = math.ceil(buy * price * (1 + fee)) if buy > 0 else 0
         if buy > 0 and cost > after.get("gold", 0):
+            failed_buys.append((len(warnings), i, buy, cost, after.get("gold", 0)))
             warnings.append(f"market buy of {buy} {r} costs about {cost} gold but only about "
                             f"{after.get('gold', 0)} gold is available when {r} clears; it will likely FAIL")
-            failed_at = i if failed_at is None else failed_at
             buy, cost = 0, 0
         if sell > 0:
-            sold_at.append(i)
+            proceeds = math.floor(sell * price * (1 - fee)) if sell <= res.get(r, 0) else 0
+            sales.append((i, r, proceeds))
         after["gold"] = after.get("gold", 0) + (math.floor(sell * price * (1 - fee)) if sell > 0 else 0) - cost
         after[r] = after.get(r, 0) + max(buy, 0) - max(sell, 0)
-    if failed_at is not None and any(i > failed_at for i in sold_at):
+    generic_sequence = False
+    for index, position, buy, cost, available in failed_buys:
+        later = [(r, proceeds) for i, r, proceeds in sales if i > position]
+        if not later:
+            continue
+        flags.add("market_sequencing")
+        if available + sum(proceeds for _, proceeds in later) >= cost:
+            r = market_order[position]
+            names = " and ".join(q for q, proceeds in later if proceeds > 0)
+            plural = sum(proceeds > 0 for _, proceeds in later) > 1
+            warnings[index] = (f"market buy of {buy} {r} (about {cost} gold) depends on gold from the "
+                               f"{names} sale{'s' if plural else ''}, but {names} "
+                               f"{'clear' if plural else 'clears'} after {r} "
+                               f"({', '.join(market_order)} clear in that order): the buy will likely FAIL")
+        else:
+            generic_sequence = True
+    if generic_sequence:
         warnings.append("the market clears " + ", ".join(market_order) + " in that order: gold from selling a "
                         "resource later in that list is not available for an earlier buy the same turn")
 
@@ -875,7 +922,55 @@ def order_warnings(view: dict, orders: list) -> list[str]:
                             + ", ".join(f"{pending[r]} {r}" for r in tight)
                             + " the moment they are accepted, before these orders run; if that happens, "
                             "some of these orders will fail (withdraw an offer to keep the resources)")
-    return warnings
+    return warnings, flags
+
+
+def deal_warnings(view: dict, actions: list) -> list[str]:
+    """Estimated first-instalment shortfalls for accepted contracts, using the current view."""
+    you = view.get("you") or {}
+    pid = you.get("id")
+    if not pid or not isinstance(actions, list):
+        return []
+    resources = you.get("resources") or {}
+    income = seasonal_income(view, pid)
+    projected = {r: resources.get(r, 0) + income.get(r, 0) for r in RESOURCES}
+    projected["food"] -= you.get("upkeep", 0)
+    for c in view.get("contracts", []):
+        if c.get("payer") == pid and c.get("turns_left", 0) > 0:
+            for r, amount in (c.get("per_turn") or {}).items():
+                projected[r] = projected.get(r, 0) - amount
+    row = next((p for p in view.get("players", []) if p.get("id") == pid), {})
+    threshold = ((view.get("victory") or {}).get("thresholds") or {}).get("bank")
+    streak = (row.get("economic_streak") or 0) > 0
+    at_threshold = threshold is not None and (row.get("bank") or 0) >= threshold
+    deals = {d["id"]: d for d in (view.get("deals") or {}).get("open", [])}
+    out, accepted = [], set()
+    for action in actions:
+        if not isinstance(action, dict) or action.get("type") != "accept":
+            continue
+        did = action.get("deal")
+        if not isinstance(did, str) or did in accepted:
+            continue
+        deal = deals.get(did)
+        if not deal or deal.get("to") != pid:
+            continue
+        accepted.add(did)
+        give, get = deal.get("give") or {}, deal.get("get") or {}
+        for r in RESOURCES:
+            projected[r] += give.get(r, 0) - get.get(r, 0)
+        per = get.get("per_turn") or {}
+        for r, amount in per.items():
+            stock = projected.get(r, 0)
+            if amount > stock:
+                warning = (f"Deal {did}: first contract instalment {amount} {r} exceeds projected stock {stock} {r} "
+                           "(on hand + this turn's income - food upkeep - existing instalments "
+                           "+ immediate receipts - immediate payments).")
+                if streak or at_threshold:
+                    warning += (" A default sets economic_streak to 0 and seizes the gold value of the remaining "
+                                "obligation from your bank, up to its full balance.")
+                out.append(warning)
+            projected[r] = stock - amount
+    return out
 
 
 _BOND_PER_BETRAYAL = 50   # rules §9: required bond per betrayal (rules.json diplomacy.treaty_bond_per_betrayal)
@@ -900,21 +995,25 @@ def _treaty_warnings(view: dict, pid: str, orders: list) -> list[str]:
     cost, b, bank = info.get("break_cost"), int(row.get("betrayals", 0) or 0), row.get("bank")
     pledged = info.get("bond_pledged")
     broken: list = []
+    paid_breaks = 0       # earlier breaks in this list that add a betrayal (a free break adds none)
     for o in of("break_treaty"):
         q = o.get("with")
         if q not in ts["treaties"] or q in broken or cost is None:
             continue
-        k_cost = cost * (1 + b + len(broken)) // (1 + b)
+        bp = ts["break_preview"].get(q) or {}
+        k_cost = 0 if bp.get("free") else cost * (1 + b + paid_breaks) // (1 + b)
         if infl < k_cost:
-            more = " after the earlier break in this list" if broken else ""
+            more = " after the earlier break in this list" if paid_breaks else ""
             out.append(f"break_treaty with {q} costs {k_cost} influence{more} but you hold {infl}: it will FAIL")
             continue
-        bp = ts["break_preview"].get(q) or {}
         infl -= k_cost + int(bp.get("bank_fee", 0) or 0)
         held -= 1
-        req += _BOND_PER_BETRAYAL
+        if not bp.get("free"):
+            req += _BOND_PER_BETRAYAL
+            paid_breaks += 1
         if free is not None and bank is not None and pledged is not None:
-            bank -= min(max(0, bank), int(bp.get("gold_to_partner", 0) or 0))
+            out_of_bank = int(bp.get("gold_to_partner", 0) or 0) + int(bp.get("gold_removed", 0) or 0)
+            bank -= min(max(0, bank), out_of_bank)
             pledged -= ts["treaties"][q]["mine"]
             free = max(0, bank - pledged)
         broken.append(q)
@@ -1217,18 +1316,25 @@ def view_alerts(view: dict, pid: str | None = None) -> list[str]:
     for a in armies:
         if a.get("owner") == pid or a.get("owner") in partners:
             continue
-        for kind, places in (("relic", relics), ("city", cities)):
-            for place in places:
-                if abs(a["x"] - place["x"]) + abs(a["y"] - place["y"]) == 1:
-                    out.append(f"{a['owner']} stack [{a['x']},{a['y']}] adjacent to your {kind} "
-                               f"[{place['x']},{place['y']}]; no treaty.")
+        for place in relics:
+            if abs(a["x"] - place["x"]) + abs(a["y"] - place["y"]) == 1:
+                out.append(f"{a['owner']} stack [{a['x']},{a['y']}] adjacent to your relic "
+                           f"[{place['x']},{place['y']}]; no treaty.")
+        nearest = min(cities, key=lambda c: max(abs(a["x"] - c["x"]), abs(a["y"] - c["y"])), default=None)
+        if nearest is not None:
+            distance = max(abs(a["x"] - nearest["x"]), abs(a["y"] - nearest["y"]))
+            if distance <= 2:
+                units = a.get("units") or {}
+                out.append(f"{a['owner']} stack [{a['x']},{a['y']}] "
+                           f"({_units_str(units)}, power {_power(units, view.get('costs'))}) "
+                           f"{distance} tile{'s' if distance != 1 else ''} from your city "
+                           f"[{nearest['x']},{nearest['y']}]; no treaty.")
     for ev in view.get("events", []):
         if ev.get("type") == "treaty_broken" and pid in (ev.get("by"), ev.get("with")):
             out.append(f"Treaty {ev.get('by')}–{ev.get('with')} broken on turn {ev.get('turn')}.")
     thresholds = (view.get("victory") or {}).get("thresholds") or {}
     for p in view.get("players", []):
-        for condition, key in (("relic", "relic_turns"), ("economic", "streak_turns"),
-                               ("influence", "streak_turns")):
+        for condition, key in (("economic", "streak_turns"), ("influence", "streak_turns")):
             value = p.get(condition + "_streak") or 0
             target = thresholds.get(key)
             if value and target:
@@ -1236,6 +1342,10 @@ def view_alerts(view: dict, pid: str | None = None) -> list[str]:
                 completes = turn + target - value - 1
                 out.append(f"{p['id']} {condition} streak {value}/{target}; "
                            f"completes at end of turn {completes} if maintained.")
+    me_row = next((r for r in view.get("players", []) if r.get("id") == pid), {})
+    if (me_row.get("bank") or 0) >= (thresholds.get("bank") or 10 ** 9) and you.get("streak_deposit"):
+        out.append(f"Your bank {me_row.get('bank')} is at the economic threshold {thresholds.get('bank')}: this turn end "
+                   f"counts toward your economic streak only if you bank at least {you['streak_deposit']} gold this turn.")
     resources = you.get("resources") or {}
     for contract in view.get("contracts", []):
         if contract.get("payer") != pid or contract.get("turns_left", 0) <= 0:
@@ -1245,27 +1355,31 @@ def view_alerts(view: dict, pid: str | None = None) -> list[str]:
             if amount > held:
                 out.append(f"Contract {contract['id']} next instalment: {amount} {resource}; holding {held}.")
     food, income, upkeep = resources.get("food"), seasonal_income(view, pid).get("food"), you.get("upkeep")
-    if food is not None and income is not None and upkeep is not None and food + income - upkeep < 0:
-        out.append(f"Next resolution food: {food} + {income} income - {upkeep} upkeep = {food + income - upkeep}.")
+    if food is not None and income is not None and upkeep is not None:
+        paid, received = _contract_food(view, pid)
+        end = food + income - upkeep - paid + received
+        if end < 0:
+            terms = (f" - {paid} contract instalments" if paid else "") + (f" + {received} contract receipts"
+                                                                            if received else "")
+            out.append(f"Next resolution food: {food} + {income} income - {upkeep} upkeep{terms} = {end}.")
     return out
 
 
 def view_changes(view: dict, previous: dict | None = None) -> tuple[list[str], dict]:
     """Latest visible events plus public relic deltas; return a bounded saved snapshot.
 
-    The engine emits no relic streak events, and fog can hide a capture event
-    while still publishing the relic owner. Snapshots cover those two cases.
-    Older turns' events cannot be recovered from a state view.
+    Fog can hide a capture event while still publishing the relic owner; the
+    snapshot covers that case. Older turns' events cannot be recovered from a
+    state view.
     """
     previous = previous or {}
     kinds = {"city_captured", "treaty_signed", "treaty_broken", "treaty_expired", "treaty_released", "eliminated",
-             "streak_started", "streak_ended"}
+             "streak_started", "streak_ended", "streak_paused"}
     events = [e for e in view.get("events", []) if e.get("type") in kinds
               or (e.get("type") == "tile_captured" and e.get("relic"))]
     keys = [json.dumps(e, sort_keys=True) for e in events]
     seen = set(previous.get("events", []))
     relics = {f"{r['x']},{r['y']}": r.get("owner") for r in (view.get("map") or {}).get("relics", [])}
-    streaks = {p["id"]: p.get("relic_streak", 0) for p in view.get("players", [])}
     out, captured = [], set()
     for ev, key in zip(events, keys):
         if key in seen:
@@ -1289,27 +1403,32 @@ def view_changes(view: dict, previous: dict | None = None) -> tuple[list[str], d
                     detail += "; bonds " + ", ".join(f"{k} {v}" for k, v in sorted(bond.items()))
         elif kind == "treaty_broken":
             detail = f"Treaty {ev.get('by')}–{ev.get('with')} broken by {ev.get('by')}"
-            if "cost" in ev:
+            if ev.get("free"):
+                detail += f" (free break: {ev.get('with')} was on a victory streak"
+                detail += (f"; {ev['paid']} gold refunds paid" if ev.get("paid") else "") + ")"
+            elif "cost" in ev:
                 detail += (f" ({ev['cost']} influence, legacy -{ev.get('legacy_lost', 0)}"
                            + (f", {ev['paid']} gold paid to {ev.get('with')}" if ev.get("paid") is not None else "")
+                           + (f", {ev['removed']} gold removed" if ev.get("removed") else "")
                            + ")")
         elif kind == "eliminated":
             detail = f"{ev.get('player')} eliminated"
         elif kind in ("streak_started", "streak_ended"):
             detail = f"{ev.get('player')} {ev.get('condition')} streak {'started' if kind == 'streak_started' else 'ended'}"
+            if ev.get("reason"):
+                detail += f" ({ev['reason']})"
+        elif kind == "streak_paused":
+            detail = (f"{ev.get('player')} {ev.get('condition')} streak did not advance "
+                      f"(banked {ev.get('banked')} of {ev.get('needed')} needed)")
         if detail:
             out.append(f"t{ev.get('turn')}: {detail}.")
     for pos, owner in relics.items():
         old = previous.get("relics", {})
         if pos in old and old[pos] != owner and pos not in captured:
             out.append(f"Relic [{pos}] owner {old[pos] or 'none'} → {owner or 'none'} (since saved view).")
-    for pid, streak in streaks.items():
-        old = previous.get("relic_streaks", {}).get(pid)
-        if old is not None and bool(old) != bool(streak):
-            out.append(f"{pid} relic streak {'started' if streak else 'ended'} (since saved view).")
     if previous and view.get("turn", 0) > previous.get("turn", 0) + 1:
         out.insert(0, "Only the latest turn's events are available; intervening events are not in this view.")
-    return out, {"turn": view.get("turn", 0), "events": keys, "relics": relics, "relic_streaks": streaks}
+    return out, {"turn": view.get("turn", 0), "events": keys, "relics": relics}
 
 
 def summarize_compact(view: dict, pid: str | None = None, changes: list[str] | None = None) -> str:
@@ -1327,6 +1446,11 @@ def summarize_compact(view: dict, pid: str | None = None, changes: list[str] | N
     upkeep = you.get("upkeep", row.get("upkeep"))
     out.append("You: " + ", ".join(f"{r} {_num(res.get(r))} ({inc.get(r, 0):+d})" for r in RESOURCES)
                + f"; income in parentheses; upkeep {_num(upkeep)} food.")
+    thr = (view.get("victory") or {}).get("thresholds") or {}
+    out.append(f"Your bank {_num(row.get('bank'))}/{_num(thr.get('bank'))} (allowance {_num(you.get('bank_limit'))}/turn; "
+               f"economic streak {_num(row.get('economic_streak'))}/{_num(thr.get('streak_turns'))}, a turn counts with "
+               f">= {_num(you.get('streak_deposit'))} banked); legacy {_num(row.get('legacy'))}/{_num(thr.get('legacy'))} "
+               f"(influence streak {_num(row.get('influence_streak'))}).")
     out.append("Your cities:")
     for c in view.get("cities", []):
         if c.get("owner") == pid:
@@ -1342,7 +1466,7 @@ def summarize_compact(view: dict, pid: str | None = None, changes: list[str] | N
             continue
         fields = [f"score {_num(p.get('score'))}", f"cities {_num(p.get('cities'))}", f"tiles {_num(p.get('tiles'))}"]
         for key, label in (("military_power", "military"), ("relics_held", "relics held"),
-                           ("relics_guarded", "guarded"), ("relic_streak", "relic streak"),
+                           ("relics_guarded", "guarded"),
                            ("wonder_stage", "wonder"), ("bank", "bank"), ("legacy", "legacy"),
                            ("economic_streak", "economic streak"), ("influence_streak", "influence streak")):
             if p.get(key) is not None:
@@ -1357,6 +1481,23 @@ def summarize_compact(view: dict, pid: str | None = None, changes: list[str] | N
         out.append("Treaty cooldowns: " + "; ".join(f"{q} until t{u}" for q, u in sorted(ts["cooldowns"].items())) + ".")
     prices = (view.get("market") or {}).get("prices") or {}
     out.append("Market (gold/unit): " + (", ".join(f"{r} {p:.2f}" for r, p in prices.items()) or "none") + ".")
+    battles = []
+    for ev in view.get("events", []):
+        if ev.get("type") != "battle" or ev.get("turn") != view.get("turn", 0) - 1:
+            continue
+        sides = list(ev.get("sides") or [])
+        losses = ev.get("losses") or {}
+        for side in [ev.get("attacker"), ev.get("defender"), *losses]:
+            if side and side not in sides:
+                sides.append(side)
+        if not pid or pid not in sides:
+            continue
+        location = f"[{ev.get('x')},{ev.get('y')}]"
+        if ev.get("clash") and ev.get("to"):
+            location += f"–[{ev['to'][0]},{ev['to'][1]}]"
+        lost = "; ".join(f"{side}: {_units_str(units)}" for side, units in losses.items()) or "none"
+        battles.append(f"{location} sides {', '.join(sides)}; winner {ev.get('winner') or 'none'}; losses {lost}")
+    out.append("Battles involving you last turn: " + (" | ".join(battles) or "none") + ".")
     out.append("Changes since your last turn:")
     out.extend("  " + line for line in (changes if changes is not None else view_changes(view)[0])
                or ["No changes in this view."])
@@ -1497,8 +1638,15 @@ def summarize_view(view: dict, pid: str | None = None, max_events: int = 12, max
                          if mine[q]["mine"] or mine[q]["theirs"] else "")
                 bp = ts["break_preview"].get(q)
                 fee = f" + {bp['bank_fee']} influence bank fee" if bp and bp.get("bank_fee") else ""
-                brk = (f"; breaking it now: {bp['influence']} influence{fee}, legacy -{bp['legacy']}, "
-                       f"{bp['gold_to_partner']} gold to {q}" if bp else "")
+                refund = f", {bp.get('gold_to_partner', 0)} gold refunded to {q}" if bp and bp.get("gold_to_partner") else ""
+                removed = f", {bp['gold_removed']} gold removed" if bp and bp.get("gold_removed") else ""
+                if bp and bp.get("free"):
+                    brk = f"; breaking it now: free ({q} is on a victory streak){refund}"
+                elif bp:
+                    brk = (f"; breaking it now: {bp['influence']} influence{fee}, legacy -{bp['legacy']}"
+                           f"{removed}{refund}")
+                else:
+                    brk = ""
                 lines.append(f"{q}: peace until turn {mine[q]['until']} ({left} turn(s) left){soon}{bonds}{brk}")
             elif q in ts["cooldowns"]:
                 lines.append(f"{q}: NO treaty (either side may attack); cannot sign before turn {ts['cooldowns'][q]}")
@@ -1539,10 +1687,10 @@ def summarize_view(view: dict, pid: str | None = None, max_events: int = 12, max
     if thr:
         out.append(f"\nVictory thresholds: conquest {thr.get('conquest_capitals')} original capitals, wonder stage "
                    f"{thr.get('wonder_stage')}, influence: legacy {thr.get('legacy')} held "
-                   f"{thr.get('streak_turns')} turns, relics "
-                   f"{thr.get('relics_needed')}/{thr.get('relics_total')} held for {thr.get('relic_turns')} turns, "
+                   f"{thr.get('streak_turns')} turns, "
                    f"economic: bank {thr.get('bank')} held {thr.get('streak_turns')} turns (original capital "
-                   f"owned), else best score at turn {thr.get('max_turns')}.")
+                   f"owned; a turn counts only with >= {you.get('streak_deposit', '?')} gold banked that turn); "
+                   f"losing any city resets both streaks; else best score at turn {thr.get('max_turns')}.")
     out.append("Players (score | cities tiles | power | food wood stone gold infl | victory progress toward every "
                "condition | reputation):")
     for p in sorted(players.values(), key=lambda p: (p.get("score") is None, -(p.get("score") or 0))):

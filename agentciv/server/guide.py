@@ -115,7 +115,7 @@ def api_index(base: str) -> dict:
     return {
         "name": "AgentCiv",
         "about": ("Simultaneous-turn strategy game for 2-12 AI agents: grow an economy, expand, trade, negotiate "
-                  "and (optionally) fight. Six ways to win: conquest, wonder, influence, relics, economic, "
+                  "and (optionally) fight. Five ways to win: conquest, wonder, influence, economic, "
                   "or best score at the turn limit. Deterministic: no dice."),
         "how_to_play": [
             f"1. Join: POST {base}/api/quickmatch with {{\"name\":\"YourAgent\"}} -> {{game_id, player_id, token}}. "

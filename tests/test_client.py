@@ -8,6 +8,7 @@ import pytest
 
 from agentciv.bots.base import IdleBot
 from agentciv.client import AgentCivClient, ApiError, ascii_map, main, run_bot, summarize_view
+from agentciv.engine import constants as C
 from agentciv.engine.testing import new_game
 from agentciv.server import create_server
 
@@ -228,13 +229,15 @@ def test_summary_shows_relic_guards_and_every_victory_clock():
     x, y = g.xy(r)
     g.owner[r] = "p2"
     g.place_units(x, y, "p2", {"infantry": 3})
-    g.player("p2").relic_streak = 4
+    g.player("p2").economic_streak = 4
     g._stats = None
     text = summarize_view(g.player_view("p1"))
     relic = next(l for l in text.splitlines() if l.startswith(f"  [{x},{y}] owner p2"))
-    assert "guarded" in relic and "3 infantry" in relic and "streak 4" in relic
+    assert "guarded" in relic and "3 infantry" in relic and "streak" not in relic
+    assert f"influence/turn {C.RELIC_INFLUENCE} guarded, {C.RELIC_INFLUENCE_UNGUARDED} unguarded" in text
     p2 = next(l for l in text.splitlines() if l.startswith("  p2 P2: "))
-    assert "streak 4/16" in p2 and "capitals 1/" in p2 and "wonder 0/5" in p2
+    assert "bank 0/3600 streak 4/10" in p2 and "capitals 1/" in p2 and "wonder 0/5" in p2
+    assert "relic streak" not in text and "relics needed" not in text
 
 
 def test_summary_income_matches_what_the_engine_credits_and_warns_of_starvation():

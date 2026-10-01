@@ -21,7 +21,7 @@ def alert_view():
     view["treaties"] = [{"a": "p3", "b": "p1", "until_turn": 22}]
     view["events"] = [{"type": "treaty_broken", "by": "p2", "with": "p1", "turn": 19}]
     view["treaty_cooldowns"] = [{"a": "p1", "b": "p2", "until_turn": 34}]
-    for field, value in (("relic_streak", 4), ("economic_streak", 2), ("influence_streak", 1)):
+    for field, value in (("economic_streak", 2), ("influence_streak", 1)):
         view["players"][1][field] = value
     view["you"]["resources"].update(food=1, gold=2)
     view["you"]["income"]["food"] = 2
@@ -38,9 +38,8 @@ def test_each_alert_and_completion_turn():
         "Treaty slots full: 1 of 1 in use; no new treaty can be signed (renewals excepted).",
         "Treaty cooldown with p2 until turn 34: no treaty with p2 can be signed before then.",
         "p2 stack [5,4] adjacent to your relic [5,5]; no treaty.",
-        "p2 stack [3,2] adjacent to your city [2,2]; no treaty.",
+        "p2 stack [3,2] (2 archer, power 16) 1 tile from your city [2,2]; no treaty.",
         "Treaty p2–p1 broken on turn 19.",
-        "p2 relic streak 4/16; completes at end of turn 31 if maintained.",
         "p2 economic streak 2/10; completes at end of turn 27 if maintained.",
         "p2 influence streak 1/10; completes at end of turn 28 if maintained.",
         "Contract k1 next instalment: 3 gold; holding 2.",
@@ -56,7 +55,7 @@ def test_alert_exclusions_and_boundaries():
     view["treaty_cooldowns"] = [{"a": "p2", "b": "p3", "until_turn": 34}, {"a": "p1", "b": "p3", "until_turn": 20}]
     view["you"]["treaty"]["slots"] = 2
     for p in view["players"]:
-        p.update(relic_streak=0, economic_streak=0, influence_streak=0)
+        p.update(economic_streak=0, influence_streak=0)
     view["you"]["resources"].update(food=2, gold=3)
     view["contracts"] += [{"id": "k2", "payer": "p2", "payee": "p1", "per_turn": {"gold": 999}, "turns_left": 1},
                           {"id": "k3", "payer": "p1", "payee": "p2", "per_turn": {"gold": 999}, "turns_left": 0}]
@@ -65,20 +64,26 @@ def test_alert_exclusions_and_boundaries():
     assert view_alerts(view) == ["Treaty with p2 ends on turn 20."]
     view["treaties"] = []
     view["armies"] = [a for a in view["armies"] if a["owner"] == "p1"] + [
-        {"x": 3, "y": 3, "owner": "p2", "units": {"infantry": 1}},  # diagonal
+        {"x": 5, "y": 2, "owner": "p2", "units": {"infantry": 1}},  # 3 tiles from the city
         {"x": 2, "y": 3, "owner": "p3", "units": {"infantry": 0}},  # empty
     ]
     assert view_alerts(view) == []
+    view["armies"].append({"x": 4, "y": 4, "owner": "p2", "units": {"infantry": 1}})   # diagonal, 2 tiles
+    assert view_alerts(view) == ["p2 stack [4,4] (1 infantry, power 10) 2 tiles from your city [2,2]; no treaty."]
 
 
 def test_streak_completion_matches_engine_resolution():
     g = new_game(3)
     g.player("p1").bank = 10000
-    run_turn(g)
-    line = next(s for s in view_alerts(g.player_view("p1")) if "economic streak" in s)
+    g.player("p1").resources["gold"] = 1000
+    deposit = {"p1": [{"type": "bank", "gold": 25}]}
+    run_turn(g, deposit)
+    line = next(s for s in view_alerts(g.player_view("p1")) if "economic streak 1/" in s)
     assert "1/10; completes at end of turn 9" in line
+    assert ("Your bank 10025 is at the economic threshold 3600: this turn end counts toward your economic streak "
+            "only if you bank at least 25 gold this turn.") in view_alerts(g.player_view("p1"))
     for _ in range(9):
-        run_turn(g)
+        run_turn(g, deposit)
     assert g.result["condition"] == "economic" and g.result["turn"] == 9
 
 
@@ -105,9 +110,12 @@ def test_compact_has_requested_fields_and_one_line_per_city_army_player():
     assert "Home [2,2]: walls 2; wonder 0" in text
     assert "[2,2]: 3 infantry" in text
     row = next(line for line in text.splitlines() if "p2 P2:" in line)
-    for field in ("score", "cities", "tiles", "military", "relics held", "guarded", "relic streak",
+    for field in ("score", "cities", "tiles", "military", "relics held", "guarded",
                   "wonder", "bank", "legacy", "economic streak", "influence streak"):
         assert field in row
+    assert "relic streak" not in row
+    assert "Your bank 0/3600 (allowance 50/turn; economic streak 0/10, a turn counts with >= 25 banked)" in text
+    assert "Battles involving you last turn: none." in text
     assert "Your treaties (1/1 slots): p3 ends t22." in text
     assert "Treaty cooldowns: p2 until t34." in text
     assert "Market (gold/unit): food" in text
@@ -120,7 +128,6 @@ def test_changes_events_snapshots_and_no_duplicates():
     _, previous = view_changes(view)
     view["turn"] += 1
     view["map"]["relics"][0]["owner"] = "p2"
-    view["players"][1]["relic_streak"] = 0
     view["events"] = [
         {"type": "tile_captured", "relic": True, "x": 5, "y": 5, "from": "p1", "to": "p2", "turn": 20},
         {"type": "city_captured", "city": "Home", "x": 2, "y": 2, "from": "p1", "to": "p2", "turn": 20},
@@ -128,7 +135,9 @@ def test_changes_events_snapshots_and_no_duplicates():
         {"type": "treaty_expired", "a": "p1", "b": "p3", "turn": 20},
         {"type": "eliminated", "player": "p1", "turn": 20},
         {"type": "streak_started", "player": "p2", "condition": "economic", "turn": 20},
-        {"type": "streak_ended", "player": "p3", "condition": "influence", "turn": 20},
+        {"type": "streak_ended", "player": "p3", "condition": "influence", "reason": "city_lost", "turn": 20},
+        {"type": "streak_paused", "player": "p2", "condition": "economic", "reason": "deposit", "banked": 10,
+         "needed": 25, "turn": 20},
         {"type": "tile_captured", "relic": False, "x": 9, "y": 9, "from": "p1", "to": "p2", "turn": 20},
     ]
     lines, snapshot = view_changes(view, previous)
@@ -136,19 +145,17 @@ def test_changes_events_snapshots_and_no_duplicates():
     text = "\n".join(lines)
     for part in ("Relic [5,5] owner p1 → p2", "City Home", "Treaty p2–p3 signed; ends on turn 30",
                  "Treaty p1–p3 expired", "p1 eliminated", "p2 economic streak started",
-                 "p3 influence streak ended", "p2 relic streak ended"):
+                 "p3 influence streak ended (city_lost)", "p2 economic streak did not advance (banked 10 of 25 needed)"):
         assert part in text
     assert "9,9" not in text
     assert view_changes(view, snapshot)[0] == []
-    # Public relic ownership/streaks still change when a fog-hidden capture event is absent.
+    # Public relic ownership still changes when a fog-hidden capture event is absent.
     view["turn"] += 2
     view["events"] = []
     view["map"]["relics"][0]["owner"] = "p3"
-    view["players"][2]["relic_streak"] = 1
     lines, _ = view_changes(view, snapshot)
     assert "intervening events" in lines[0]
     assert "Relic [5,5] owner p2 → p3 (since saved view)." in lines
-    assert "p3 relic streak started (since saved view)." in lines
 
 
 @pytest.mark.parametrize("command", ["state", "next"])
@@ -205,8 +212,13 @@ def test_treaty_alerts_bonds_and_warnings_from_the_engine():
     assert "Your treaties (2/2 slots): p2 ends t21; p3 ends t32, bonds you 40 / p3 0." in text
     full = summarize_view(view)
     assert "(2/2 slots used; unpledged bank 160, required bond 0)" in full
-    # p1's 40 bond was offered, not required: it leaves the bank for a fee of 1 influence per 2 gold
-    assert f"breaking it now: {C.TREATY_BREAK_COST} influence + 20 influence bank fee, legacy -0, 60 gold to p3" in full
+    # the 10% bank share (20) and p1's 40 bond leave the game; no refunds are owed, so no bank fee
+    assert f"breaking it now: {C.TREATY_BREAK_COST} influence, legacy -0, 60 gold removed;" in full
+    g.player("p3").economic_streak = 1
+    g._invalidate()
+    assert "breaking it now: free (p3 is on a victory streak)" in summarize_view(g.player_view("p1"))
+    g.player("p3").economic_streak = 0
+    g._invalidate()
     w = order_warnings(view, [{"type": "propose_treaty", "to": "p4", "turns": 20},
                               {"type": "release_treaty", "with": "p2"}])
     assert any("propose_treaty with p4 will FAIL unless p2 also order(s) release_treaty this turn" in s for s in w)
