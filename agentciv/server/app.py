@@ -391,7 +391,10 @@ class Handler(BaseHTTPRequestHandler):
             timeout = min(max(timeout, 0.0), MAX_WAIT)
             if self.command == "HEAD":
                 timeout = 0.0  # HEAD must not block
-            return self._json(game.wait(since, timeout))
+            since_phase = self._int_query(query, "since_phase", None)
+            if since_phase is None:
+                return self._json(game.wait(since, timeout))
+            return self._json(game.wait(since, timeout, since_phase))
         if action == "inbox":
             pid = self._player(game_id, query, required=True)
             since = self._int_query(query, "since", None)
