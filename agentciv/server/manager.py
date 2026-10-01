@@ -42,6 +42,9 @@ from ..engine import constants as C
 from ..engine.deals import ACTION_TYPES as DIPLOMACY_TYPES
 from ..engine.deals import ALL_ACTION_TYPES, DealError, parse_action
 from ..engine.rulesdoc import rules_sha256
+from ..puzzles import BOT_PREFIX as PUZZLE_BOT_PREFIX
+from ..puzzles import PuzzleGame, get_puzzle, house_seats
+from ..puzzles import make_bot as make_puzzle_bot
 from .guide import ORDER_EXAMPLES, order_hint
 from .persist import FORMAT as CHECKPOINT_FORMAT
 from .persist import LiveStore
@@ -72,6 +75,10 @@ MAX_NEGOTIATION_ROUNDS = 10      # synchronous games: most negotiation rounds a 
 # Ratings: only games played under standard, server-controlled conditions feed the leaderboard.
 MAX_RATED_TURN_TIMEOUT = 300.0   # rated games need a real deadline, so a losing player can't stall forever
 UNRATED_BOTS = frozenset({"idle", "random", "banker", "zealot", "spoiler"})  # creator-picked baseline bots make a game unrated
+
+# Puzzle games (docs/PUZZLES.md): the only options a {"puzzle": id} body may carry; the puzzle fixes the rest
+PUZZLE_OPTIONS = frozenset({"puzzle", "name", "turn_timeout", "turn_delay", "rated", "fog"})
+PUZZLE_TURN_TIMEOUT = 300.0      # default seconds per turn of a puzzle game
 
 # Resource limits (attributes of GameManager, so embedders and tests can change them).
 MAX_LIVE_GAMES = 200             # lobbies + running games in memory; creation beyond this -> 503
@@ -128,6 +135,8 @@ def available_bots() -> list[str]:
 def make_bot(name: str, seed: int) -> tuple[Bot, str]:
     """Instantiate a house bot; falls back to the idle bot if it fails."""
     try:
+        if name.startswith(PUZZLE_BOT_PREFIX):
+            return make_puzzle_bot(name), name  # a puzzle's fixed opponent (its seed is part of the puzzle)
         return get_bot(name, seed), name
     except Exception as e:
         log.warning("bot %r unavailable (%s: %s); using 'idle' instead", name, type(e).__name__, e)
@@ -232,6 +241,8 @@ def parse_game_options(body: dict) -> dict:
     """Validate a ``POST /api/games`` body into a normalised options dict."""
     if not isinstance(body, dict):
         raise ApiError(400, "body must be a JSON object")
+    if body.get("puzzle") is not None:
+        return _puzzle_options(body)
     max_players = _number(body, "max_players", 6, 1, C.MAX_PLAYERS, integer=True)
     min_players = _number(body, "min_players", min(2, max_players), 1, C.MAX_PLAYERS, integer=True)
     if min_players > max_players:
@@ -289,10 +300,57 @@ def _sync_options(body: dict) -> tuple[bool, int | None]:
     return True, _number(body, "negotiation_rounds", NEGOTIATION_ROUNDS, 0, MAX_NEGOTIATION_ROUNDS, integer=True)
 
 
+def _puzzle_options(body: dict) -> dict:
+    """Options of a ``{"puzzle": id}`` game: the puzzle fixes the seats,
+    seed, map, turn limit and opponents, so a body that also sets any of
+    those (anything but name, turn_timeout, turn_delay, rated: false and
+    fog: false) is refused rather than silently ignored."""
+    try:
+        pz = get_puzzle(body["puzzle"])
+    except ValueError as e:
+        raise ApiError(400, str(e)) from None
+    extra = sorted(k for k in body if k not in PUZZLE_OPTIONS)
+    if extra:
+        raise ApiError(400, f"a puzzle game takes only {sorted(PUZZLE_OPTIONS)} (the puzzle fixes the rest); "
+                            f"remove {extra}")
+    if _bool(body, "rated", False):
+        raise ApiError(400, "puzzle games are always unrated")
+    if _bool(body, "fog", False):
+        raise ApiError(400, "puzzle games have no fog of war")
+    name = body.get("name")
+    if name is not None:
+        if not isinstance(name, str):
+            raise ApiError(400, "name must be a string")
+        name = " ".join(name.split())[:80] or None
+    turn_delay = _number(body, "turn_delay", None, 0, 60, allow_none=True)
+    seats = len(pz.roles)
+    return {
+        "name": name or f"Puzzle: {pz.title}",
+        "max_players": seats,
+        "min_players": seats,
+        "turn_timeout": _turn_timeout(body, PUZZLE_TURN_TIMEOUT),
+        "max_turns": pz.max_turns,
+        "seed": pz.seed,
+        "bots": [],
+        "fill_with_bots": False,
+        "lobby_timeout": None,
+        "turn_delay": None if turn_delay is None else float(turn_delay),
+        "rated": False,
+        "fog": False,
+        "quickmatch": False,
+        "seed_given": True,
+        "sync": False,
+        "negotiation_rounds": None,
+        "puzzle": pz.id,
+    }
+
+
 def unrated_reason(opts: dict) -> str | None:
     """Why a game can't be rated (None = it can). Rated games must be played
     under standard conditions nobody can tailor: a server-chosen seed, the
     full turn limit, a real deadline, and no creator-picked baseline bots."""
+    if opts.get("puzzle"):
+        return "puzzle"
     if not opts.get("rated", True):
         return "created with rated: false"
     if opts.get("seed_given"):
@@ -362,14 +420,22 @@ class GameSession:
     def __init__(self, manager: "GameManager", game_id: str, opts: dict):
         self._init_runtime(manager, game_id, opts)
         self.created = time.time()
-        self.game = Game(GameConfig(seed=opts["seed"], max_turns=opts["max_turns"], game_id=game_id,
-                                    name=self.name, max_players=opts["max_players"],
-                                    fog=bool(opts.get("fog", False))))
+        if opts.get("puzzle"):  # a diagnostic position (docs/PUZZLES.md); built when the game starts
+            self.game = PuzzleGame(opts["puzzle"], game_id=game_id, name=self.name)
+        else:
+            self.game = Game(GameConfig(seed=opts["seed"], max_turns=opts["max_turns"], game_id=game_id,
+                                        name=self.name, max_players=opts["max_players"],
+                                        fog=bool(opts.get("fog", False))))
         self.frames: FrameStore | None = FrameStore()  # zlib-compressed, freed once saved to disk
         self.actions = ActionLog()  # what each seat did per turn (replay key "actions")
         with self.cond:
             for b in opts["bots"]:
                 self._add_bot(b)
+            if opts.get("puzzle"):
+                for name, bot_name, bot in house_seats(opts["puzzle"]):
+                    pid = self._add_player(name)
+                    self.seats[pid] = Seat(pid, name, True, bot_name, None, bot, bot_seed=0)
+                self._touch()
 
     def _init_runtime(self, manager: "GameManager", game_id: str, opts: dict) -> None:
         """Everything that is not part of a checkpoint (locks, thread, caches, timers)."""
@@ -1288,6 +1354,11 @@ class GameSession:
                 self._player_cache[pid] = cached
             return cached[1]
 
+    def _first_turn(self) -> int:
+        """Turn of the first replay frame (0 but for puzzles, which start later)."""
+        g = self.game
+        return g.puzzle.start_turn if isinstance(g, PuzzleGame) else 0
+
     def replay_bytes(self, compact: bool = False, lo: int | None = None, hi: int | None = None,
                      *, full: bool = False) -> bytes:
         """The replay (docs/DESIGN.md §12); ``lo``/``hi`` select an inclusive
@@ -1306,8 +1377,9 @@ class GameSession:
                                     actions=None if public else self.actions.to_bytes())
                 a = max(0, lo or 0)
                 b = len(fs) - 1 if hi is None else min(len(fs) - 1, hi)
+                t0 = self._first_turn()  # frames are indexed from 0, the action log by turn
                 return envelope(self.game_id, summary, result, fs.full(lo, hi, public=public), total=len(fs),
-                                lo=a, actions=None if public else self.actions.to_bytes(a, b))
+                                lo=a, actions=None if public else self.actions.to_bytes(a + t0, b + t0))
         return self.manager.archived_replay_bytes(self.game_id, compact, lo, hi)
 
     def summary(self) -> dict:
@@ -1346,10 +1418,12 @@ class GameSession:
                 "negotiation_rounds": self._rounds if self._sync else None,
                 "deadline": g.deadline,
                 "result": dict(g.result) if g.result else None,
-                "frames": len(self.frames) if self.frames is not None else g.turn + 1,
+                "frames": len(self.frames) if self.frames is not None else g.turn + 1 - self._first_turn(),
             }
             if self._sync and g.status == "running":
                 out["phase"] = self._phase_view()
+            if isinstance(g, PuzzleGame):
+                out["puzzle"] = g.puzzle_block()  # score and explanation once finished
             if g.status == "finished":
                 # the same summary whether the replay is served from memory or from the saved file
                 ranked = self._rated_entries()
@@ -1978,7 +2052,9 @@ class GameManager:
         if self.stopping:
             raise ApiError(503, "server is shutting down")
         self._check_capacity()
-        if self.open_ratings:
+        if opts.get("puzzle"):
+            reason = "puzzle"
+        elif self.open_ratings:
             reason = None if opts["rated"] else "created with rated: false"
         else:
             reason = unrated_reason(opts)
