@@ -16,6 +16,7 @@ CLI_PATH = Path(__file__).resolve().parent.parent / "examples" / "play_cli.py"
 def cli(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENTCIV_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("AGENTCIV_URL", "http://unused.invalid")
+    monkeypatch.delenv("AGENTCIV_AGENT", raising=False)
     spec = importlib.util.spec_from_file_location("play_cli_commands", CLI_PATH)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -115,12 +116,35 @@ def test_join_initializes_inbox_cursor_from_current_view(cli, capsys, previous_g
     module.main(["join", "A", "new-game"])
     factory.assert_called_once()
     assert factory.call_args.args == ("http://unused.invalid",)   # plus retry settings (server restarts)
-    client.join.assert_called_once_with("new-game", "A")
+    client.join.assert_called_once_with("new-game", "A", agent=None)
     client.state.assert_called_once_with()
     assert load_creds(module) == {
         "game_id": "new-game", "player_id": "p4", "token": "new-token", "seq": 47,
     }
     assert "Joined new-game as p4 (A)." in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("source", ["flag", "env"])
+def test_join_sends_agent_manifest(cli, monkeypatch, source):
+    module, client, _ = cli
+    client.join.return_value = {"game_id": "g", "player_id": "p4", "token": "t", "status": "lobby"}
+    client.state.return_value = {"diplomacy_seq": 0}
+    manifest = {"model": "m", "harness": "h"}
+    if source == "flag":
+        monkeypatch.setenv("AGENTCIV_AGENT", '{"model": "ignored"}')
+        module.main(["join", "A", "--agent-json", json.dumps(manifest), "g"])
+    else:
+        monkeypatch.setenv("AGENTCIV_AGENT", json.dumps(manifest))
+        module.main(["join", "A", "g"])
+    client.join.assert_called_once_with("g", "A", agent=manifest)
+
+
+def test_join_rejects_bad_agent_json(cli, monkeypatch):
+    module, client, _ = cli
+    monkeypatch.delenv("AGENTCIV_AGENT", raising=False)
+    with pytest.raises(SystemExit, match="not valid JSON"):
+        module.main(["join", "A", "g", "--agent-json", "{oops"])
+    client.join.assert_not_called()
 
 
 def test_legacy_inbox_saves_current_cursor_before_poll(cli, capsys):

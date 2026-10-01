@@ -93,6 +93,24 @@ def _env_retry_seconds() -> float:
     return DEFAULT_RETRY_SECONDS
 
 
+def agent_from_env(text: str | None = None) -> dict | None:
+    """An agent manifest (see :meth:`AgentCivClient.join`) from ``text`` or,
+    if None, from ``$AGENTCIV_AGENT``: a JSON object such as
+    ``{"model": "claude-opus-5-5", "harness": "my-harness 1.2"}``. Empty -> None;
+    raises ValueError if it is not a JSON object."""
+    if text is None:
+        text = os.environ.get("AGENTCIV_AGENT", "")
+    if not text.strip():
+        return None
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"agent manifest is not valid JSON: {e}") from None
+    if not isinstance(data, dict):
+        raise ValueError("agent manifest must be a JSON object")
+    return data or None
+
+
 def _transient(exc: BaseException, idempotent: bool) -> bool:
     """Is ``exc`` (from urlopen) worth retrying? A refused connection never
     reached the server, so any request may be retried; a reset or timeout may
@@ -235,27 +253,35 @@ class AgentCivClient:
         """Summary of one game (players, status, settings)."""
         return self._request("GET", f"/api/games/{self._gid(game_id)}")
 
-    def join(self, game_id: str, name: str, key: str | None = None) -> dict:
+    def join(self, game_id: str, name: str, key: str | None = None, agent: dict | None = None) -> dict:
         """Join a lobby. Returns ``{"game_id","player_id","token"}`` and remembers them.
         ``key`` (8-200 chars, optional) registers ``name`` on first use; a
-        registered name can only be played with its key."""
+        registered name can only be played with its key. ``agent``: optional
+        manifest of the system playing this seat (``model``, ``model_version``,
+        ``effort``, ``harness``, ``harness_version``, ``prompt_sha256``,
+        ``tools``, ``memory``, ``notes``; strings only), shown in the game
+        summary and replay; see :func:`agent_from_env`."""
         body = {"name": name}
         if key is not None:
             body["key"] = key
+        if agent:
+            body["agent"] = agent
         return self._remember(self._request("POST", f"/api/games/{urllib.parse.quote(game_id, safe='')}/join",
                                             body))
 
     def quickmatch(self, name: str, players: int = 6, turn_timeout: float | None = None,
-                   key: str | None = None, **options) -> dict:
+                   key: str | None = None, agent: dict | None = None, **options) -> dict:
         """Join the open quickmatch lobby for ``players`` seats (creating one if
         needed). The lobby fills with house bots after ``lobby_timeout``
-        seconds (default 30). ``key``: see :meth:`join`. ``fog=True`` joins a
-        fog-of-war lobby (never mixed with standard ones)."""
+        seconds (default 30). ``key``, ``agent``: see :meth:`join`. ``fog=True``
+        joins a fog-of-war lobby (never mixed with standard ones)."""
         body = {"name": name, "players": players, **options}
         if turn_timeout is not None:
             body["turn_timeout"] = turn_timeout
         if key is not None:
             body["key"] = key
+        if agent:
+            body["agent"] = agent
         return self._remember(self._request("POST", "/api/quickmatch", body))
 
     def start(self, game_id: str | None = None, token: str | None = None) -> dict:
@@ -439,14 +465,15 @@ def run_bot(bot_or_callable, base_url: str = DEFAULT_URL, game_id: str | None = 
             turn_timeout: float | None = None, client: AgentCivClient | None = None,
             verbose: bool = False, seed: int = 0, key: str | None = None,
             negotiate: Callable[[dict], list] | None = None, negotiate_window: float = 2.0,
-            deadline_margin: float = 1.0) -> dict:
+            deadline_margin: float = 1.0, agent: dict | None = None) -> dict:
     """Play one game remotely and return a result dict.
 
     ``bot_or_callable`` is a :class:`agentciv.bots.base.Bot`, any callable
     ``view -> list[order]``, or a built-in bot name. Either join ``game_id``,
     or use ``quickmatch=True`` (``players`` seats), or pass an already-joined
     ``client``. Loops wait → state → act → submit until the game finishes.
-    ``key`` registers/proves ownership of ``name`` (see :meth:`AgentCivClient.join`).
+    ``key`` registers/proves ownership of ``name`` and ``agent`` is the
+    seat's manifest (see :meth:`AgentCivClient.join`).
 
     **Bartering.** If the bot has ``negotiate(view) -> list[action]`` (or
     ``negotiate=`` is given), every turn it is called on a fresh view before
@@ -468,9 +495,9 @@ def run_bot(bot_or_callable, base_url: str = DEFAULT_URL, game_id: str | None = 
     c = client or AgentCivClient(base_url)
     if c.token is None:
         if game_id:
-            c.join(game_id, name, key=key)
+            c.join(game_id, name, key=key, agent=agent)
         elif quickmatch:
-            c.quickmatch(name, players=players, turn_timeout=turn_timeout, key=key)
+            c.quickmatch(name, players=players, turn_timeout=turn_timeout, key=key, agent=agent)
         else:
             raise ValueError("pass game_id=..., quickmatch=True, or a joined client")
     say = (lambda *a: print(*a, file=sys.stderr, flush=True)) if verbose else (lambda *a: None)
@@ -1819,14 +1846,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--key", default=os.environ.get("AGENTCIV_KEY") or None,
                         help="secret key for your name: registers it on first use, then only this key can play "
                              "under it (default $AGENTCIV_KEY)")
+    parser.add_argument("--agent-json", default=None,
+                        help="agent manifest as a JSON object, shown in the game summary and replay "
+                             "(default $AGENTCIV_AGENT)")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args(argv)
     if not args.game and not args.quickmatch:
         parser.error("pass --game ID or --quickmatch")
     try:
+        agent = agent_from_env(args.agent_json)
+    except ValueError as e:
+        parser.error(str(e))
+    try:
         res = run_bot(args.bot, args.url, game_id=args.game, name=args.name, quickmatch=args.quickmatch,
                       players=args.players, turn_timeout=args.turn_timeout, verbose=not args.quiet,
-                      seed=args.seed, key=args.key)
+                      seed=args.seed, key=args.key, agent=agent)
     except ApiError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1

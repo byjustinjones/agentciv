@@ -25,7 +25,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from ..engine import rules_json
 from .guide import api_index, api_quickref_markdown
-from .manager import MAX_WAIT, ApiError, GameManager, _player_key, available_bots
+from .manager import MAX_WAIT, ApiError, GameManager, _player_key, available_bots, parse_agent
 
 log = logging.getLogger("agentciv.server")
 
@@ -494,7 +494,7 @@ class Handler(BaseHTTPRequestHandler):
         if action == "join":
             if not isinstance(body, dict):
                 raise ApiError(400, "body must be {\"name\": ...}")
-            seat = game.join(body.get("name"), _player_key(body))
+            seat = game.join(body.get("name"), _player_key(body), parse_agent(body))
             return self._json({"game_id": game_id, "player_id": seat.pid, "token": seat.token,
                                "status": game.status})
         if action == "start":

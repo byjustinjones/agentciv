@@ -2,7 +2,7 @@
 
 Layout under ``data_dir``::
 
-    replays/<game_id>.json   {"game_id","summary","result","frames":[...]}
+    replays/<game_id>.json   {"game_id","summary","result","actions"?,"frames":[...]}
     replays/index.json       {game_id: summary}   (rebuilt from the files if missing)
     leaderboard.json         {"format": 2, "players": {name: {"mu","sigma","games","wins","total_place"}},
                               "applied": [game ids already rated in this pool]}
@@ -24,6 +24,7 @@ import threading
 from pathlib import Path
 
 from .. import ratings
+from .replay import envelope
 
 log = logging.getLogger("agentciv.server")
 
@@ -115,13 +116,15 @@ class Storage:
             return None
         return self.replay_dir / f"{game_id}.json"
 
-    def save_replay(self, game_id: str, summary: dict, result, frames: list[bytes]) -> None:
-        """Write the replay file (frames are pre-serialised JSON bytes)."""
+    def save_replay(self, game_id: str, summary: dict, result, frames: list[bytes],
+                    actions: bytes | None = None) -> None:
+        """Write the replay file (frames and the action log are pre-serialised
+        JSON bytes), built by the same :func:`.replay.envelope` that serves a
+        live game's replay, so both are byte-identical."""
         path = self.replay_path(game_id)
         if path is None:
             return
-        head = _dumps({"game_id": game_id, "summary": summary, "result": result})
-        body = head[:-1] + b',"frames":[' + b",".join(frames) + b"]}"
+        body = envelope(game_id, summary, result, frames, actions=actions)
         with self._write_lock:  # the (large) replay file is written without blocking index lookups
             _atomic_write(path, body)
             with self._lock:

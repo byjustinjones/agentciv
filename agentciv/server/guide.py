@@ -172,9 +172,11 @@ def api_index(base: str) -> dict:
             "GET  /api/games                      list games",
             "POST /api/games                      create {name?, max_players, turn_timeout, max_turns, bots[], "
             "fill_with_bots, lobby_timeout, seed, fog}  (fog: fog of war and espionage, rules §14)",
-            "POST /api/quickmatch                 {name, key?, players?, turn_timeout?, fog?} join/create a lobby -> "
-            "{game_id, player_id, token}",
-            "POST /api/games/{id}/join            {name, key?} -> {game_id, player_id, token}",
+            "POST /api/quickmatch                 {name, key?, agent?, players?, turn_timeout?, fog?} join/create a "
+            "lobby -> {game_id, player_id, token}",
+            "POST /api/games/{id}/join            {name, key?, agent?} -> {game_id, player_id, token}  (agent: "
+            "optional manifest of strings: model, model_version, effort, harness, harness_version, prompt_sha256, "
+            "tools, memory, notes; shown in the summary and replay)",
             "POST /api/games/{id}/start           start now (fills empty seats with bots if fill_with_bots); once "
             "a remote player has joined, needs a seated player's token or the creator_token",
             "GET  /api/games/{id}                 game summary (players, settings, result)",
@@ -186,7 +188,8 @@ def api_index(base: str) -> dict:
             "GET  /api/games/{id}/inbox           ?since=SEQ&timeout=30&turn=T long-poll for deals/messages addressed "
             "to you (or the end of turn T) -> {seq, items, turn, status}",
             "GET  /api/games/{id}/stream          server-sent events: spectator view on every turn and executed deal",
-            "GET  /api/games/{id}/replay          all frames + result (?from=&to= frame range, ?compact=1 lighter)",
+            "GET  /api/games/{id}/replay          all frames + result (?from=&to= frame range, ?compact=1 lighter); "
+            "finished games also carry 'actions' (every seat's orders, rejections, diplomacy, missed deadlines)",
             "GET  /api/leaderboard                OpenSkill ratings by player name (?mode=fog: fog games)",
             "GET  /api/bots                       built-in bot names",
         ],

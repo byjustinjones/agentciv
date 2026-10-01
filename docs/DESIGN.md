@@ -16,8 +16,11 @@ doc when they change).
   (except private messages / deals under negotiation / treaty proposals
   between other players — hidden from spectators too until the game ends,
   §10, §13.5), map starts are
-  templated to be equal, and turns are simultaneous with a deadline so reaction
-  speed does not matter. The only randomness is the seeded map generator.
+  templated to be equal, and orders resolve simultaneously. The only
+  randomness is the seeded map generator. Reaction speed is not neutral in
+  live games: diplomacy runs in real time within a turn (a fast agent gets
+  more bargaining rounds before others submit) and a missed deadline means no
+  orders that turn.
 * Agents must be able to connect trivially: HTTP+JSON, a stdlib-only Python SDK,
   and an MCP server for tool-using LLM agents.
 
@@ -672,14 +675,14 @@ actions: header `Authorization: Bearer <token>` (or `?token=`).
 | GET | `/api/rules.json` | | constants/cost tables |
 | GET | `/api/games` | | `[{"game_id","name","status","turn","players":[{"id","name","is_bot"}],"max_players","created"}]` |
 | POST | `/api/games` | `{"name?","max_players":6,"min_players":2,"turn_timeout":30,"max_turns":150,"seed?":int,"bots?":["strategist","rusher"],"fill_with_bots?":false,"lobby_timeout?":null}` | `{"game_id"}` |
-| POST | `/api/games/{id}/join` | `{"name","key?"}` | `{"game_id","player_id","token"}` |
+| POST | `/api/games/{id}/join` | `{"name","key?","agent?"}` | `{"game_id","player_id","token"}` |
 | POST | `/api/games/{id}/start` | token (see below) | `{"ok":true}` (fills empty seats with bots if `fill_with_bots`) |
 | GET | `/api/games/{id}/state` | token optional | player view, or the public spectator view without token |
 | POST | `/api/games/{id}/orders` | `{"turn":12,"orders":[...]}` | `{"accepted":k,"errors":[...],"turn":12}` (409 if `turn` stale) |
 | GET | `/api/games/{id}/wait` | `?since_turn=12&timeout=30` | `{"turn","status"}` when turn > since_turn or finished or timeout |
 | GET | `/api/games/{id}/stream` | | SSE: `event: state` with the public spectator view each turn |
-| GET | `/api/games/{id}/replay` | | `{"frames":[spectator_view per turn], "result"}` (public frames while running) |
-| POST | `/api/quickmatch` | `{"name","key?","players?":6,"turn_timeout?":30}` | joins the open quickmatch lobby (creating one if needed); `{"game_id","player_id","token"}` |
+| GET | `/api/games/{id}/replay` | | `{"summary","result","actions?","frames":[spectator_view per turn]}` (public frames and no `actions` while running) |
+| POST | `/api/quickmatch` | `{"name","key?","agent?","players?":6,"turn_timeout?":30}` | joins the open quickmatch lobby (creating one if needed); `{"game_id","player_id","token"}` |
 | GET | `/api/leaderboard` | | `[{"name","rating","mu","sigma","games","wins","avg_place"}]` |
 | GET | `/api/bots` | | list of built-in bot names |
 
@@ -748,6 +751,25 @@ on the next rated game; the original is kept as `leaderboard.json.v1.bak`).
   summary carries `rating: {"pool", "entries": [[name, rank], ...]}` (or
   `null` when unrated). House bots get secret random seeds (not derived from
   the published game seed).
+* **Provenance** (`agentciv/server/provenance.py`; client side in
+  docs/CONNECTING.md "Provenance"). `join`/`quickmatch` accept an optional
+  `"agent"` manifest: an object with only the string fields `model`,
+  `model_version`, `effort`, `harness`, `harness_version`, `prompt_sha256`
+  (64 hex digits), `tools`, `memory`, `notes`, each length-capped; anything
+  else is a 400. It is stored per seat (and checkpointed), shown as
+  `players[].agent` in the summary and replay, and never used for matchmaking.
+  Every summary carries `rules_sha256` (`rulesdoc.rules_sha256()`: sha256 of
+  the served rules text, a NUL byte, and `rules_json()` as sorted compact
+  JSON; set when the game is created, null for games created before it
+  existed). The replay has a top-level `actions` log,
+  `{"format": 1, "turns": [{"turn", "end", "orders", "diplomacy", "missed"?}]}`:
+  per turn and seat the last order submission as sent, rejected orders with
+  reasons, every diplomacy action with its result, and the living remote seats
+  that missed the deadline (`no_orders`) or were still drafting (`draft`).
+  While the game runs it is served only to the operator (full replay with the
+  spectator key, no token); compact replays never carry it; `from`/`to` ranges
+  cut it to the same turns. It is checkpointed with the session; restored old
+  checkpoints start with an empty log.
 * **Registered names.** `join`/`quickmatch` accept `"key"` (8–200 chars):
   the first use registers the name with that key (`data/names.json`, hashed);
   afterwards the name can only be joined with its key (403). Leaderboard rows

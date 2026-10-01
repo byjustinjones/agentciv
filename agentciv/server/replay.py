@@ -3,7 +3,9 @@
 Frames are spectator views, one per turn (``frames[k].turn == k``). A live
 game keeps them in memory zlib-compressed (a 150-turn, 8-player game is a
 few MB of JSON but ~0.5 MB compressed); the replay file on disk keeps the
-plain ``{"game_id","summary","result","frames"}`` format of docs/DESIGN.md.
+plain ``{"game_id","summary","result","actions","frames"}`` format of
+docs/DESIGN.md §12 (``actions``: the action log of :mod:`.provenance`; absent
+in replays saved before it existed).
 
 The *compact* format (``GET /replay?compact=1``) is what the GUI loads: each
 frame drops the parts that never or rarely change and are large —
@@ -61,15 +63,21 @@ def _range(n: int, lo: int | None, hi: int | None) -> tuple[int, int]:
 
 
 def envelope(game_id: str, summary: dict, result, frames: list[bytes], *, compact: bool = False,
-             static: dict | None = None, total: int | None = None, lo: int = 0) -> bytes:
-    """Assemble a replay response from pre-serialised frame bytes."""
+             static: dict | None = None, total: int | None = None, lo: int = 0,
+             actions: bytes | None = None) -> bytes:
+    """Assemble a replay response (and the saved replay file) from
+    pre-serialised frame bytes. ``actions``: the pre-serialised action log
+    (:mod:`.provenance`), placed just before the frames; None = no such key."""
     head: dict = {"game_id": game_id, "summary": summary, "result": result}
     if compact or total is not None:
         head.update({"compact": compact, "total_frames": total if total is not None else len(frames),
                      "from": lo, "to": lo + len(frames) - 1})
     if compact:
         head["static"] = static or {}
-    return dumps(head)[:-1] + b',"frames":[' + b",".join(frames) + b"]}"
+    out = dumps(head)[:-1]
+    if actions is not None:
+        out += b',"actions":' + actions
+    return out + b',"frames":[' + b",".join(frames) + b"]}"
 
 
 class FrameStore:
@@ -169,10 +177,21 @@ class ArchivedReplay:
         return self.compact_frames[lo:hi + 1]
 
 
+def slice_actions(actions, lo: int | None, hi: int | None):
+    """A replay ``actions`` value restricted to turns ``lo..hi`` (inclusive)."""
+    if not isinstance(actions, dict) or not isinstance(actions.get("turns"), list):
+        return actions
+    turns = [e for e in actions["turns"] if isinstance(e, dict)
+             and (lo is None or e.get("turn", 0) >= lo) and (hi is None or e.get("turn", 0) <= hi)]
+    return {**actions, "turns": turns}
+
+
 def slice_full_replay(data: bytes, lo: int | None, hi: int | None) -> bytes:
     """A frame range of a full replay file (re-serialised)."""
     doc = json.loads(data)
     frames = doc.get("frames") or []
     a, b = _range(len(frames), lo, hi)
+    actions = doc.get("actions")
     return envelope(doc.get("game_id"), doc.get("summary") or {}, doc.get("result"),
-                    [dumps(f) for f in frames[a:b + 1]], total=len(frames), lo=a)
+                    [dumps(f) for f in frames[a:b + 1]], total=len(frames), lo=a,
+                    actions=None if actions is None else dumps(slice_actions(actions, a, b)))

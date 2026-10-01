@@ -6,7 +6,7 @@ Every command prints plain text meant to be read by an LLM. Credentials are
 kept in ``$AGENTCIV_HOME/<name>.json`` (default ``~/.agentciv``) so each
 command only needs your player name.
 
-    python examples/play_cli.py join   NAME GAME_ID      # join a lobby
+    python examples/play_cli.py join   NAME GAME_ID [--agent-json JSON]  # join a lobby
     python examples/play_cli.py state  NAME [--compact]  # summary of your view
     python examples/play_cli.py map    NAME              # ASCII map
     python examples/play_cli.py orders NAME '<json list of orders>'
@@ -19,6 +19,11 @@ When some orders are rejected or market sequencing warnings occur,
 the turn is held open for ``$AGENTCIV_FIX_WINDOW``
 seconds (default 60) so a corrected list can be resubmitted; after that the
 accepted orders are confirmed automatically by a small background process.
+
+``join --agent-json '{"model": "...", "harness": "..."}'`` (or ``$AGENTCIV_AGENT``)
+records what plays the seat (keys: model, model_version, effort, harness,
+harness_version, prompt_sha256, tools, memory, notes; strings only). It is
+shown in the game summary and replay and never affects matchmaking.
 
 Orders and diplomacy action formats: see ``rules`` (docs/RULES.md).
 Deal propose/counter/reject ``message`` fields have a 300-character limit;
@@ -45,7 +50,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agentciv.client import (AgentCivClient, ApiError, ascii_map, deal_warnings, describe_event, peace_deal_notes,  # noqa: E402
+from agentciv.client import (AgentCivClient, ApiError, agent_from_env, ascii_map, deal_warnings, describe_event, peace_deal_notes,  # noqa: E402
                              order_warning_details, summarize_view, summarize_compact, view_alerts, view_changes)
 from agentciv.engine.constants import DEAL_MESSAGE_MAX_LENGTH  # noqa: E402
 
@@ -119,15 +124,19 @@ def _print_state(c: AgentCivClient, name: str, creds: dict, compact: bool = Fals
     return view
 
 
-def cmd_join(name: str, game_id: str) -> None:
+def cmd_join(name: str, game_id: str, agent_json: str | None = None) -> None:
     path = _creds_path(name)
     if path.exists():
         creds = json.loads(path.read_text())
         if creds.get("game_id") == game_id:
             print(f"already joined {game_id} as {creds['player_id']}; use next")
             return
+    try:
+        agent = agent_from_env(agent_json)
+    except ValueError as e:
+        sys.exit(str(e))
     c = _new_client()
-    res = c.join(game_id, name)
+    res = c.join(game_id, name, agent=agent)
     creds = {"game_id": res["game_id"], "player_id": res["player_id"], "token": res["token"]}
     _save(name, creds)  # retain the token even if the initial state request fails
     creds["seq"] = c.state().get("diplomacy_seq", 0)
@@ -323,7 +332,12 @@ def main(argv: list[str]) -> None:
         if cmd == "rules":
             print(_new_client().rules())
         elif cmd == "join":
-            cmd_join(args[0], args[1])
+            agent_json = None
+            if "--agent-json" in args:
+                i = args.index("--agent-json")
+                agent_json = args[i + 1]
+                args = args[:i] + args[i + 2:]
+            cmd_join(args[0], args[1], agent_json)
         elif cmd == "state":
             c, creds = _client(args[0])
             _print_state(c, args[0], creds, "--compact" in args[1:])

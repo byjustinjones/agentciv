@@ -659,6 +659,26 @@ and again when executed (e.g. resources are only checked then) — execution fai
     return "\n".join(parts).rstrip() + "\n"
 
 
+_HASH_CACHE: str | None = None
+
+
+def rules_sha256() -> str:
+    """sha256 (hex) identifying the rules a game is played under: the rules
+    text agents are served (:func:`render`, identical to docs/RULES.md) and
+    the constants block (``rules_json()``, canonical JSON with sorted keys),
+    joined by a NUL byte. Computed once per process; any rules or constants
+    change gives a new value."""
+    global _HASH_CACHE
+    if _HASH_CACHE is None:
+        import hashlib
+        import json
+
+        from .rules import rules_json
+        consts = json.dumps(rules_json(), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        _HASH_CACHE = hashlib.sha256(render().encode("utf-8") + b"\0" + consts.encode("ascii")).hexdigest()
+    return _HASH_CACHE
+
+
 def default_path() -> str:
     here = os.path.dirname(os.path.abspath(__file__))
     return os.path.normpath(os.path.join(here, "..", "..", "docs", "RULES.md"))

@@ -41,9 +41,11 @@ from ..engine import Game, GameConfig
 from ..engine import constants as C
 from ..engine.deals import ACTION_TYPES as DIPLOMACY_TYPES
 from ..engine.deals import ALL_ACTION_TYPES, DealError, parse_action
+from ..engine.rulesdoc import rules_sha256
 from .guide import ORDER_EXAMPLES, order_hint
 from .persist import FORMAT as CHECKPOINT_FORMAT
 from .persist import LiveStore
+from .provenance import ActionLog, ManifestError, validate_agent
 from .replay import ArchivedReplay, FrameStore, envelope, slice_full_replay
 from .storage import Storage
 
@@ -290,6 +292,14 @@ def unrated_reason(opts: dict) -> str | None:
     return None
 
 
+def parse_agent(body: dict) -> dict | None:
+    """The optional ``agent`` manifest of a join/quickmatch body (see :mod:`.provenance`)."""
+    try:
+        return validate_agent(body.get("agent"))
+    except ManifestError as e:
+        raise ApiError(400, str(e)) from None
+
+
 def _player_key(body: dict):
     """Optional name key (registers the name / proves ownership of it)."""
     key = body.get("key")
@@ -320,6 +330,7 @@ class Seat:
     bot_seed: int | None = None      # house bot: its secret seed (to recreate it if its state can't be pickled)
     bot_blob: bytes | None = field(default=None, repr=False)  # house bot: pickled state at the last checkpoint
     bot_pickle_failed: bool = False
+    agent: dict | None = None        # remote player: the agent manifest given at join (provenance.py)
 
     def snapshot(self) -> dict:
         """Plain data for a checkpoint (no bot object, no monotonic times)."""
@@ -327,7 +338,7 @@ class Seat:
                 "token": self.token, "bot_errors": self.bot_errors, "draft": self.draft,
                 "verified": self.verified, "reactive": self.reactive, "acted_seq": self.acted_seq,
                 "bot_seed": self.bot_seed, "bot_blob": self.bot_blob,
-                "nudge_pending": self.nudge_due is not None}
+                "nudge_pending": self.nudge_due is not None, "agent": self.agent}
 
 
 class GameSession:
@@ -340,6 +351,7 @@ class GameSession:
                                     name=self.name, max_players=opts["max_players"],
                                     fog=bool(opts.get("fog", False))))
         self.frames: FrameStore | None = FrameStore()  # zlib-compressed, freed once saved to disk
+        self.actions = ActionLog()  # what each seat did per turn (replay key "actions")
         with self.cond:
             for b in opts["bots"]:
                 self._add_bot(b)
@@ -439,7 +451,9 @@ class GameSession:
             self.game._stats = None
         return pid
 
-    def join(self, name: str, key: str | None = None) -> Seat:
+    def join(self, name: str, key: str | None = None, agent: dict | None = None) -> Seat:
+        """Seat a remote player. ``agent``: an already validated manifest
+        (:func:`parse_agent`), stored with the seat and shown in the summary."""
         name = validate_player_name(name)
         verified = self.manager.check_name(name, key)
         with self.cond:
@@ -454,7 +468,7 @@ class GameSession:
             if any(s.name.lower() == name.lower() for s in self.seats.values()):
                 raise ApiError(409, f"name {name!r} is already taken in this game")
             pid = self._add_player(name)
-            seat = Seat(pid, name, False, None, secrets.token_urlsafe(24), verified=verified)
+            seat = Seat(pid, name, False, None, secrets.token_urlsafe(24), verified=verified, agent=agent)
             self.seats[pid] = seat
             self.manager._register_token(seat.token, self.game_id, pid)
             self._touch()
@@ -567,7 +581,24 @@ class GameSession:
             return 1.0
         return min(remaining, 1.0)
 
+    def _turn_clock(self) -> float:
+        """Seconds since the current turn started (or the server resumed it)."""
+        return time.monotonic() - self._turn_started
+
+    def _log_turn_end(self) -> None:
+        """Close the action-log entry of the turn about to resolve: which
+        living remote seats had not submitted (or were still drafting)."""
+        g = self.game
+        missed = {}
+        for s in self._living_remote():
+            if not g.has_submitted(s.pid):
+                missed[s.pid] = "no_orders"
+            elif s.draft:
+                missed[s.pid] = "draft"
+        self.actions.end_turn(g.turn, "deadline" if missed else "all_ready", missed)
+
     def _advance(self) -> None:
+        self._log_turn_end()
         try:
             self.game.step()
         except Exception as e:  # engine bug: abort the game rather than loop forever
@@ -681,6 +712,7 @@ class GameSession:
 
     def _submit_bot(self, seat: Seat, orders: list, seq: int) -> None:
         errs = self.game.submit_orders(seat.pid, orders)
+        self.actions.orders(self.game.turn, seat.pid, orders, errs, True, self._turn_clock())
         seat.acted_seq = seq
         if errs and log.isEnabledFor(logging.DEBUG):
             log.debug("game %s %s (%s) order errors: %s", self.game_id, seat.pid, seat.bot_name, errs[:5])
@@ -791,6 +823,8 @@ class GameSession:
         g = self.game
         seq0 = g.diplomacy_seq
         results = g.diplomacy(pid, actions)
+        if g.status == "running":
+            self.actions.diplomacy(g.turn, pid, actions, results, self._turn_clock())
         if g.diplomacy_seq == seq0:
             return results
         events = self._dip_events(seq0)
@@ -931,8 +965,9 @@ class GameSession:
                     frames = self.frames.all_full() if self.frames is not None else []
                     summary = self.summary()  # carries "rating" (finished game), as the live replay does
                     result = self.game.result
+                    actions = self.actions.to_bytes()
                 try:
-                    self.manager.storage.save_replay(self.game_id, summary, result, frames)
+                    self.manager.storage.save_replay(self.game_id, summary, result, frames, actions)
                     with self.cond:
                         self.saved = True
                         self.frames = None  # served from disk from now on
@@ -1010,13 +1045,17 @@ class GameSession:
             if fs is not None:
                 summary, result = self.summary(), self.game.result
                 public = not full and self.status != "finished"
-                if compact:
+                if compact:  # the GUI's format: frames only, no action log
                     return envelope(self.game_id, summary, result, fs.compact(lo, hi, public=public),
                                     compact=True, static=fs.static, total=len(fs), lo=max(0, lo or 0))
+                # the action log holds every seat's orders and private diplomacy: operator-only while live
                 if lo is None and hi is None:
-                    return envelope(self.game_id, summary, result, fs.full(public=public))
+                    return envelope(self.game_id, summary, result, fs.full(public=public),
+                                    actions=None if public else self.actions.to_bytes())
+                a = max(0, lo or 0)
+                b = len(fs) - 1 if hi is None else min(len(fs) - 1, hi)
                 return envelope(self.game_id, summary, result, fs.full(lo, hi, public=public), total=len(fs),
-                                lo=max(0, lo or 0))
+                                lo=a, actions=None if public else self.actions.to_bytes(a, b))
         return self.manager.archived_replay_bytes(self.game_id, compact, lo, hi)
 
     def summary(self) -> dict:
@@ -1029,6 +1068,8 @@ class GameSession:
                          "submitted": bool(g.status == "running" and g.has_submitted(pid))}
                 if s.is_bot:
                     entry["bot"] = s.bot_name
+                if s.agent:
+                    entry["agent"] = dict(s.agent)
                 players.append(entry)
             out = {
                 "game_id": self.game_id,
@@ -1048,6 +1089,7 @@ class GameSession:
                 "rated": self.opts["rated"],
                 "unrated_reason": self.opts.get("unrated_reason"),
                 "fog": bool(self.opts.get("fog", False)),
+                "rules_sha256": self.opts.get("rules_sha256"),
                 "deadline": g.deadline,
                 "result": dict(g.result) if g.result else None,
                 "frames": len(self.frames) if self.frames is not None else g.turn + 1,
@@ -1091,6 +1133,7 @@ class GameSession:
                 raise ApiError(409, "you have been eliminated", turn=g.turn, status=g.status)
             self._check_stopping()
             errors = g.submit_orders(pid, orders)
+            self.actions.orders(g.turn, pid, orders, errors, ready, self._turn_clock())
             seat = self.seats.get(pid)
             if seat is not None:
                 seat.draft = not ready
@@ -1197,6 +1240,7 @@ class GameSession:
             "version": self.version,
             "game": self.game,
             "seats": [seat.snapshot() for seat in self.seats.values()],
+            "actions": self.actions.snapshot(),
             "bots_done": self._bots_done,
             "public_dip": self._public_dip,
             "frames": len(self.frames) if self.frames is not None else 0,
@@ -1286,6 +1330,7 @@ class GameSession:
             raise ValueError("checkpoint holds no Game")
         self._bots_done = bool(state.get("bots_done", True))
         self._public_dip = int(state.get("public_dip", 0))
+        self.actions = ActionLog.restore(state.get("actions"))  # old checkpoints: an empty log
         self.frames = FrameStore()
         for zfull, zpub in frames:
             self.frames.append_blobs(zfull, zpub)
@@ -1296,7 +1341,7 @@ class GameSession:
                         bot_errors=int(d.get("bot_errors", 0)), draft=bool(d.get("draft")),
                         verified=bool(d.get("verified")), reactive=int(d.get("reactive", 0)),
                         acted_seq=int(d.get("acted_seq", 0)), bot_seed=d.get("bot_seed"),
-                        bot_blob=d.get("bot_blob"))
+                        bot_blob=d.get("bot_blob"), agent=d.get("agent"))
             if seat.is_bot:
                 if seat.bot_blob:
                     try:
@@ -1367,7 +1412,7 @@ class ArchivedGame:
     def next_frame(self, last_key, timeout, *, full: bool = False):
         return ("finished",), self.state_bytes(), True
 
-    def join(self, name, key=None):
+    def join(self, name, key=None, agent=None):
         raise ApiError(409, "game is finished")
 
     def start(self, authorized: bool = True):
@@ -1632,9 +1677,9 @@ class GameManager:
             raise ApiError(503, f"server busy: {lobbies} open lobbies (max {self.max_open_lobbies}); join one "
                                 "(GET /api/games) or try again later")
 
-    def _create(self, opts: dict, first_player: tuple[str, str | None] | None = None
+    def _create(self, opts: dict, first_player: tuple[str, str | None, dict | None] | None = None
                 ) -> tuple[GameSession, Seat | None]:
-        """Create and launch a session; ``first_player`` (name, key) is seated
+        """Create and launch a session; ``first_player`` (name, key, agent) is seated
         before the worker starts, so a lobby with a zero timeout can't start
         without them."""
         if self.stopping:
@@ -1645,6 +1690,7 @@ class GameManager:
         else:
             reason = unrated_reason(opts)
         opts["rated"], opts["unrated_reason"] = reason is None, reason
+        opts["rules_sha256"] = rules_sha256()  # the rules this game is played under (stored with it)
         gid = self._next_id()
         session = GameSession(self, gid, opts)
         if not opts["quickmatch"]:
@@ -1661,6 +1707,7 @@ class GameManager:
             raise ApiError(400, "body must be a JSON object")
         name = validate_player_name(body.get("name"))
         key = _player_key(body)
+        agent = parse_agent(body)  # provenance only: never part of the lobby match
         players = _number(body, "players", 6, 1, C.MAX_PLAYERS, integer=True)
         turn_timeout = _turn_timeout(body, 30.0)
         max_turns = _number(body, "max_turns", C.DEFAULT_MAX_TURNS, 1, 1000, integer=True)
@@ -1678,7 +1725,7 @@ class GameManager:
                               and s.opts.get("match") == match]
             for s in candidates:
                 try:
-                    return s, s.join(name, key)
+                    return s, s.join(name, key, agent)
                 except ApiError as e:
                     if e.status == 403:
                         raise
@@ -1696,7 +1743,7 @@ class GameManager:
             opts["lobby_timeout"] = lobby_timeout
             opts["quickmatch"] = True
             opts["match"] = match
-            session, seat = self._create(opts, first_player=(name, key))
+            session, seat = self._create(opts, first_player=(name, key, agent))
             return session, seat
 
     # ------------------------------------------------------------ replays on disk

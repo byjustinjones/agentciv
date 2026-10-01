@@ -9,6 +9,8 @@ server, e.g. for Claude Code::
 The server URL comes from ``AGENTCIV_URL`` (default http://localhost:8765);
 ``AGENTCIV_KEY`` (optional) is sent with join/quickmatch to register and
 protect your player name (a registered name can only be played with its key).
+``AGENTCIV_AGENT`` (optional, a JSON object) is the agent manifest sent with
+join/quickmatch when the tool call gives no ``agent`` (see AGENT_SCHEMA).
 The token obtained by ``join_game``/``quickmatch`` is kept in memory, so the
 agent never has to handle it.
 
@@ -25,8 +27,8 @@ import traceback
 from typing import Any
 
 from .engine import constants as C
-from .client import (AgentCivClient, ApiError, _deals_lines, ascii_map, deal_warnings, describe_event, order_warnings,
-                     peace_deal_notes, summarize_view)
+from .client import (AgentCivClient, ApiError, _deals_lines, agent_from_env, ascii_map, deal_warnings, describe_event,
+                     order_warnings, peace_deal_notes, summarize_view)
 
 PROTOCOL_VERSION = "2025-06-18"
 SUPPORTED_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
@@ -90,6 +92,15 @@ DEAL_PROPS = {
 
 FOG_SCHEMA = {"type": "boolean", "description": "hide other players' armies outside your sight, their stockpiles, units "
                            "and exact score; enables spy and counterintel orders (rules §14)"}
+AGENT_SCHEMA = {
+    "type": "object",
+    "description": "optional: what plays this seat, shown in the game summary and replay (never used for "
+                   "matchmaking). Strings only; keys model, model_version, effort, harness, harness_version, "
+                   "prompt_sha256, tools, memory, notes. Default: $AGENTCIV_AGENT.",
+    "properties": {k: {"type": "string"} for k in ("model", "model_version", "effort", "harness", "harness_version",
+                                                   "prompt_sha256", "tools", "memory", "notes")},
+    "additionalProperties": False,
+}
 
 
 def _schema(props: dict | None = None, required: list | None = None) -> dict:
@@ -124,7 +135,8 @@ TOOLS = [
          "fog": FOG_SCHEMA})},
     {"name": "join_game",
      "description": "Join a game lobby by id. Remembers your player id and token for the other tools.",
-     "inputSchema": _schema({"game_id": {"type": "string"}, "name": {"type": "string"}}, ["game_id", "name"])},
+     "inputSchema": _schema({"game_id": {"type": "string"}, "name": {"type": "string"}, "agent": AGENT_SCHEMA},
+                            ["game_id", "name"])},
     {"name": "quickmatch",
      "description": "Join the open quickmatch lobby (or create one). Empty seats are filled with house bots "
                     "after lobby_timeout seconds (default 30). The easiest way to start playing.",
@@ -132,7 +144,8 @@ TOOLS = [
                              "players": {"type": "integer", "minimum": 1, "maximum": 12, "default": 6},
                              "turn_timeout": {"type": "number", "description": "seconds per turn (default 30)"},
                              "lobby_timeout": {"type": "number"},
-                             "fog": FOG_SCHEMA}, ["name"])},
+                             "fog": FOG_SCHEMA,
+                             "agent": AGENT_SCHEMA}, ["name"])},
     {"name": "start_game",
      "description": "Start your game now (fills empty seats with bots if the game was created with fill_with_bots).",
      "inputSchema": _schema({"game_id": {"type": "string"}})},
@@ -351,16 +364,25 @@ class AgentCivMCP:
         gid = self.client.create_game(**options)
         return f"Created game {gid}. Call join_game with game_id={gid!r} to take a seat."
 
-    def join_game(self, game_id: str, name: str) -> str:
-        return self._joined(self.client.join(game_id, name, key=self.key))
+    @staticmethod
+    def _agent(agent: dict | None) -> dict | None:
+        if agent is not None:
+            return agent
+        try:
+            return agent_from_env()
+        except ValueError as e:
+            raise ToolError(f"AGENTCIV_AGENT: {e}") from None
+
+    def join_game(self, game_id: str, name: str, agent: dict | None = None) -> str:
+        return self._joined(self.client.join(game_id, name, key=self.key, agent=self._agent(agent)))
 
     def quickmatch(self, name: str, players: int = 6, turn_timeout: float | None = None,
-                   lobby_timeout: float | None = None, fog: bool | None = None) -> str:
+                   lobby_timeout: float | None = None, fog: bool | None = None, agent: dict | None = None) -> str:
         opts = {} if lobby_timeout is None else {"lobby_timeout": lobby_timeout}
         if fog is not None:
             opts["fog"] = fog
         return self._joined(self.client.quickmatch(name, players=players, turn_timeout=turn_timeout,
-                                                   key=self.key, **opts))
+                                                   key=self.key, agent=self._agent(agent), **opts))
 
     def start_game(self, game_id: str | None = None) -> str:
         res = self.client.start(game_id)
