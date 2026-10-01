@@ -9,27 +9,37 @@ then makes stopping the leader its main job.
 Strategy
 --------
 * **Opening.** The strategist's economy, defence and own victory race;
-  no raids before ``SPOIL_START``.
-* **Whom.** Every turn it ranks the rivals by how close they are to any
+  no raids before ``SPOIL_START``. While a rival would win before it, its
+  own race waits (nothing held back for wonder stages or temples).
+* **Whom.** Every turn it ranks the rivals by how close they are to a
   victory: the strategist's ETA model (bank/legacy growth plus the streak
-  turns missing, wonder pace, capitals) and the public
-  ``victory_progress``. A rival is a target when it is on an economic or
-  influence streak, has ``SPOIL_PROGRESS`` in any condition, a wonder at
-  stage ``SPOIL_WONDER_STAGE`` or more, or an ETA within ``SPOIL_ETA``.
-* **Where.** Against a streak (or a bank/legacy race) any city will do,
-  since the loss of any city resets both streaks (rules §11); against a
-  wonder the wonder city; against conquest a capital it holds. It picks
-  the city whose strike force is cheapest to raise and bring (the weakest
-  city), among the two most dangerous rivals, and skips targets it cannot
-  reach before the rival is expected to win.
-* **How.** The strategist's raid machinery: the force must beat the
-  garrison, walls (siege), the defenders next door and one turn of
-  emergency recruiting with a 1.2 margin (``simulate_attack``); it gathers
-  out of sight and only strikes when the gathered force wins. In fog games
-  it first buys a military spy report on the target (``scout``), so it
-  does not count on armies it cannot see.
-* **Treaties.** It breaks a treaty with a streak holder before the strike
-  (free, rules §9) and signs none with a rival it may have to hit.
+  turns missing, wonder pace; capitals only one short of conquest) and the
+  public ``victory_progress``. A rival is a target when it is on an
+  economic or influence streak, has ``SPOIL_PROGRESS`` in economic,
+  influence or wonder, a wonder at stage ``SPOIL_WONDER_STAGE`` or more, or
+  an ETA within ``SPOIL_ETA``.
+* **Where.** Against a streak any city will do (the loss of any city resets
+  both streaks, rules §11); before the streak the original capital (half
+  the bank plundered, a quarter of the legacy lost, §8); against a wonder
+  the wonder city; against conquest a capital. It picks the city whose
+  strike force is cheapest to raise and bring (the weakest city) among the
+  two most dangerous rivals, and skips targets it cannot reach before the
+  rival is expected to win.
+* **Sizing (no suicide into walls).** The force must win the engine-exact
+  simulation (``simulate_attack``) with ``RAID_RATIO`` against the garrison,
+  walls (siege), the defenders next door, one turn of emergency recruiting
+  and ``APPROACH_TURNS`` turns of recruiting from income. It is the units
+  already near plus the cheapest addition of cavalry and/or infantry,
+  bought with up to half its gold.
+* **How.** The strategist's raid machinery: gather out of sight (marching
+  around the rival's other cities), strike when the gathered force wins.
+  While gathering it moves to another city of the same rival that has
+  become cheaper or that the units near it would take now. A raid on the
+  most dangerous rival does not time out. In fog games it buys a military
+  spy report on the target first, so it does not count on armies it cannot
+  see.
+* **Treaties.** No treaty or peace deal with a rival it may have to stop;
+  it breaks a treaty with a streak holder before the strike (free, §9).
 """
 from __future__ import annotations
 
@@ -47,7 +57,7 @@ class SpoilerBot(StrategistBot):
     SPOIL_ETA = 30                # ... or an estimated win this close
     SPOIL_WONDER_STAGE = 3        # ... or a wonder this far along
     SPOIL_RIVALS = 2              # look at this many of the most dangerous rivals
-    SPOIL_VALUE = 3000.0          # value of a capture that resets a near-winner
+    SPOIL_VALUE = 6000.0          # value of a capture that sets back a near-winner (any force is worth it)
     SPOIL_SLACK = 6               # turns of lateness still worth a strike
     RAID_RATIO = 1.3
     APPROACH_TURNS = 2            # turns the target sees the strike force coming and recruits
@@ -102,6 +112,34 @@ class SpoilerBot(StrategistBot):
         if path == "conquest":
             return [c for c in mine if w.cities[c].get("capital")]
         return mine
+
+    SPOIL_WATCH = 0.3             # no treaty with a rival this far along any race
+
+    def watched(self, q: str) -> bool:
+        eta, prog, _ = self.danger_of(q)
+        return prog >= self.SPOIL_WATCH or eta <= self.SPOIL_ETA + 15 or self.w.streaking(q)
+
+    def diplomacy(self) -> None:
+        """The strategist's treaties, minus any with a rival we may have to
+        stop: a treaty signed early would cost 50+ influence to break before
+        its streak starts (and block the march until then)."""
+        n = len(self.p.orders)
+        super().diplomacy()
+        keep = []
+        for o in self.p.orders[n:]:
+            q = o.get("from") if o.get("type") == "accept_treaty" else o.get("to")
+            if o.get("type") in ("accept_treaty", "propose_treaty") and q in self.w.players and self.watched(q):
+                continue
+            keep.append(o)
+        self.p.orders[n:] = keep
+
+    def peace_bias(self) -> dict:
+        """No peace deal with a rival we may have to stop."""
+        b = super().peace_bias()
+        for q in self.w.rivals:
+            if self.watched(q):
+                b[q] = b.get(q, 0.0) - 1000.0
+        return b
 
     def spoiling(self) -> bool:
         """Does a rival look set to win before us? Then our own race waits."""
@@ -159,6 +197,16 @@ class SpoilerBot(StrategistBot):
                 break                         # the most dangerous rival we can hurt
         return best or super().choose_raid(cool)
 
+    def plan_raid(self) -> None:
+        """A raid on the most dangerous rival does not time out (the
+        strategist gives up after RAID_PATIENCE turns and leaves the rival
+        alone for RAID_COOLDOWN, which hands a near-winner the game)."""
+        mem = self.memory.get("raid")
+        cands = self.spoil_candidates() if self.w.turn >= self.SPOIL_START else []
+        if mem is not None and cands and cands[0][2] == mem.get("owner"):
+            mem["start"] = max(mem["start"], self.w.turn - self.RAID_PATIENCE + 1)
+        super().plan_raid()
+
     def raid_value(self, tgt: int, owner: str) -> float:
         v = super().raid_value(tgt, owner)
         if any(q == owner for _, _, q in self.spoil_candidates()):
@@ -178,6 +226,10 @@ class SpoilerBot(StrategistBot):
         return out
 
     RETARGET_EVERY = 3            # gather phase: compare the rival's cities this often
+
+    # attackers: archers only pay off defending their own city (x1.5), so
+    # the strike force is cavalry, infantry or both
+    ATTACK_MIXES = (("cavalry",), ("infantry",), ("infantry", "cavalry"))
 
     def near_units(self, tgt: int, radius: int = 12) -> dict:
         w = self.w
@@ -202,7 +254,7 @@ class SpoilerBot(StrategistBot):
         if siege > 0:
             base["siege"] = base.get("siege", 0) + siege
         best, best_cost = None, INF
-        for mix in (("cavalry",), ("infantry",), ("archer",), ("infantry", "cavalry")):
+        for mix in self.ATTACK_MIXES:
             k = 1
             while k <= 60:
                 force = dict(base)
@@ -240,7 +292,7 @@ class SpoilerBot(StrategistBot):
                 if near and self.raid_wins(c, owner, near):
                     switch = c
                     break
-            if switch is None and (w.turn - mem["start"]) % self.RETARGET_EVERY == 0:
+            if switch is None and w.turn % self.RETARGET_EVERY == 0:
                 cur, _ = self.missing_cost(mem["tgt"], owner)
                 for c in self.spoil_targets(owner):
                     if c != mem["tgt"]:
