@@ -286,6 +286,7 @@ def run_game(bot_specs: list, seed: int, max_turns: int = C.DEFAULT_MAX_TURNS,
         "condition": res.get("condition"),
         "turns": turns,
         "placements": [lab[p] for p in res.get("placements", [])],
+        "ranks": g.placement_ranks(),
         "scores": {lab[p]: s for p, s in (res.get("scores") or {}).items()},
         "prevalidation_errors": dict(errors),
         "orders": dict(orders_n),
@@ -387,7 +388,9 @@ def summarize(results: list, wall_seconds: float = 0.0) -> dict:
     seat_stats: dict = defaultdict(lambda: [0, 0, 0])      # pid -> [games, wins, place_sum]
     slot_stats: dict = defaultdict(lambda: [0, 0, 0])      # start slot -> [games, wins, place_sum]
     for r in results:
-        place_of = {lab: k for k, lab in enumerate(r["placements"], start=1)}
+        places = r["placements"]
+        ranks = r.get("ranks") or list(range(1, len(places) + 1))  # results saved before "ranks": by position
+        place_of = dict(zip(places, ranks))
         for seat in r.get("seats", []):
             k = place_of.get(seat["label"])
             if k is None:
@@ -399,13 +402,12 @@ def summarize(results: list, wall_seconds: float = 0.0) -> dict:
                 row[0] += 1
                 row[1] += k == 1
                 row[2] += k
-        places = r["placements"]
         if len(places) >= 2:
-            ratings.update(table, places)
+            ratings.update(table, places, ranks)
         conds[r["condition"]] += 1
         lengths.append(r["turns"])
         seconds.append(r["seconds"])
-        for k, lab in enumerate(places, start=1):
+        for lab, k in zip(places, ranks):
             s = per[lab]
             s["games"] += 1
             s["place_sum"] += k

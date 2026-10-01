@@ -84,6 +84,8 @@ MAX_GAMES_LISTED = 100           # default number of games in GET /api/games (al
 CHECKPOINT_INTERVAL = 1.0        # at most one throttled checkpoint write per game per this many seconds
 SHUTDOWN_JOIN = 5.0              # on shutdown, wait up to this long for game workers before the final checkpoint
 CRASH_SEQ_GAP = 10_000           # diplomacy_seq jump when resuming from a checkpoint not written at shutdown
+FINALIZE_RETRY = 5.0             # first retry (s) of a finished game whose rating or replay write failed ...
+FINALIZE_RETRY_MAX = 300.0       # ... doubling up to this (retried from GameManager._sweep)
 
 
 class ApiError(Exception):
@@ -353,6 +355,11 @@ class GameSession:
         self.cond = threading.Condition(self.lock)
         self.seats: dict[str, Seat] = {}
         self.saved = False
+        self._fin_lock = threading.Lock()   # one _finalize at a time
+        self._fin_done = False             # rated (if rated), replay saved, checkpoint dropped
+        self._rating_done = False
+        self._fin_due: float | None = None  # monotonic time of the next finalize retry (after a failure)
+        self._fin_attempts = 0
         self.error: str | None = None
         self.version = 0
         self.creator_token: str | None = None   # returned by POST /api/games; may start the lobby
@@ -625,7 +632,7 @@ class GameSession:
             else:
                 self._react(turn, job[1])
         if self.status == "finished" and not self.manager.stopping:
-            self.checkpoint(bots_idle=True)  # the final state, in case saving the replay fails
+            self.checkpoint(bots_idle=True)  # the final state, in case rating or saving the replay fails
             self._finalize()
             self.manager._retire(self)
 
@@ -890,49 +897,77 @@ class GameSession:
             log.warning("game %s: house bot %s took %.1fs", self.game_id, seat.bot_name, dt)
         return orders
 
-    def _finalize(self) -> None:
-        with self.cond:
-            frames = self.frames.all_full() if self.frames is not None else []
-            summary = self.summary()
-            result = self.game.result
-            ranked = self._rated_entries()
-            for seat in self.seats.values():
-                seat.bot = None  # free the house bots (and their caches) now
+    def _finalize(self) -> bool:
+        """Rate the game, save its replay, then drop the live checkpoint.
+
+        Each step runs once: the rating is recorded first (idempotent per game
+        id, see :meth:`Storage.record_result`), the replay only once the rating
+        is on disk (so a saved replay implies a durable rating), and the
+        checkpoint is deleted only when both are. On a failure the checkpoint
+        is kept and the manager retries from ``_sweep`` (and a restart resumes
+        the finished game and finalizes it again). Returns True when done."""
+        if not self._fin_lock.acquire(blocking=False):
+            return False  # another thread is finalizing this session right now
         try:
-            self.manager.storage.save_replay(self.game_id, summary, result, frames)
             with self.cond:
-                self.saved = True
-                self.frames = None  # served from disk from now on
-            self.discard_checkpoint()
-        except OSError:
-            log.exception("game %s: could not save replay (the live checkpoint is kept; a restart retries)",
-                          self.game_id)
-        if ranked:
-            try:
-                self.manager.storage.record_result([n for n, _ in ranked], [r for _, r in ranked],
-                                                   pool="fog" if self.opts.get("fog") else "standard")
-            except OSError:
-                log.exception("game %s: could not update leaderboard", self.game_id)
+                if self._fin_done:
+                    return True
+                ranked = self._rated_entries()
+                pool = "fog" if self.opts.get("fog") else "standard"
+                for seat in self.seats.values():
+                    seat.bot = None  # free the house bots (and their caches) now
+            ok = True
+            if ranked and not self._rating_done:
+                try:
+                    self.manager.storage.record_result(self.game_id, [n for n, _ in ranked],
+                                                       [r for _, r in ranked], pool=pool)
+                    self._rating_done = True
+                except Exception:
+                    log.exception("game %s: could not update the leaderboard (the live checkpoint is kept; "
+                                  "retried later)", self.game_id)
+                    ok = False
+            if ok and not self.saved:
+                with self.cond:
+                    frames = self.frames.all_full() if self.frames is not None else []
+                    summary = self.summary()
+                    summary["rating"] = ({"pool": pool, "entries": [[n, r] for n, r in ranked]}
+                                         if ranked else None)
+                    result = self.game.result
+                try:
+                    self.manager.storage.save_replay(self.game_id, summary, result, frames)
+                    with self.cond:
+                        self.saved = True
+                        self.frames = None  # served from disk from now on
+                except Exception:
+                    log.exception("game %s: could not save the replay (the live checkpoint is kept; "
+                                  "retried later)", self.game_id)
+                    ok = False
+            if ok:
+                self.discard_checkpoint()
+                self._fin_done = True
+                self._fin_due = None
+            else:
+                self._fin_attempts += 1
+                self._fin_due = time.monotonic() + min(FINALIZE_RETRY_MAX,
+                                                       FINALIZE_RETRY * 2 ** (self._fin_attempts - 1))
+            return ok
+        finally:
+            self._fin_lock.release()
 
     def _rated_entries(self) -> list[tuple[str, int]] | None:
         """(rating name, rank) per seat in placement order, or None when the
-        game doesn't count. Players tied on score (same alive state and
-        elimination turn) share a rank, so the engine's seat-order tie-break
-        never decides ratings; a winner by a victory condition ranks alone."""
+        game doesn't count. Ranks come from :meth:`Game.placement_ranks`
+        (players tied on score share a rank; a winner by a victory condition
+        ranks alone). A name may appear more than once (the same house bot in
+        several seats); every seat is rated."""
         result = self.game.result
         if not self.opts["rated"] or not result or self.error is not None or len(self.seats) < 2:
             return None
         if not self.manager.open_ratings and all(s.is_bot for s in self.seats.values()):
             return None  # bot-only games don't move the leaderboard
-        scores = result.get("scores") or {}
         out: list[tuple[str, int]] = []
-        prev, rank = None, 0
-        for i, pid in enumerate(result.get("placements", [])):
-            seat, p = self.seats.get(pid), self.game.player(pid)
-            key = (bool(p and p.alive), getattr(p, "eliminated_turn", None), scores.get(pid))
-            if i == 0 or key != prev or (i == 1 and result.get("condition") != "score"):
-                rank = i + 1
-            prev = key
+        for pid, rank in zip(result.get("placements", []), self.game.placement_ranks()):
+            seat = self.seats.get(pid)
             if seat is not None:
                 out.append((seat.bot_name if seat.is_bot else seat.name, rank))
         return out
@@ -1384,6 +1419,7 @@ class GameManager:
         self.bot_slots = threading.BoundedSemaphore(BOT_ONLY_SLOTS)
         self._shut_down = False
         self.restored: list[str] = []   # ids of the games resumed from checkpoints
+        self._unfinished: dict[str, list] = {}  # saved game id -> [summary, retry due, attempts] (see restore)
         if restore:
             self.restore_games()
 
@@ -1397,8 +1433,11 @@ class GameManager:
         live.cleanup()
         sessions: list[GameSession] = []
         for gid in live.ids():
-            if self.storage.summary(gid) is not None:  # finished and saved; the delete didn't happen
-                live.delete(gid)
+            summary = self.storage.summary(gid)
+            if summary is not None:  # finished and saved; finish what the crash interrupted
+                if not self._finish_archived(gid, summary):
+                    with self.lock:
+                        self._unfinished[gid] = [summary, time.monotonic() + FINALIZE_RETRY, 1]
                 continue
             try:
                 state = live.load_state(gid)
@@ -1424,6 +1463,25 @@ class GameManager:
             log.info("restored game %s (%s, %s, turn %s)", session.game_id, session.name, session.status,
                      session.game.turn)
         return self.restored
+
+    def _finish_archived(self, gid: str, summary: dict) -> bool:
+        """A checkpoint whose replay is already saved: apply the rating stored in
+        the replay summary if its pool has not got it yet, then delete the live
+        files. Replays saved before the summary carried ``rating`` were rated
+        (or not) by the old code; their checkpoint is just deleted. Returns
+        True when nothing is left to do."""
+        rating = summary.get("rating")
+        try:
+            if isinstance(rating, dict) and rating.get("entries"):
+                entries = rating["entries"]
+                self.storage.record_result(gid, [str(n) for n, _ in entries], [int(r) for _, r in entries],
+                                           pool=rating.get("pool", "standard"))
+            if self.live is not None:
+                self.live.delete(gid)
+            return True
+        except Exception:
+            log.exception("game %s: could not finish the finalization of a saved game (retried later)", gid)
+            return False
 
     # ------------------------------------------------------------ registry
     def _next_id(self) -> str:
@@ -1476,15 +1534,43 @@ class GameManager:
     def _retire(self, session: GameSession) -> None:
         """A finished session whose replay is saved: keep it in memory for a
         while (player views), then serve it from the replay file."""
-        if not session.saved:
-            return  # no replay on disk: keep serving it from memory
+        if not session._fin_done:
+            return  # not finalized (no replay on disk): keep serving it from memory; _sweep retries
         with self.lock:
             self._finished[session.game_id] = session
         self._sweep()
 
+    def _retry_finalize(self, now: float) -> None:
+        """Retry finished games whose rating or replay write failed (backoff in
+        :meth:`GameSession._finalize`), and saved games whose checkpoint
+        cleanup failed at restore."""
+        if self.stopping:
+            return
+        with self.lock:
+            due = [s for s in self.sessions.values()
+                   if s._fin_due is not None and now >= s._fin_due and not s._fin_done]
+            archived = [(gid, v[0]) for gid, v in self._unfinished.items() if now >= v[1]]
+        for s in due:
+            if s._finalize():
+                with self.lock:
+                    self._finished[s.game_id] = s
+        for gid, summary in archived:
+            done = self._finish_archived(gid, summary)
+            with self.lock:
+                v = self._unfinished.get(gid)
+                if v is None:
+                    continue
+                if done:
+                    del self._unfinished[gid]
+                else:
+                    v[2] += 1
+                    v[1] = time.monotonic() + min(FINALIZE_RETRY_MAX, FINALIZE_RETRY * 2 ** (v[2] - 1))
+
     def _sweep(self) -> None:
-        """Evict old finished sessions and close lobbies nobody started."""
+        """Retry unfinished finalizations, evict old finished sessions and
+        close lobbies nobody started."""
         now = time.monotonic()
+        self._retry_finalize(now)
         evict: list[GameSession] = []
         close: list[GameSession] = []
         with self.lock:

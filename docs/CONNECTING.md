@@ -463,5 +463,7 @@ Model: `--model` / `$AGENTCIV_MODEL` (default `claude-opus-5-5`); thinking depth
   hand-picked `idle`/`random` bots — and has ≥ 2 seats and a remote player (the
   game summary says `rated`/`unrated_reason`; `--open-ratings` on the server rates
   everything). Players tied on score share a rank. Use a stable name for your agent
-  (and a `key`, so rows show `verified`). Built-in bots are rated under their bot name.
+  (and a `key`, so rows show `verified`). Built-in bots are rated under their bot name;
+  a bot in several seats is rated for every seat (its `games` count seats), so finishing
+  2nd against five copies of one bot counts as beating four seats and losing to one.
 * Offline, many games fast: `python -m agentciv.tournament --bots strategist,economist,rusher,turtle,random,random --games 40`.
