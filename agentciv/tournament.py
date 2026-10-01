@@ -43,6 +43,7 @@ from agentciv import ratings
 from agentciv.bots import get_bot
 from agentciv.engine import Game, GameConfig
 from agentciv.engine import constants as C
+from agentciv.engine import variants as V
 
 CONDITIONS = C.VICTORY_CONDITIONS + ("score",)
 
@@ -219,7 +220,6 @@ class ReplanTracker:
     Read-only: it never changes the game."""
 
     def __init__(self, g: Game, label: dict):
-        from agentciv.engine.rules import bank_target, legacy_target
         self.g, self.label = g, label
         self.streaks = {c: {"started": 0, "paused": Counter(), "ended": Counter()} for c in STREAK_CONDITIONS}
         self.ended: dict = defaultdict(list)          # pid -> [(turn, condition, reason)]
@@ -229,7 +229,7 @@ class ReplanTracker:
         self.leader_turns: Counter = Counter()
         self.first: dict = defaultdict(dict)          # pid -> {"bank"|"legacy": turn}
         self.attacked: Counter = Counter()            # pid -> turns attacked after ATTACK_AFTER
-        self.targets = {"bank": bank_target(g.max_turns), "legacy": legacy_target(g.max_turns)}
+        self.targets = {"bank": g.bank_target(), "legacy": g.legacy_target()}
         self.owner: list = []
 
     def before_step(self) -> None:
@@ -314,7 +314,7 @@ class ReplanTracker:
 
 def run_game(bot_specs: list, seed: int, max_turns: int = C.DEFAULT_MAX_TURNS,
              game_id: str | None = None, record_views: bool = False,
-             rounds: int = NEGOTIATION_ROUNDS, fog: bool = False) -> dict:
+             rounds: int = NEGOTIATION_ROUNDS, fog: bool = False, variants: dict | None = None) -> dict:
     """Play one full game between built-in bots, in seat order.
 
     ``bot_specs`` is a list of bot names (labels are derived with
@@ -323,6 +323,8 @@ def run_game(bot_specs: list, seed: int, max_turns: int = C.DEFAULT_MAX_TURNS,
     Returns a result dict with the engine result translated to labels plus
     diagnostics and trade statistics. ``fog``: play a fog-of-war game (the
     result then also has ``fog_events``: battle and espionage event counts).
+    ``variants``: experimental rule variants (``GameConfig.variants``,
+    agentciv.engine.variants); the result then has ``variants``.
     """
     if bot_specs and all(isinstance(b, str) for b in bot_specs):
         labels = label_bots([str(b) for b in bot_specs])
@@ -330,7 +332,8 @@ def run_game(bot_specs: list, seed: int, max_turns: int = C.DEFAULT_MAX_TURNS,
     else:
         specs = [_spec(b) for b in bot_specs]
     t_start = time.perf_counter()
-    g = Game(GameConfig(seed=seed, max_turns=max_turns, game_id=game_id or f"t{seed}", fog=fog))
+    g = Game(GameConfig(seed=seed, max_turns=max_turns, game_id=game_id or f"t{seed}", fog=fog,
+                        variants=dict(variants or {})))
     pid_label = {}
     bots = {}
     for k, (label, name) in enumerate(specs):
@@ -437,6 +440,8 @@ def run_game(bot_specs: list, seed: int, max_turns: int = C.DEFAULT_MAX_TURNS,
     if fog:
         out["fog"] = True
         out["fog_events"] = dict(fog_events)
+    if g.variants:
+        out["variants"] = dict(g.variants)
     return out
 
 
@@ -450,7 +455,8 @@ def _run_one(args: tuple) -> dict:
     specs, seed, max_turns, index = args[:4]
     rounds = args[4] if len(args) > 4 else NEGOTIATION_ROUNDS
     fog = bool(args[5]) if len(args) > 5 else False
-    r = run_game(specs, seed, max_turns, game_id=f"tour{index}", rounds=rounds, fog=fog)
+    variants = args[6] if len(args) > 6 else None
+    r = run_game(specs, seed, max_turns, game_id=f"tour{index}", rounds=rounds, fog=fog, variants=variants)
     r["index"] = index
     return r
 
@@ -476,11 +482,13 @@ def schedule(bots: list, games: int, players: int, seed: int) -> list:
 
 def run_tournament(bots: list, games: int = 40, players: int | None = None, seed: int = 1,
                    max_turns: int = C.DEFAULT_MAX_TURNS, jobs: int = 1, progress=None,
-                   rounds: int = NEGOTIATION_ROUNDS, fog: bool = False) -> dict:
-    """Run a tournament and return the summary dict (see module doc)."""
+                   rounds: int = NEGOTIATION_ROUNDS, fog: bool = False, variants: dict | None = None) -> dict:
+    """Run a tournament and return the summary dict (see module doc).
+    ``variants``: experimental rule variants for every game (run_game)."""
     players = players or len(bots)
     plan = schedule(bots, games, players, seed)
-    tasks = [(specs, gseed, max_turns, gi, rounds, fog) for gi, (specs, gseed) in enumerate(plan)]
+    tasks = [(specs, gseed, max_turns, gi, rounds, fog, dict(variants or {}))
+             for gi, (specs, gseed) in enumerate(plan)]
     results = []
     t0 = time.perf_counter()
     if jobs and jobs > 1:
@@ -601,6 +609,8 @@ def summarize(results: list, wall_seconds: float = 0.0) -> dict:
         fog_total.update(r.get("fog_events") or {})
         treaty_total.update(r.get("treaties") or {})
     extra = {}
+    if any(r.get("variants") for r in results):
+        extra["variants"] = next(r["variants"] for r in results if r.get("variants"))
     if any(r.get("fog") for r in results):
         extra["fog_events_per_game"] = {k: round(v / n, 2) for k, v in sorted(fog_total.items())}
     return {
@@ -777,6 +787,8 @@ def format_summary(s: dict) -> str:
                 f"{k} {tp[k]}" for k in ("break_influence", "legacy_lost", "bank_share", "bond_paid", "refunds",
                                          "break_paid", "break_debt", "contracts_cancelled")))
     lines.extend(format_replanning(s.get("replanning") or {}, s["bots"]))
+    if s.get("variants"):
+        lines.append("experimental variants: " + ", ".join(f"{k}={v}" for k, v in s["variants"].items()))
     if "fog_events_per_game" in s:
         lines.append("fog games; per game: " + (", ".join(f"{k} {v}" for k, v in s["fog_events_per_game"].items())
                                                 or "no battles or espionage"))
@@ -798,10 +810,16 @@ def main(argv=None) -> int:
     ap.add_argument("--rounds", type=int, default=NEGOTIATION_ROUNDS,
                     help="negotiation rounds per turn before the bots act (0 = no barter)")
     ap.add_argument("--fog", action="store_true", help="fog-of-war games (rules §14)")
+    ap.add_argument("--variant", action="append", default=[], metavar="KEY=VALUE",
+                    help="experimental rule variant (agentciv.engine.variants; repeatable, offline only)")
     ap.add_argument("--json", default=None, help="write the full summary (incl. per-game results) here")
     ap.add_argument("--quiet", action="store_true")
     a = ap.parse_args(argv)
     bots = [b.strip() for b in a.bots.split(",") if b.strip()]
+    try:
+        variants = V.validate(dict(V.parse_arg(v) for v in a.variant))
+    except ValueError as e:
+        ap.error(str(e))
     players = a.players or len(bots)
     if not 1 <= players <= C.MAX_PLAYERS:
         ap.error(f"--players must be 1..{C.MAX_PLAYERS}")
@@ -811,7 +829,8 @@ def main(argv=None) -> int:
             print(f"game {r['index'] + 1:>3}: {r['winner']:<14} by {r['condition']:<9} turn {r['turns']:>3}"
                   f"  ({r['seconds']:.1f}s)  order: {' > '.join(r['placements'])}", file=sys.stderr)
 
-    s = run_tournament(bots, a.games, players, a.seed, a.max_turns, a.jobs, progress, rounds=a.rounds, fog=a.fog)
+    s = run_tournament(bots, a.games, players, a.seed, a.max_turns, a.jobs, progress, rounds=a.rounds, fog=a.fog,
+                       variants=variants)
     print(format_summary(s))
     if a.json:
         with open(a.json, "w") as f:
