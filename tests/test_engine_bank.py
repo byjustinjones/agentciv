@@ -5,7 +5,7 @@ import pytest
 from agentciv.engine import constants as C
 from agentciv.engine import deals as D
 from agentciv.engine.orders import prevalidate
-from agentciv.engine.rules import bank_limit
+from agentciv.engine.rules import bank_limit, streak_deposit
 from agentciv.engine.testing import events_of, run_turn, sandbox
 
 
@@ -23,6 +23,13 @@ def bank_orders(*amounts):
     return [{"type": "bank", "gold": a} for a in amounts]
 
 
+def deposit(g, pid="p1"):
+    """Orders banking the gold an economic streak turn needs (§11)."""
+    need = streak_deposit(g.bank_limit(pid))
+    g.player(pid).resources["gold"] += need
+    return {pid: bank_orders(need)}
+
+
 def failures(ev, pid="p1"):
     return [e["reason"] for e in events_of(ev, "order_failed") if e["player"] == pid]
 
@@ -32,19 +39,20 @@ def test_bank_moves_the_smallest_of_amount_gold_and_limit():
     g = world()
     p1 = g.player("p1")
     p1.resources["gold"] = 100
-    assert g.bank_limit("p1") == bank_limit(1, 0) == C.BANK_PER_CITY == 10
-    assert g.player_view("p1")["you"]["bank_limit"] == 10
+    assert g.bank_limit("p1") == bank_limit(1, 0) == C.BANK_BASE == 50
+    assert g.player_view("p1")["you"]["bank_limit"] == 50
+    assert g.player_view("p1")["you"]["streak_deposit"] == 25
     ev = run_turn(g, {"p1": bank_orders(60)})
-    assert p1.bank == 10 and not failures(ev)
-    gold_income = g.stats()["p1"]["income"]["gold"] - 10 // C.BANK_INTEREST_DIVISOR
-    assert p1.resources["gold"] == 100 - 10 + gold_income
-    assert events_of(ev, "bank") == [{"turn": 0, "type": "bank", "player": "p1", "gold": 10, "bank": 10}]
+    assert p1.bank == 50 and not failures(ev)
+    gold_income = g.stats()["p1"]["income"]["gold"]           # the bank pays no interest
+    assert p1.resources["gold"] == 100 - 50 + gold_income
+    assert events_of(ev, "bank") == [{"turn": 0, "type": "bank", "player": "p1", "gold": 50, "bank": 50}]
     assert "bank" in [e["type"] for e in g.player_view("p1")["events"]]
     assert "bank" not in [e["type"] for e in g.player_view("p2")["events"]]        # private
     assert "bank" not in [e["type"] for e in g.spectator_view()["events"]]
     p1.resources["gold"] = 4                     # gold on hand is the limit now
     run_turn(g, {"p1": bank_orders(60)})
-    assert p1.bank == 14 and p1.resources["gold"] == g.stats()["p1"]["income"]["gold"]
+    assert p1.bank == 54 and p1.resources["gold"] == g.stats()["p1"]["income"]["gold"]
 
 
 def test_bank_limit_counts_cities_and_halls_built_earlier_in_the_list_and_is_shared():
@@ -54,14 +62,14 @@ def test_bank_limit_counts_cities_and_halls_built_earlier_in_the_list_and_is_sha
     g.set_owner(5, 2, "p1")
     orders = ([{"type": "build", "at": [2, 2], "building": "market_hall"},
                {"type": "settle", "at": [6, 2]}]
-              + bank_orders(25, 25, 1))
+              + bank_orders(40, 40, 1))
     ev = run_turn(g, {"p1": orders})
-    assert g.bank_limit("p1") == 2 * C.BANK_PER_CITY + C.BANK_PER_MARKET_HALL == 30
-    assert [e["gold"] for e in events_of(ev, "bank")] == [25, 5]
-    assert p1.bank == 30 and failures(ev) == ["bank limit for this turn reached"]
+    assert g.bank_limit("p1") == C.BANK_BASE + C.BANK_PER_MARKET_HALL == 60     # the second city adds nothing
+    assert [e["gold"] for e in events_of(ev, "bank")] == [40, 20]
+    assert p1.bank == 60 and failures(ev) == ["bank limit for this turn reached"]
     assert p1.banked == 0                          # the allowance is per turn
-    run_turn(g, {"p1": bank_orders(30)})
-    assert p1.bank == 60
+    run_turn(g, {"p1": bank_orders(60)})
+    assert p1.bank == 120
 
 
 def test_bank_fails_without_gold():
@@ -109,26 +117,32 @@ def test_viability_pass_does_not_leak_bank_changes():
 
 
 # ====================================================================== interest, legacy
-def test_interest_is_part_of_gold_income():
+def test_the_bank_pays_no_interest():
     g = world()
     p1 = g.player("p1")
     base = g.stats()["p1"]["income"]["gold"]
-    p1.bank = 250
+    p1.bank = 2500
     g._invalidate()
-    assert g.stats()["p1"]["income"]["gold"] == base + 2
+    assert g.stats()["p1"]["income"]["gold"] == base
     gold = p1.resources["gold"]
     run_turn(g)
-    assert p1.resources["gold"] == gold + base + 2 and p1.bank == 250
+    assert p1.resources["gold"] == gold + base and p1.bank == 2500
+
+
+def test_bank_allowance_needs_a_city_and_grows_only_with_market_halls():
+    assert bank_limit(0, 0) == 0
+    assert bank_limit(1, 0) == bank_limit(5, 0) == C.BANK_BASE
+    assert bank_limit(3, 2) == C.BANK_BASE + 2 * C.BANK_PER_MARKET_HALL
 
 
 def test_legacy_adds_influence_income_including_relics():
     g = sandbox(2)
     g.add_city(2, 2, "p1", capital=True)
     g.add_city(12, 12, "p2", capital=True)
-    g._set_owner(g.relics[0], "p1")
+    g._set_owner(g.relics[0], "p1")              # owned, unguarded
     g._invalidate()
     inc = g.stats()["p1"]["income"]["influence"]
-    assert inc >= C.RELIC_INFLUENCE + C.CITY_YIELD["influence"]
+    assert inc >= C.RELIC_INFLUENCE_UNGUARDED + C.CITY_YIELD["influence"]
     run_turn(g)
     run_turn(g)
     assert g.player("p1").legacy == 2 * inc
@@ -269,16 +283,17 @@ def test_default_ends_the_economic_streak_but_not_the_legacy():
     p1 = g.player("p1")
     p1.bank = C.BANK_VICTORY + 100
     p1.legacy = 700
-    run_turn(g)
-    run_turn(g)
+    run_turn(g, deposit(g))
+    run_turn(g, deposit(g))
     assert p1.economic_streak == 2
+    bank = p1.bank
     contract(g, {"gold": 60}, 5)
     p1.resources["gold"] = 0
     ev = run_turn(g)
     ended = events_of(ev, "streak_ended")
     assert ended == [{"turn": 2, "type": "streak_ended", "player": "p1", "condition": "economic",
                       "reason": "contract_default"}]
-    assert p1.bank == C.BANK_VICTORY + 100 - 300 < C.BANK_VICTORY
+    assert p1.bank == bank - 300 < C.BANK_VICTORY
     assert p1.economic_streak == 0 and not events_of(ev, "streak_started")
     assert p1.legacy == 700 + 3 * g.stats()["p1"]["income"]["influence"]
 
@@ -289,16 +304,16 @@ def test_default_turn_does_not_count_toward_a_new_streak():
     p1.bank = C.BANK_VICTORY + 1000
     p1.resources["influence"] = 500
     for _ in range(5):
-        run_turn(g)
+        run_turn(g, deposit(g))
     assert p1.economic_streak == 5
-    contract(g, {"gold": 100}, 2)                          # more than income + interest
+    contract(g, {"gold": 100}, 2)                          # more than the gold income
     p1.resources["gold"] = 0
     ev = run_turn(g)
     assert p1.bank >= C.BANK_VICTORY                       # still above the target after the seizure
     assert [e["type"] for e in ev if e["type"].startswith("streak")] == ["streak_ended"]
     assert p1.economic_streak == 0
     assert g.player_view("p2")["players"][0]["economic_streak"] == 0
-    ev = run_turn(g)                                       # the next turn end counts again
+    ev = run_turn(g, deposit(g))                           # the next turn end counts again
     assert [e["type"] for e in ev if e["type"].startswith("streak")] == ["streak_started"]
     assert p1.economic_streak == 1
 
@@ -308,9 +323,8 @@ def test_elimination_ends_running_streaks():
     p2 = g.player("p2")
     p2.bank, p2.legacy = C.BANK_VICTORY + 400, C.LEGACY_VICTORY + 100
     for _ in range(4):
-        run_turn(g)
+        run_turn(g, deposit(g, "p2"))
     assert p2.economic_streak == 4 and p2.influence_streak == 4
-    p2.relic_streak = 3
     g.place_units(11, 2, "p1", {"infantry": 5})
     ev = run_turn(g, {"p1": [{"type": "move", "from": [11, 2], "to": [12, 2]}]})
     assert not p2.alive
@@ -319,7 +333,7 @@ def test_elimination_ends_running_streaks():
     types = [e["type"] for e in ev]
     assert types.index("streak_ended") < types.index("eliminated")
     row = g.spectator_view()["players"][1]
-    assert (row["economic_streak"], row["influence_streak"], row["relic_streak"]) == (0, 0, 0)
+    assert (row["economic_streak"], row["influence_streak"]) == (0, 0) and "relic_streak" not in row
 
 
 def test_seized_visibility():
@@ -356,7 +370,7 @@ def test_rows_and_you_carry_the_new_fields():
     v = g.player_view("p2")
     r = v["players"][0]
     assert (r["bank"], r["legacy"], r["economic_streak"], r["influence_streak"]) == (70, 80, 0, 0)
-    assert v["you"]["bank_limit"] == 10
+    assert v["you"]["bank_limit"] == C.BANK_BASE and v["you"]["streak_deposit"] == -(-C.BANK_BASE // 2)
     assert g.stats()["p1"]["score"] - g.stats()["p2"]["score"] == 70 // C.SCORE_DIVISORS["gold"]
 
 

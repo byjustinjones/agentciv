@@ -283,14 +283,24 @@ def test_allies_attacking_together_capture_the_city():
     assert any("recruits lost" in e["reason"] for e in events_of(ev, "order_failed") if e["player"] == "p2")
 
 
-def test_coalition_capture_ties_go_to_lower_seat():
+def test_coalition_capture_goes_to_the_larger_power():
+    g = world()
+    g.set_owner(8, 8, "p2")
+    g.treaties[("p1", "p3")] = 99
+    g.place_units(8, 8, "p1", {"infantry": 1})
+    g.place_units(8, 8, "p3", {"infantry": 2})
+    run_turn(g)
+    assert g.owner[g.idx(8, 8)] == "p3"
+
+
+def test_coalition_capture_tie_captures_nothing():
     g = world()
     g.set_owner(8, 8, "p2")
     g.treaties[("p1", "p3")] = 99
     g.place_units(8, 8, "p1", {"infantry": 1})
     g.place_units(8, 8, "p3", {"infantry": 1})
-    run_turn(g)
-    assert g.owner[g.idx(8, 8)] == "p1"
+    ev = run_turn(g)
+    assert g.owner[g.idx(8, 8)] == "p2" and not events_of(ev, "tile_captured")
 
 
 def test_cavalry_cannot_swap_places_with_hostile_cavalry():

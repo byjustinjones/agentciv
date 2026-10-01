@@ -10,9 +10,9 @@ TOP_KEYS = {"game_id", "turn", "max_turns", "status", "deadline", "season", "you
             "events", "victory", "costs", "deals", "contracts", "diplomacy_seq"}
 PLAYER_KEYS = {"id", "name", "color", "alive", "eliminated_turn", "resources", "income", "cities", "tiles",
                "capitals_held", "military_power", "units", "wonder_stage", "relics_held", "relics_guarded",
-               "relic_streak", "bank", "legacy", "economic_streak", "influence_streak",
+               "bank", "legacy", "economic_streak", "influence_streak",
                "betrayals", "reputation", "score", "submitted", "victory_progress"}
-YOU_KEYS = {"id", "name", "resources", "caps", "income", "upkeep", "claim_cost", "settle_cost", "submitted",
+YOU_KEYS = {"id", "name", "resources", "caps", "income", "upkeep", "claim_cost", "settle_cost", "submitted", "streak_deposit",
             "bank_limit"}
 
 

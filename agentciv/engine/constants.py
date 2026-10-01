@@ -106,7 +106,8 @@ STORAGE_BASE = 300
 WAREHOUSE_STORAGE = 200
 CAPPED_RESOURCES = ("food", "wood", "stone")
 
-RELIC_INFLUENCE = 2
+RELIC_INFLUENCE = 3                # per turn for a relic tile whose owner has units on it
+RELIC_INFLUENCE_UNGUARDED = 1      # ... and for one nobody of the owner stands on
 MARKET_HALL_GOLD = 5
 
 # Tile improvements (one per owned non-city tile).
@@ -218,17 +219,16 @@ TRADE_OFFER_TTL = DEAL_DEFAULT_EXPIRES_IN   # legacy name: offer_trade is a `pro
 # --------------------------------------------------------------------------
 DEFAULT_MAX_TURNS = 150
 RELICS_PER_PLAYER = 1             # R = RELICS_PER_PLAYER * n relic tiles
-RELIC_HALF_MIN = 4                # R >= this: hold ceil(R/2) relics; else a majority
+RELIC_HALF_MIN = 4                # map generation: relic fairness is measured up to the ceil(R/2)-th nearest relic
 WONDER_VICTORY_STAGE = 5
-RELIC_VICTORY_TURNS = 16
 BANK_VICTORY = 3600            # economic: bank >= this (at max_turns = VICTORY_REF_TURNS)
-LEGACY_VICTORY = 3000          # influence: legacy >= this
+LEGACY_VICTORY = 2700          # influence: legacy >= this
 VICTORY_STREAK_TURNS = 10      # consecutive turn ends, original capital owned
 VICTORY_REF_TURNS = DEFAULT_MAX_TURNS
 VICTORY_MIN_SCALE = 0.5
-BANK_PER_CITY = 10             # gold that may be banked per turn per owned city
+BANK_BASE = 50                 # gold that may be banked per turn (while owning a city) ...
 BANK_PER_MARKET_HALL = 10      # ... plus this per owned city with a market_hall
-BANK_INTEREST_DIVISOR = 100    # floor(bank / 100) gold per turn
+STREAK_DEPOSIT_DIVISOR = 2     # an economic streak turn needs >= ceil(bank_limit / this) banked that turn
 BANK_SEIZE_FRACTION = PLUNDER_FRACTION
 LEGACY_CAPITAL_LOSS = 0.25
 LEDGER_PROGRESS_WEIGHT = 0.8
@@ -238,7 +238,7 @@ SCORE_WEIGHTS = {"tiles": 2, "cities": 15, "capitals_held": 50, "wonder_stage": 
 SCORE_DIVISORS = {"influence": 6, "gold": 25, "military_power": 20}
 
 # Order in which conditions are reported when a player meets several at once.
-VICTORY_CONDITIONS = ("conquest", "wonder", "relics", "influence", "economic")
+VICTORY_CONDITIONS = ("conquest", "wonder", "influence", "economic")
 
 # --------------------------------------------------------------------------
 # Fog of war and espionage (games created with ``fog: true``; docs/RULES.md §14)

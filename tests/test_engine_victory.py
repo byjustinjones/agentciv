@@ -2,7 +2,8 @@
 import pytest
 
 from agentciv.engine import constants as C
-from agentciv.engine.rules import bank_target, building_cost, conquest_capitals, legacy_target, relics_needed
+from agentciv.engine.rules import rules_json
+from agentciv.engine.rules import bank_target, building_cost, conquest_capitals, legacy_target, streak_deposit
 from agentciv.engine.testing import events_of, new_game, run_turn, sandbox
 
 
@@ -15,19 +16,30 @@ def world(n=4, max_turns=150):
     return g
 
 
+def deposit(g, pid, gold=None):
+    """Orders banking enough gold for the economic streak this turn (§11)."""
+    need = streak_deposit(g.bank_limit(pid)) if gold is None else gold
+    g.player(pid).resources["gold"] += need
+    return {pid: [{"type": "bank", "gold": need}]}
+
+
 def test_thresholds():
     # a majority of the original capitals (all of them in games of 2-3)
     assert [conquest_capitals(n) for n in (2, 3, 4, 5, 6, 8, 12)] == [2, 3, 3, 3, 4, 5, 7]
     g = new_game(6)
     thr = g.spectator_view()["victory"]["thresholds"]
     assert thr == {"conquest_capitals": 4, "wonder_stage": C.WONDER_VICTORY_STAGE,
-                   "legacy": C.LEGACY_VICTORY, "relics_needed": 3, "relics_total": 6,
-                   "relic_turns": C.RELIC_VICTORY_TURNS, "bank": C.BANK_VICTORY,
+                   "legacy": C.LEGACY_VICTORY, "relics_total": 6, "bank": C.BANK_VICTORY,
                    "streak_turns": C.VICTORY_STREAK_TURNS, "max_turns": 150}
+    assert C.VICTORY_CONDITIONS == ("conquest", "wonder", "influence", "economic")
+    victory = rules_json()["victory"]
+    assert not any(k.startswith("relic") for k in victory)
+    assert victory["bank"] == {"target": C.BANK_VICTORY, "base": C.BANK_BASE, "per_market_hall": C.BANK_PER_MARKET_HALL,
+                               "streak_deposit_divisor": C.STREAK_DEPOSIT_DIVISOR, "seize_fraction": C.BANK_SEIZE_FRACTION}
 
 
-@pytest.mark.parametrize("max_turns,bank,legacy", [(150, 3600, 3000), (90, 2160, 1800), (60, 1800, 1500),
-                                                   (200, 3600, 3000), (20, 1800, 1500)])
+@pytest.mark.parametrize("max_turns,bank,legacy", [(150, 3600, 2700), (90, 2160, 1620), (60, 1800, 1350),
+                                                   (200, 3600, 2700), (20, 1800, 1350)])
 def test_targets_scale_with_game_length(max_turns, bank, legacy):
     assert (bank_target(max_turns), legacy_target(max_turns)) == (bank, legacy)
     thr = new_game(3, max_turns=max_turns).spectator_view()["victory"]["thresholds"]
@@ -39,7 +51,7 @@ def test_economic_victory():
     p = g.player("p3")
     p.bank = C.BANK_VICTORY
     p.economic_streak = C.VICTORY_STREAK_TURNS - 1
-    ev = run_turn(g)
+    ev = run_turn(g, deposit(g, "p3"))
     assert g.finished and g.result["winner"] == "p3" and g.result["condition"] == "economic"
     assert g.result["turn"] == 0 and g.result["placements"][0] == "p3"
     assert events_of(ev, "victory")
@@ -71,17 +83,18 @@ def test_streak_counts_to_the_win(condition):
         p.bank = C.BANK_VICTORY
     else:
         p.legacy = C.LEGACY_VICTORY
-    ev = run_turn(g)
+    orders = (lambda: deposit(g, "p1")) if condition == "economic" else (lambda: None)
+    ev = run_turn(g, orders())
     assert [e for e in events_of(ev, "streak_started")] == [
         {"turn": 0, "type": "streak_started", "player": "p1", "condition": condition}]
     for t in range(2, C.VICTORY_STREAK_TURNS):
-        ev = run_turn(g)
+        ev = run_turn(g, orders())
         assert not g.finished and getattr(p, condition + "_streak") == t
         assert not events_of(ev, "streak_started")
         vp = g.spectator_view()["players"][0]["victory_progress"][condition]
         assert vp == round(C.LEDGER_PROGRESS_WEIGHT + (1 - C.LEDGER_PROGRESS_WEIGHT) * t / C.VICTORY_STREAK_TURNS, 3)
         assert vp < 1.0
-    run_turn(g)
+    run_turn(g, orders())
     assert g.result["winner"] == "p1" and g.result["condition"] == condition
     assert g.spectator_view()["players"][0]["victory_progress"][condition] == 1.0
 
@@ -95,17 +108,18 @@ def test_streak_needs_the_original_capital(condition):
         p.bank = C.BANK_VICTORY
     else:
         p.legacy = C.LEGACY_VICTORY
-    run_turn(g)
-    run_turn(g)
+    orders = (lambda: deposit(g, "p1")) if condition == "economic" else (lambda: None)
+    run_turn(g, orders())
+    run_turn(g, orders())
     assert getattr(p, condition + "_streak") == 2
     cap = g.cities[g.idx(2, 2)]
-    cap.owner = "p2"                          # capital lost (bank/legacy untouched here)
+    cap.owner = "p2"                          # capital handed over (no capture event; bank/legacy untouched)
     g._set_owner(cap.idx, "p2")
     g._invalidate()
-    ev = run_turn(g)
+    ev = run_turn(g, orders())
     assert getattr(p, condition + "_streak") == 0 and p.alive
     assert {"turn": 2, "type": "streak_ended", "player": "p1", "condition": condition} in ev
-    run_turn(g)
+    run_turn(g, orders())
     assert getattr(p, condition + "_streak") == 0
 
 
@@ -113,11 +127,11 @@ def test_streak_resets_below_target():
     g = world()
     p = g.player("p1")
     p.bank = C.BANK_VICTORY
-    run_turn(g)
+    run_turn(g, deposit(g, "p1"))
     assert p.economic_streak == 1
-    p.bank = C.BANK_VICTORY - 1
-    ev = run_turn(g)
-    assert p.economic_streak == 0 and events_of(ev, "streak_ended")
+    p.bank = C.BANK_VICTORY - 100
+    ev = run_turn(g, deposit(g, "p1"))
+    assert p.bank < C.BANK_VICTORY and p.economic_streak == 0 and events_of(ev, "streak_ended")
 
 
 def test_wonder_victory():
@@ -140,32 +154,15 @@ def guard(g, pid, relics):
     g._invalidate()
 
 
-def test_relic_victory_needs_streak():
-    g = world()
-    need = relics_needed(len(g.relics))
-    guard(g, "p4", g.relics[:need])
-    for t in range(C.RELIC_VICTORY_TURNS - 1):
+def test_relics_are_not_a_victory_condition():
+    g = world(max_turns=60)
+    guard(g, "p4", g.relics)                 # every relic, guarded, for 30 turns
+    for _ in range(30):
         run_turn(g)
         assert not g.finished
-        assert g.player("p4").relic_streak == t + 1
-        prog = g.spectator_view()["players"][3]["victory_progress"]["relics"]
-        assert prog == pytest.approx((t + 1) / C.RELIC_VICTORY_TURNS, abs=1e-3)
-    run_turn(g)
-    assert g.result["winner"] == "p4" and g.result["condition"] == "relics"
-
-
-def test_relic_streak_resets():
-    g = world()
-    need = relics_needed(len(g.relics))
-    guard(g, "p4", g.relics[:need])
-    run_turn(g)
-    run_turn(g)
-    assert g.player("p4").relic_streak == 2
-    g._set_owner(g.relics[0], None)
-    g.armies.pop(g.relics[0], None)
-    run_turn(g)
-    assert g.player("p4").relic_streak == 0
-    assert g.spectator_view()["players"][3]["victory_progress"]["relics"] == 0.0
+    row = g.spectator_view()["players"][3]
+    assert row["relics_guarded"] == len(g.relics)
+    assert "relics" not in row["victory_progress"] and "relic_streak" not in row
 
 
 def test_conquest_by_capitals():
@@ -218,9 +215,11 @@ def test_simultaneous_conditions_highest_score_wins():
     g.set_owner(6, 8, "p2")
     g.set_owner(6, 9, "p2")
     st = g.stats()
-    assert st["p2"]["score"] > st["p1"]["score"]
-    run_turn(g)
+    assert st["p2"]["score"] > st["p1"]["score"] + 5
+    ev = run_turn(g, deposit(g, "p1"))
+    assert g.player("p1").economic_streak == C.VICTORY_STREAK_TURNS        # p1 met its condition too
     assert g.result["winner"] == "p2" and g.result["condition"] == "influence"
+    assert events_of(ev, "victory")
 
 
 def test_placements_eliminated_latest_first():
@@ -261,7 +260,7 @@ def test_victory_progress_values():
     g._invalidate()
     vp = g.spectator_view()["players"][0]["victory_progress"]
     assert vp == {"conquest": round(1 / 3, 3), "wonder": 0.0, "influence": round(0.8 * 150 / C.LEGACY_VICTORY, 3),
-                  "relics": 0.0, "economic": round(0.8 * 900 / C.BANK_VICTORY, 3), "score": 0.0}
+                  "economic": round(0.8 * 900 / C.BANK_VICTORY, 3), "score": 0.0}
     p.bank, p.economic_streak = 2 * C.BANK_VICTORY, 4    # the bank part is capped at 0.8
     g._invalidate()
     assert g.spectator_view()["players"][0]["victory_progress"]["economic"] == round(0.8 + 0.2 * 4 / 10, 3)

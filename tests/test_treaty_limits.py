@@ -1,5 +1,5 @@
 """Scarce treaties (rules §9): slots, lengths, bonds, cooldowns, release, and
-the priced break (influence, legacy, bank share, bond, deal refunds)."""
+the priced break (influence, legacy, removed bank share and bond, deal refunds)."""
 import random
 
 import pytest
@@ -134,7 +134,7 @@ def test_bonds_are_recorded_public_and_limited_by_the_unpledged_bank():
     assert failures(ev) == ["p1's bond (41) exceeds its unpledged bank (40)"]
     deal_sign(g, "p1", "p3", give={"bond": 40})
     assert g.bond_free("p1") == 0
-    # pledged gold stays in the bank and earns interest
+    # pledged gold stays in the bank
     assert p1.bank >= 100
     # bond is only valid with peace, and never negative
     assert not g.diplomacy("p1", [{"type": "propose", "to": "p4", "give": {"bond": 5}}])[0]["ok"]
@@ -224,16 +224,18 @@ def test_break_pipeline_exact_amounts():
     share = bank * C.TREATY_BREAK_PCT // 100
     assert (b["cost"], b["legacy_lost"], b["bank_share"], b["bond"], b["refund"]) == (
         C.TREATY_BREAK_COST, legacy * C.TREATY_BREAK_PCT // 100, share, 100, refund)
-    assert b["paid"] == 100 + share + refund and b["debt"] == 0 and b["betrayals"] == 1
-    # the offered bond and the refund leave the bank: 1 influence per 2 gold, like a default
-    fee = -(-(100 + refund) // C.CONTRACT_DEFAULT_GOLD_PER_INFLUENCE)
+    # only the refund goes to p2; the bank share and the bond leave the game
+    assert b["paid"] == refund and b["removed"] == 100 + share and b["debt"] == 0 and b["betrayals"] == 1
+    assert b["free"] is False
+    # the refund leaves the bank: 1 influence per 2 gold, like a default
+    fee = -(-refund // C.CONTRACT_DEFAULT_GOLD_PER_INFLUENCE)
     assert b["bank_fee"] == fee
-    assert preview == {"influence": b["cost"], "legacy": b["legacy_lost"], "gold_to_partner": b["paid"],
-                       "bank_fee": fee, "influence_debt": 0, "cancels": b["cancelled"]}
+    assert preview == {"influence": b["cost"], "legacy": b["legacy_lost"], "free": False, "gold_to_partner": refund,
+                       "gold_removed": 100 + share, "bank_fee": fee, "influence_debt": 0, "cancels": b["cancelled"]}
     assert b["cancelled"] and not g.contracts
     assert events_of(ev, "contract_cancelled")[0]["reason"] == "treaty_broken"
     inc = g.stats()
-    assert p1.bank == bank - b["paid"]                      # all of it from the bank
+    assert p1.bank == bank - b["paid"] - b["removed"]       # all of it from the bank
     assert p2.resources["gold"] == gold2 + b["paid"] + inc["p2"]["income"]["gold"]
     assert p1.betrayals == 1 and p1.legacy == legacy - b["legacy_lost"] + inc["p1"]["income"]["influence"]
     # escalation: the next break costs more
@@ -243,7 +245,7 @@ def test_break_pipeline_exact_amounts():
     assert g.treaty_break_pct("p1") == C.TREATY_BREAK_MAX_PCT
 
 
-def test_break_pays_from_bank_then_gold_then_debt():
+def test_break_removes_from_bank_then_gold_then_debt():
     g = world(4)
     p1 = g.player("p1")
     p1.bank = 300
@@ -254,9 +256,8 @@ def test_break_pays_from_bank_then_gold_then_debt():
     ev = run_turn(g, {"p1": [{"type": "break_treaty", "with": "p2"}]})
     b = events_of(ev, "treaty_broken")[0]
     owed = 300 + 100 * C.TREATY_BREAK_PCT // 100
-    assert b["bank_share"] == 10 and b["paid"] == 160
-    # 90 of the offered bond came from the bank: a 45 fee, held after the 50 break cost
-    assert b["bank_fee"] == 45
+    assert b["bank_share"] == 10 and b["paid"] == 0 and b["removed"] == 160
+    assert b["bank_fee"] == 0                       # no refund came from the bank
     assert b["debt"] == -(-(owed - 160) // C.CONTRACT_DEFAULT_GOLD_PER_INFLUENCE)
     assert p1.bank == 0 and p1.resources["gold"] == g.stats()["p1"]["income"]["gold"]
     assert g.player_view("p3")["players"][0]["reputation"]["influence_debt"] == p1.influence_debt > 0
@@ -269,7 +270,7 @@ def _default_route_cost(n):
 
 
 @pytest.mark.parametrize("bond", [900, 1000])
-def test_a_self_arranged_break_moves_bank_gold_no_cheaper_than_a_default(bond):
+def test_a_self_arranged_break_moves_no_bank_gold_to_the_partner(bond):
     g = world(4)
     p1, p2 = g.player("p1"), g.player("p2")
     p1.bank, p1.legacy, p1.resources["gold"] = 1000, 0, 0
@@ -278,14 +279,12 @@ def test_a_self_arranged_break_moves_bank_gold_no_cheaper_than_a_default(bond):
     deal_sign(g, "p1", "p2", give={"bond": bond})
     ev = run_turn(g, {"p1": [{"type": "break_treaty", "with": "p2"}]})
     b = events_of(ev, "treaty_broken")[0]
-    moved = 1000 - p1.bank
-    assert moved == b["paid"] == 1000 and p2.resources["gold"] - gold2 - g.stats()["p2"]["income"]["gold"] == moved
-    assert b["bank_fee"] == -(-(moved - b["bank_share"]) // 2)
-    assert b["cost"] + b["bank_fee"] >= _default_route_cost(moved)
-    # the fee beyond the influence left after the break cost is owed, plus the unpaid 100 of a 1000 bond
-    unpaid = b["bank_share"] + bond - moved
-    assert b["debt"] == b["bank_fee"] - (60 - b["cost"]) + -(-unpaid // 2)
-    assert p1.influence_debt == b["debt"] - g.stats()["p1"]["income"]["influence"]   # phase 7 repays
+    assert b["paid"] == 0 and b["removed"] == 1000 == 1000 - p1.bank and b["bank_fee"] == 0
+    assert p2.resources["gold"] == gold2 + g.stats()["p2"]["income"]["gold"]
+    # what the bank cannot cover is owed as influence debt
+    unpaid = b["bank_share"] + bond - 1000
+    assert b["debt"] == -(-unpaid // 2)
+    assert p1.influence_debt <= b["debt"]                   # phase 7 starts repaying it
 
 
 def test_the_bank_paid_refund_of_a_peace_deal_carries_the_fee():
@@ -311,7 +310,7 @@ def test_the_required_bond_and_bank_share_carry_no_fee():
     p1.resources["influence"] = 200
     ev = run_turn(g, {"p1": [{"type": "break_treaty", "with": "p2"}]})
     b = events_of(ev, "treaty_broken")[0]
-    assert b["paid"] == b["bank_share"] + C.TREATY_BOND_PER_BETRAYAL and b["bank_fee"] == 0
+    assert b["paid"] == 0 and b["removed"] == b["bank_share"] + C.TREATY_BOND_PER_BETRAYAL and b["bank_fee"] == 0
 
 
 def test_refund_is_prorated_per_deal_and_only_for_the_victims_net_lump():
@@ -337,7 +336,7 @@ def test_refund_is_prorated_per_deal_and_only_for_the_victims_net_lump():
     assert events_of(ev, "treaty_broken")[0]["refund"] == expect
 
 
-def test_mutual_break_both_pay_in_full_and_each_is_paid():
+def test_mutual_break_each_pays_its_own_bill():
     g = world(4)
     p1, p2 = g.player("p1"), g.player("p2")
     p1.bank, p2.bank = 500, 200
@@ -347,7 +346,9 @@ def test_mutual_break_both_pay_in_full_and_each_is_paid():
                       "p2": [{"type": "break_treaty", "with": "p1"}]})
     bb = {e["by"]: e for e in events_of(ev, "treaty_broken")}
     assert set(bb) == {"p1", "p2"} and p1.betrayals == p2.betrayals == 1
-    assert bb["p1"]["paid"] == 50 + 50 and bb["p2"]["paid"] == 20 + 20
+    assert bb["p1"]["removed"] == 50 + 50 and bb["p2"]["removed"] == 20 + 20
+    assert bb["p1"]["paid"] == bb["p2"]["paid"] == 0
+    assert (p1.bank, p2.bank) == (400, 160)
     assert not failures(ev)
 
 
@@ -358,7 +359,8 @@ def test_cooldown_on_both_paths_and_notice():
     ev = run_turn(g, {"p1": [{"type": "break_treaty", "with": "p2"}]})
     bt = events_of(ev, "treaty_broken")[0]["turn"]
     until = bt + C.TREATY_RESIGN_COOLDOWN
-    assert g.player_view("p3")["treaty_cooldowns"] == [{"a": "p1", "b": "p2", "until_turn": until}]
+    assert g.player_view("p3")["treaty_cooldowns"] == [{"a": "p1", "b": "p2", "until_turn": until,
+                                                         "notice_until": bt + C.TREATY_BREAK_NOTICE}]
     msg = f"p2 and p1 cannot sign a treaty before turn {until} (broken on turn {bt})"
     r = g.diplomacy("p2", [{"type": "propose", "to": "p1", "peace": 20}])[0]
     assert not r["ok"] and r["error"] == msg
@@ -419,15 +421,15 @@ def test_fog_redacts_the_deal_value_of_a_break():
     run_turn(g, {"p1": [{"type": "break_treaty", "with": "p2"}]})
     seen = {pid: next(e for e in g.player_view(pid)["events"] if e["type"] == "treaty_broken")
             for pid in ("p1", "p2", "p3")}
-    for k in ("refund", "paid", "bank_fee", "debt", "cancelled"):
+    for k in ("refund", "paid", "removed", "bank_fee", "debt", "cancelled"):
         assert k in seen["p1"] and k in seen["p2"] and k not in seen["p3"]
     # documented (RULES §14): the public bank shows the bank payment, so when the bank
     # covers what is owed a third party can work out `paid` and `refund`
     b = seen["p1"]
     before = next(e for e in g.player_view("p3")["events"] if e["type"] == "treaty_broken")
     p3_bank = next(r for r in g.player_view("p3")["players"] if r["id"] == "p1")["bank"]
-    assert p1.resources["gold"] >= 0 and 400 - p3_bank == b["paid"]
-    assert b["paid"] - before["bank_share"] - before["bond"] == b["refund"]
+    assert p1.resources["gold"] >= 0 and 400 - p3_bank == b["paid"] + b["removed"]
+    assert 400 - p3_bank - before["bank_share"] - before["bond"] == b["refund"] == b["paid"]
     assert "bank payment of a treaty break" in rules_md()
     for k in ("cost", "legacy_lost", "bank_share", "bond", "betrayals"):
         assert seen["p3"][k] == seen["p1"][k]

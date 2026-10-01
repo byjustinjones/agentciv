@@ -44,7 +44,7 @@ from agentciv.bots import get_bot
 from agentciv.engine import Game, GameConfig
 from agentciv.engine import constants as C
 
-CONDITIONS = ("conquest", "wonder", "relics", "influence", "economic", "score")
+CONDITIONS = C.VICTORY_CONDITIONS + ("score",)
 
 
 def label_bots(names: list) -> list:

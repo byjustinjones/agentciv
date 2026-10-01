@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING
 from . import constants as C
 from . import deals as D
 from . import fog as F
-from .rules import claim_cost, rules_json, season, settle_cost, thresholds
+from .rules import claim_cost, rules_json, season, settle_cost, streak_deposit, thresholds
 
 if TYPE_CHECKING:  # pragma: no cover
     from .game import Game
@@ -100,7 +100,6 @@ def build_view(g: "Game", viewer: str | None, full: bool = False) -> dict:
             "wonder_stage": s["wonder_stage"],
             "relics_held": s["relics_held"],
             "relics_guarded": s["relics_guarded"],
-            "relic_streak": p.relic_streak,
             "bank": p.bank,
             "legacy": p.legacy,
             "economic_streak": p.economic_streak,
@@ -136,6 +135,7 @@ def build_view(g: "Game", viewer: str | None, full: bool = False) -> dict:
             "settle_cost": settle_cost(s["cities"]),
             "market_fee": C.MARKET_HALL_FEE if g.status != "lobby" and g.has_market_hall(p.id) else C.MARKET_FEE,
             "bank_limit": g.bank_limit(p.id),
+            "streak_deposit": streak_deposit(g.bank_limit(p.id)),
             "treaty": {"slots": g.treaty_slots(p.id), "held": g.treaties_held(p.id),
                        "bond_required": g.bond_required(p.id), "bond_pledged": g.bond_pledged(p.id),
                        "bond_free": g.bond_free(p.id), "break_cost": g.treaty_break_cost(p.id),
@@ -205,7 +205,8 @@ def build_view(g: "Game", viewer: str | None, full: bool = False) -> dict:
                       "signed_turn": (g.treaty_terms.get((a, b)) or {}).get("signed"),
                       "bond": dict((g.treaty_terms.get((a, b)) or {}).get("bond", {}))}
                      for (a, b), u in sorted(g.treaties.items())],
-        "treaty_cooldowns": [{"a": a, "b": b, "until_turn": bt + C.TREATY_RESIGN_COOLDOWN}
+        "treaty_cooldowns": [{"a": a, "b": b, "until_turn": bt + C.TREATY_RESIGN_COOLDOWN,
+                              "notice_until": bt + g.break_notice_turns.get((a, b), C.TREATY_BREAK_NOTICE)}
                              for (a, b), bt in sorted(g.broken_pairs.items())
                              if bt + C.TREATY_RESIGN_COOLDOWN > g.turn],
         "treaty_proposals": [dict(pr) for pr in g.treaty_proposals

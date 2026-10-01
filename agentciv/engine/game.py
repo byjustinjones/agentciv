@@ -27,8 +27,8 @@ from . import views
 from .mapgen import generate_map
 from .model import City, Player
 from .orders import prevalidate
-from .rules import (bank_limit, bank_target, building_cost, claim_cost, legacy_target, relics_needed,
-                    rules_json, season, settle_cost, storage_cap, thresholds,
+from .rules import (bank_limit, bank_target, building_cost, claim_cost, legacy_target,
+                    rules_json, season, settle_cost, storage_cap, streak_deposit, thresholds,
                     unit_cost)
 
 ACTION_TYPES = ("build", "claim", "settle", "recruit", "disband", "bank")
@@ -108,6 +108,7 @@ class Game:
         self.treaty_proposals: list = []
         self.treaty_terms: dict[tuple, dict] = {}   # pair -> {"signed", "deals", "bond": {pid: gold}}
         self.broken_pairs: dict[tuple, int] = {}    # pair -> turn of its last break
+        self.break_notice_turns: dict[tuple, int] = {}   # pair -> notice turns after its last break
         self.messages: list = []
         # barter & deals (§13, agentciv.engine.deals)
         self.deals: dict[str, dict] = {}        # every deal ever made, by id
@@ -135,6 +136,8 @@ class Game:
         self._move_restricted: set = set()
         self.defaulted_this_turn: set = set()   # payers that defaulted in this turn's phase 7
         self.betrayed_this_turn: set = set()    # players that broke a treaty this turn
+        self.lost_city_this_turn: set = set()   # players that lost a city this turn
+        self._bank_limits: dict = {}            # bank_limit per player at the start of phase 4
         self.last_events: list = []
         self.result: dict | None = None
         self._stats: dict | None = None
@@ -347,10 +350,18 @@ class Game:
     def break_notice(self, a: str, b: str) -> int | None:
         """The last turn on which ``a`` and ``b`` stay movement-restricted
         after a treaty break (None = not restricted by a break now)."""
-        t = self.broken_pairs.get(self._pair(a, b))
-        if t is None or self.turn - t > C.TREATY_BREAK_NOTICE:
+        key = self._pair(a, b)
+        t = self.broken_pairs.get(key)
+        notice = self.break_notice_turns.get(key, C.TREATY_BREAK_NOTICE)
+        if t is None or self.turn - t > notice:
             return None
-        return t + C.TREATY_BREAK_NOTICE
+        return t + notice
+
+    def streaking(self, pid: str) -> bool:
+        """Is ``pid`` on an economic or influence streak (public)? Breaking a
+        treaty with such a partner is free (§9)."""
+        q = self._by_id.get(pid)
+        return q is not None and (q.economic_streak > 0 or q.influence_streak > 0)
 
     def treaty_sign_problem(self, a: str, b: str, bonds: dict | None = None) -> str | None:
         """Why ``a`` and ``b`` cannot sign (or renew) a treaty right now with
@@ -404,54 +415,60 @@ class Game:
     def break_preview(self, pid: str) -> dict:
         """What breaking each of ``pid``'s treaties would cost right now."""
         out = {}
-        cost, lost = self.treaty_break_cost(pid), self.treaty_break_legacy(pid)
         for key in sorted(self.treaties):
             if pid not in key:
                 continue
             other = key[1] if key[0] == pid else key[0]
+            free = self.streaking(other)
+            cost = 0 if free else self.treaty_break_cost(pid)
+            lost = 0 if free else self.treaty_break_legacy(pid)
             terms = self.treaty_terms.get(key) or {}
-            bill = self._break_bill(pid, other, terms, cost)
+            bill = self._break_bill(pid, other, terms, cost, free)
             out[other] = {
-                "influence": cost, "legacy": lost, "gold_to_partner": bill["owed"],
+                "influence": cost, "legacy": lost, "gold_to_partner": bill["refund"],
+                "gold_removed": bill["share"] + bill["bond"], "free": free,
                 "bank_fee": bill["fee"], "influence_debt": bill["debt"],
                 "cancels": [c["id"] for c in self.contracts
                             if c["deal"] in bill["deals"] and c["payer"] == other and c["payee"] == pid],
             }
         return out
 
-    def _break_bill(self, pid: str, other: str, terms: dict, cost: int) -> dict:
-        """What ``pid`` owes ``other`` for breaking the treaty with ``terms``
-        (before any of it is paid; ``cost`` influence already counted as
-        spent): the bank share, its bond and the deal refunds, paid from the
-        bank, then gold; the rest as ``influence_debt``. Bank gold paid beyond
-        the bank share and the required bond (the offered bond and the
-        refunds) also costs a fee of 1 influence per
+    def _break_bill(self, pid: str, other: str, terms: dict, cost: int, free: bool = False) -> dict:
+        """What ``pid`` pays for breaking the treaty with ``other`` under
+        ``terms`` (before any of it is paid; ``cost`` influence already
+        counted as spent): the deal refunds (to ``other``), then the bank
+        share and its bond (removed from the game; none of both when
+        ``free``), from the bank, then gold; the rest as ``influence_debt``.
+        Bank gold used for the refunds also costs a fee of 1 influence per
         ``CONTRACT_DEFAULT_GOLD_PER_INFLUENCE`` gold, like a contract default
         (§10), taken from influence and then as ``influence_debt``."""
         p = self._by_id[pid]
         per = C.CONTRACT_DEFAULT_GOLD_PER_INFLUENCE
         deals = set(terms.get("deals", ()))
-        share = self.treaty_break_bank(pid)
-        bond = terms.get("bond", {}).get(pid, 0)
+        share = 0 if free else self.treaty_break_bank(pid)
+        bond = 0 if free else terms.get("bond", {}).get(pid, 0)
         refund = D.peace_refund(self, deals, other, pid)
         owed = share + bond + refund
         from_bank = min(max(0, p.bank), owed)
         from_gold = min(max(0, p.resources["gold"]), owed - from_bank)
-        exempt = share + min(bond, self.bond_required(pid))
-        fee = -(-max(0, from_bank - exempt) // per)
+        # refunds are paid first: the bank gold they use carries the fee
+        fee = -(-min(from_bank, refund) // per)
         fee_paid = min(fee, max(0, p.resources["influence"] - cost))
         debt = -(-(owed - from_bank - from_gold) // per) + fee - fee_paid
         return {"deals": deals, "share": share, "bond": bond, "refund": refund, "owed": owed,
                 "from_bank": from_bank, "from_gold": from_gold, "fee": fee, "fee_paid": fee_paid, "debt": debt}
 
-    def _break_treaty(self, p, v, cost: int, terms: dict) -> None:
-        """Settle ``p`` breaking its treaty with ``v`` (already removed): §9."""
-        bill = self._break_bill(p.id, v.id, terms, cost)
-        lost = self.treaty_break_legacy(p.id)
+    def _break_treaty(self, p, v, cost: int, terms: dict, free: bool = False) -> None:
+        """Settle ``p`` breaking its treaty with ``v`` (already removed): §9.
+        ``free``: ``v`` was on a victory streak (no influence, legacy, bank
+        share, bond or betrayal; deal refunds are still owed)."""
+        bill = self._break_bill(p.id, v.id, terms, cost, free)
+        lost = 0 if free else self.treaty_break_legacy(p.id)
         p.resources["influence"] -= cost + bill["fee_paid"]
         p.legacy -= lost
-        p.betrayals += 1
-        self.betrayed_this_turn.add(p.id)
+        if not free:
+            p.betrayals += 1
+            self.betrayed_this_turn.add(p.id)
         cancelled = [c["id"] for c in self.contracts
                      if c["deal"] in bill["deals"] and c["payer"] == v.id and c["payee"] == p.id]
         if cancelled:
@@ -462,11 +479,14 @@ class Game:
         p.bank -= bill["from_bank"]
         p.resources["gold"] -= bill["from_gold"]
         paid = bill["from_bank"] + bill["from_gold"]
-        v.resources["gold"] += paid
+        to_partner = min(paid, bill["refund"])      # bank share and bond leave the game
+        v.resources["gold"] += to_partner
         p.influence_debt += bill["debt"]
-        self._end_streak(p, "influence", reason="treaty_broken")
+        if not free:
+            self._end_streak(p, "influence", reason="treaty_broken")
         self._emit("treaty_broken", by=p.id, cost=cost, legacy_lost=lost, bank_share=bill["share"],
-                   bond=bill["bond"], refund=bill["refund"], paid=paid, bank_fee=bill["fee"], debt=bill["debt"],
+                   bond=bill["bond"], refund=bill["refund"], paid=to_partner, removed=paid - to_partner,
+                   bank_fee=bill["fee"], debt=bill["debt"], free=free,
                    cancelled=cancelled, betrayals=p.betrayals, **{"with": v.id})
 
     def owned_cities(self, pid: str) -> list:
@@ -594,6 +614,7 @@ class Game:
         orders = {p.id: list(self._orders.get(p.id, [])) for p in self.players if p.alive}
         self.defaulted_this_turn = set()
         self.betrayed_this_turn = set()
+        self.lost_city_this_turn = set()
         fog = self.config.fog
         if fog:
             pre = F.vision_all(self)
@@ -646,13 +667,16 @@ class Game:
         t = self.turn
         broken = set()
         gone: dict = {}
+        streaking = {q.id for q in self._alive_in_order() if self.streaking(q.id)}
+        notice: dict = {}
         for p in self._alive_in_order():
             for o in orders[p.id]:
                 if o["type"] != "break_treaty":
                     continue
                 other = o["with"]
                 key = self._pair(p.id, other)
-                cost = self.treaty_break_cost(p.id)
+                free = other in streaking
+                cost = 0 if free else self.treaty_break_cost(p.id)
                 # a treaty broken earlier in this phase by the partner still
                 # counts: both players who ordered the break pay (no seat bias)
                 if key not in self.treaties and key not in broken:
@@ -663,9 +687,11 @@ class Game:
                     if key in self.treaties:
                         self.treaties.pop(key)
                         gone[key] = self.treaty_terms.pop(key, None) or {"signed": t, "deals": [], "bond": {}}
-                    self._break_treaty(p, self._by_id[other], cost, gone[key])
+                    self._break_treaty(p, self._by_id[other], cost, gone[key], free)
                     broken.add(key)
                     self.broken_pairs[key] = t
+                    notice[key] = max(notice.get(key, 0), 0 if free else C.TREATY_BREAK_NOTICE)
+        self.break_notice_turns.update(notice)
         released = set()
         asked: dict = {}
         for p in self._alive_in_order():
@@ -719,7 +745,8 @@ class Game:
                         pr["bond"] = o["bond"]
                     self.treaty_proposals.append(pr)
                     self._emit("treaty_proposed", vis=[p.id, to], **{k: v for k, v in pr.items() if k != "turn"})
-        notice = {k for k, bt in self.broken_pairs.items() if t - bt <= C.TREATY_BREAK_NOTICE}
+        notice = {k for k, bt in self.broken_pairs.items()
+                  if t - bt <= self.break_notice_turns.get(k, C.TREATY_BREAK_NOTICE)}
         self._move_restricted = set(self.treaties) | broken | released | notice
 
     # ---------------------------------------------------------------- 3
@@ -755,6 +782,7 @@ class Game:
         if not alive:
             return
         lists = {p.id: [o for o in orders[p.id] if o["type"] in ACTION_TYPES] for p in alive}
+        self._bank_limits = {p.id: self.bank_limit(p.id) for p in alive}
         self._wonder_built: set = set()
         contested = self._contested(lists, self._viable_expansions(lists))
         order = self._rotated()
@@ -1152,7 +1180,10 @@ class Game:
         cands = [q for q in per if own is None or self.hostile(q, own)]
         if not cands:
             return None
-        return min(cands, key=lambda q: (-combat.military_power(per[q]), self._by_id[q].index))
+        cands.sort(key=lambda q: (-combat.military_power(per[q]), self._by_id[q].index))
+        if len(cands) > 1 and combat.military_power(per[cands[0]]) == combat.military_power(per[cands[1]]):
+            return None          # equal top power: nobody captures (the tile stays as it was)
+        return cands[0]
 
     def _border_clashes(self, groups: list) -> None:
         """Hostile groups crossing the same edge in opposite directions fight
@@ -1218,6 +1249,7 @@ class Game:
         p = self._by_id[pid]
         city.owner = pid
         self._set_owner(i, pid)
+        self.lost_city_this_turn.add(old)
         city.walls = max(0, city.walls - 1)
         wonder_lost = city.wonder_stage
         city.wonder_stage = 0
@@ -1308,10 +1340,7 @@ class Game:
                 for r, v in amounts.items():
                     acc[r] += v
             if i in relics:
-                acc["influence"] += C.RELIC_INFLUENCE
-        for p in self.players:          # bank interest (§5)
-            if p.alive and p.bank > 0:
-                inc[p.id]["gold"] += p.bank // C.BANK_INTEREST_DIVISOR
+                acc["influence"] += C.RELIC_INFLUENCE if self.relic_guarded(i) else C.RELIC_INFLUENCE_UNGUARDED
         return inc, extraction
 
     def _seasoned(self, raw: dict, turn: int) -> dict:
@@ -1427,25 +1456,32 @@ class Game:
         for p in self._alive_in_order():
             if not any(c.owner == p.id for c in self.cities.values()):
                 self._eliminate(p)
-        # relic streaks
-        need = relics_needed(len(self.relics))
-        for p in self._alive_in_order():
-            held = sum(1 for r in self.relics if self.owner[r] == p.id and self.relic_guarded(r))
-            p.relic_streak = p.relic_streak + 1 if held >= need else 0
         # economic and influence streaks (§11)
         bt, lt = bank_target(self.max_turns), legacy_target(self.max_turns)
         # players owning their original capital
         home_of = {c.owner for c in self.cities.values() if c.capital and c.original_owner == c.owner}
         for p in self._alive_in_order():
             home = p.id in home_of
-            # a contract default this turn keeps the economic streak at 0 (§10)
+            lost = p.id in self.lost_city_this_turn
+            # a contract default this turn keeps the economic streak at 0 (§10);
+            # losing any city ends both streaks
             for condition, ok in (("economic", home and p.bank >= bt and p.id not in self.defaulted_this_turn),
                                   ("influence", home and p.legacy >= lt and p.id not in self.betrayed_this_turn)):
-                if ok:
-                    attr = condition + "_streak"
+                attr = condition + "_streak"
+                if ok and not lost:
+                    if condition == "economic":
+                        need = streak_deposit(self._bank_limits.get(p.id, self.bank_limit(p.id)))
+                        if p.banked < need:
+                            # the turn end does not count; the streak is kept
+                            if p.economic_streak > 0:
+                                self._emit("streak_paused", player=p.id, condition=condition, reason="deposit",
+                                           banked=p.banked, needed=need)
+                            continue
                     setattr(p, attr, getattr(p, attr) + 1)
                     if getattr(p, attr) == 1:
                         self._emit("streak_started", player=p.id, condition=condition)
+                elif lost:
+                    self._end_streak(p, condition, reason="city_lost")
                 else:
                     self._end_streak(p, condition)
         for p in self.players:
@@ -1482,9 +1518,9 @@ class Game:
             self.treaty_terms.pop(key, None)
         for key in [k for k in self.broken_pairs if p.id in k]:
             del self.broken_pairs[key]
+            self.break_notice_turns.pop(key, None)
         self._end_streak(p, "economic", reason="eliminated")
         self._end_streak(p, "influence", reason="eliminated")
-        p.relic_streak = 0
         self.treaty_proposals = [pr for pr in self.treaty_proposals if p.id not in (pr["from"], pr["to"])]
         D.on_eliminated(self, p.id)
         p.wonder_city = None
@@ -1548,8 +1584,6 @@ class Game:
                     "conquest": round(conquest, 3),
                     "wonder": round(min(1.0, ws / C.WONDER_VICTORY_STAGE), 3),
                     "influence": _ledger_progress(p.legacy, thr["legacy"], p.influence_streak),
-                    "relics": round(min(1.0, p.relic_streak / C.RELIC_VICTORY_TURNS)
-                                    if guarded[p.id] >= thr["relics_needed"] else 0.0, 3),
                     "economic": _ledger_progress(p.bank, thr["bank"], p.economic_streak),
                     "score": round(min(1.0, self.turn / self.max_turns) if self.max_turns else 1.0, 3),
                 }
@@ -1587,8 +1621,6 @@ class Game:
                 conds.add("conquest")
             if s["wonder_stage"] >= C.WONDER_VICTORY_STAGE:
                 conds.add("wonder")
-            if p.relic_streak >= C.RELIC_VICTORY_TURNS:
-                conds.add("relics")
             if p.influence_streak >= C.VICTORY_STREAK_TURNS:
                 conds.add("influence")
             if p.economic_streak >= C.VICTORY_STREAK_TURNS:

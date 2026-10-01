@@ -43,8 +43,12 @@ def test_relic_and_temple_influence():
     g.improvement[g.idx(4, 2)] = "temple"
     g._invalidate()
     inc = g.stats()["p1"]["income"]
-    assert inc["influence"] == 2 + C.RELIC_INFLUENCE + C.IMPROVEMENTS["temple"]["bonus"]["influence"]
+    temple = C.IMPROVEMENTS["temple"]["bonus"]["influence"]
+    assert inc["influence"] == 2 + C.RELIC_INFLUENCE_UNGUARDED + temple          # nobody on the relic
     assert inc["stone"] == 1 + 2          # temple keeps the hills base yield
+    g.place_units(r % g.width, r // g.width, "p1", {"infantry": 1})
+    g._invalidate()
+    assert g.stats()["p1"]["income"]["influence"] == 2 + C.RELIC_INFLUENCE + temple     # guarded
 
 
 def test_deposit_depletion():

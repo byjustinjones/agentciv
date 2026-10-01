@@ -1,4 +1,4 @@
-"""Relic control by occupation, guarded relic streaks, capital garrisons,
+"""Relic control by occupation, guarded relic income, capital garrisons,
 market reversion and the fairness properties of the relic/start layout."""
 import pytest
 
@@ -107,29 +107,32 @@ def test_captured_city_does_not_hand_over_relic():
     assert g.owner[g.idx(x, y)] == "p2"          # relics change hands by occupation only
 
 
-# ---------------------------------------------------------------- streak
-def test_relic_streak_needs_units_on_the_relics():
+# ---------------------------------------------------------------- income
+def test_relic_income_is_higher_while_guarded_and_relics_win_nothing():
     g = world()
     need = relics_needed(len(g.relics))
     for k in range(need):
         g._set_owner(g.relics[k], "p4")
     g._invalidate()
-    run_turn(g)
-    assert g.player("p4").relic_streak == 0          # owned but unguarded
+    base = g.stats()["p4"]["income"]["influence"] - need * C.RELIC_INFLUENCE_UNGUARDED
+    legacy = g.player("p4").legacy
+    run_turn(g)                                      # owned but unguarded
+    assert g.player("p4").legacy - legacy == base + need * C.RELIC_INFLUENCE_UNGUARDED
     for k in range(need):
         x, y = relic_xy(g, k)
         g.place_units(x, y, "p4", {"infantry": 1})
+    g._invalidate()
+    assert g.stats()["p4"]["income"]["influence"] == base + need * C.RELIC_INFLUENCE
+    legacy = g.player("p4").legacy
     run_turn(g)
-    assert g.player("p4").relic_streak == 1
-    vp = g.spectator_view()["players"][3]["victory_progress"]["relics"]
-    assert vp == pytest.approx(1 / C.RELIC_VICTORY_TURNS, abs=1e-3)
-    # one guard walks away: the streak resets
-    x, y = relic_xy(g, 0)
-    run_turn(g, {"p4": [{"type": "move", "from": [x, y], "to": [x - 1, y]}]})
-    assert g.player("p4").relic_streak == 0
+    assert g.player("p4").legacy - legacy == base + need * C.RELIC_INFLUENCE
+    row = g.spectator_view()["players"][3]
+    assert row["relics_guarded"] == need and "relics" not in row["victory_progress"]
+    assert "relics" not in C.VICTORY_CONDITIONS
 
 
 def test_relics_needed_formula():
+    """Used by map generation only (relic fairness)."""
     assert [relics_needed(r) for r in (1, 2, 3)] == [1, 2, 2]          # majority when few
     assert [relics_needed(r) for r in (4, 5, 6, 8, 12)] == [2, 3, 3, 4, 6]
     assert [relic_count(n) for n in (2, 5, 6, 8)] == [2, 5, 6, 8]

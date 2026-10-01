@@ -9,7 +9,7 @@ class Player:
 
     __slots__ = (
         "id", "name", "index", "color", "resources", "alive", "eliminated_turn",
-        "capital", "betrayals", "relic_streak", "wonder_city", "city_counter",
+        "capital", "betrayals", "wonder_city", "city_counter",
         "tiles", "final_score", "deals", "contracts_honoured", "defaults",
         "influence_debt", "ci_pool", "spy_incidents",
         "bank", "legacy", "economic_streak", "influence_streak", "banked",
@@ -25,7 +25,6 @@ class Player:
         self.eliminated_turn: int | None = None
         self.capital: int | None = None      # tile index of the original capital
         self.betrayals = 0
-        self.relic_streak = 0
         self.wonder_city: int | None = None  # tile index of the city hosting the wonder
         self.city_counter = 0                # used for city names
         self.tiles = 0                       # owned tile count (maintained by Game)

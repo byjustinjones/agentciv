@@ -22,8 +22,8 @@ def relic_count(n_players: int) -> int:
 
 
 def relics_needed(n_relics: int) -> int:
-    """Relics to hold for the relic victory: half of them (rounded up), but
-    a majority when there are fewer than RELIC_HALF_MIN relics."""
+    """Map generation only: relic fairness is measured up to this many
+    nearest relics (half of them rounded up, a majority below RELIC_HALF_MIN)."""
     if n_relics < C.RELIC_HALF_MIN:
         return n_relics // 2 + 1
     return (n_relics + 1) // 2
@@ -86,7 +86,12 @@ def legacy_target(max_turns: int) -> int:
 
 def bank_limit(cities: int, halls: int) -> int:
     """Gold that may be moved into the bank per turn."""
-    return C.BANK_PER_CITY * cities + C.BANK_PER_MARKET_HALL * halls
+    return (C.BANK_BASE if cities > 0 else 0) + C.BANK_PER_MARKET_HALL * halls
+
+
+def streak_deposit(limit: int) -> int:
+    """Gold that must be banked in a turn for it to count toward the economic streak."""
+    return -(-limit // C.STREAK_DEPOSIT_DIVISOR)
 
 
 def thresholds(n_players: int, max_turns: int) -> dict:
@@ -95,9 +100,7 @@ def thresholds(n_players: int, max_turns: int) -> dict:
         "conquest_capitals": conquest_capitals(n_players),
         "wonder_stage": C.WONDER_VICTORY_STAGE,
         "legacy": legacy_target(max_turns),
-        "relics_needed": relics_needed(r),
         "relics_total": r,
-        "relic_turns": C.RELIC_VICTORY_TURNS,
         "bank": bank_target(max_turns),
         "streak_turns": C.VICTORY_STREAK_TURNS,
         "max_turns": max_turns,
@@ -171,6 +174,7 @@ def _build_rules() -> dict:
             "capital_extra": C.CAPITAL_EXTRA_INFLUENCE,
             "temple": C.IMPROVEMENTS["temple"]["bonus"]["influence"],
             "relic": C.RELIC_INFLUENCE,
+            "relic_unguarded": C.RELIC_INFLUENCE_UNGUARDED,
         },
         "units": units,
         "buildings": {"improvements": improvements, "city": city},
@@ -251,11 +255,9 @@ def _build_rules() -> dict:
             "conquest": f"own >= floor(n/2)+1 original capitals (all of them if n <= {C.CONQUEST_SMALL_GAME}), or be the last player standing",
             "wonder_stage": C.WONDER_VICTORY_STAGE,
             "legacy": {"target": C.LEGACY_VICTORY, "capital_loss": C.LEGACY_CAPITAL_LOSS},
-            "relics_needed": f"ceil(R/2) (floor(R/2)+1 if R < {C.RELIC_HALF_MIN})",
-            "relic_turns": C.RELIC_VICTORY_TURNS,
-            "bank": {"target": C.BANK_VICTORY, "per_city": C.BANK_PER_CITY,
+            "bank": {"target": C.BANK_VICTORY, "base": C.BANK_BASE,
                      "per_market_hall": C.BANK_PER_MARKET_HALL,
-                     "interest_divisor": C.BANK_INTEREST_DIVISOR,
+                     "streak_deposit_divisor": C.STREAK_DEPOSIT_DIVISOR,
                      "seize_fraction": C.BANK_SEIZE_FRACTION},
             "streak_turns": C.VICTORY_STREAK_TURNS,
             "scale": {"reference_turns": C.VICTORY_REF_TURNS, "min": C.VICTORY_MIN_SCALE},
