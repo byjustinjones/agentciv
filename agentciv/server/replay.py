@@ -1,6 +1,7 @@
 """Replay frame storage and the compact replay format.
 
-Frames are spectator views, one per turn (``frames[k].turn == k``). A live
+Frames are spectator views, one per turn (``frames[k].turn == k``; a puzzle
+game, docs/PUZZLES.md, starts at a later turn s: ``frames[k].turn == s + k``). A live
 game keeps them in memory zlib-compressed (a 150-turn, 8-player game is a
 few MB of JSON but ~0.5 MB compressed); the replay file on disk keeps the
 plain ``{"game_id","summary","result","actions","frames"}`` format of
@@ -192,6 +193,9 @@ def slice_full_replay(data: bytes, lo: int | None, hi: int | None) -> bytes:
     frames = doc.get("frames") or []
     a, b = _range(len(frames), lo, hi)
     actions = doc.get("actions")
+    # frames are indexed from 0, the action log by turn (puzzle games start after turn 0)
+    t0 = frames[0].get("turn", 0) if frames and isinstance(frames[0], dict) else 0
+    t0 = t0 if isinstance(t0, int) else 0
     return envelope(doc.get("game_id"), doc.get("summary") or {}, doc.get("result"),
                     [dumps(f) for f in frames[a:b + 1]], total=len(frames), lo=a,
-                    actions=None if actions is None else dumps(slice_actions(actions, a, b)))
+                    actions=None if actions is None else dumps(slice_actions(actions, a + t0, b + t0)))
