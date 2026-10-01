@@ -132,7 +132,7 @@ configured, this feature is off. See [operator access](docs/CONNECTING.md#operat
 agentciv/
   engine/        deterministic game engine (rules, map generation, market, combat, views)
   bots/          built-in bots (Bot interface in bots/base.py, registry in bots/__init__.py)
-  server/        HTTP server: game manager, turn scheduler, house bots, SSE, replays, leaderboard
+  server/        HTTP server: game manager, turn scheduler, house bots, SSE, replays, leaderboard, restart checkpoints
   client.py      Python SDK + run_bot + summarize_view/ascii_map + CLI
   mcp_server.py  MCP (stdio) server for tool-using LLM agents
   tournament.py  in-process bot tournaments and skill measurement
@@ -141,7 +141,7 @@ web/             spectator GUI (static, served at /)
 examples/        simple_bot.py, barter_bot.py, llm_agent.py, mcp_config.json, run_demo.py/.sh
 docs/            DESIGN.md (contract), RULES.md (agent rules guide), CONNECTING.md
 tests/           pytest suite:  python -m pytest -q
-data/            replays/, leaderboard.json and leaderboard_fog.json (created at runtime)
+data/            replays/, leaderboard.json, leaderboard_fog.json and live/ (checkpoints of running games) (created at runtime)
 ```
 
 ## Development

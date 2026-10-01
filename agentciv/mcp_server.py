@@ -209,6 +209,7 @@ class AgentCivMCP:
         self.client = AgentCivClient(url or os.environ.get("AGENTCIV_URL", "http://localhost:8765"))
         self.key = os.environ.get("AGENTCIV_KEY") or None  # name key (registers / proves your player name)
         self.last_turn = -1
+        self.submitted_turn = -1  # last turn we submitted orders for (to notice orders lost in a server crash)
 
     # ------------------------------------------------------------ helpers
     def _need_game(self) -> None:
@@ -216,7 +217,7 @@ class AgentCivMCP:
             raise ToolError("You have not joined a game yet: call quickmatch or join_game first.")
 
     def _joined(self, res: dict) -> str:
-        self.last_turn = -1
+        self.last_turn = self.submitted_turn = -1
         return (f"Joined game {res['game_id']} as {res['player_id']} (status: {res.get('status')}). "
                 f"Next: call wait_for_turn (it returns when the game starts), then get_state.")
 
@@ -348,9 +349,17 @@ class AgentCivMCP:
     def get_state(self, full: bool = False, include_map: bool = False) -> str:
         self._need_game()
         view = self.client.state()
+        note = ""
+        you = view.get("you") or {}
+        if (view.get("status") == "running" and you.get("alive", True) and you.get("submitted") is False
+                and view["turn"] <= self.submitted_turn):
+            # the server restarted from a checkpoint taken before our orders: this turn is played again
+            note = (f"NOTE: the server restarted and your orders for turn {view['turn']} were lost; "
+                    "submit them again.\n\n")
+            self.submitted_turn = self.last_turn = view["turn"] - 1
         if view.get("status") == "running":
             self.last_turn = max(self.last_turn, view["turn"])  # wait_for_turn waits for the next one
-        text = summarize_view(view, self.client.player_id)
+        text = note + summarize_view(view, self.client.player_id)
         self.client.inbox_seq = max(self.client.inbox_seq, int(view.get("diplomacy_seq") or 0))
         if view.get("status") == "running":
             incoming = [d for d in (view.get("deals") or {}).get("open") or [] if d.get("to") == self.client.player_id]
@@ -380,6 +389,7 @@ class AgentCivMCP:
                 raise ToolError(f"{e.message}. Call get_state to see the current turn.") from None
             raise
         self.last_turn = max(self.last_turn, res["turn"])
+        self.submitted_turn = res["turn"]
         lines = [f"Turn {res['turn']}: {res['accepted']} order(s) accepted, {len(res['errors'])} rejected."]
         for err in res["errors"]:
             idx = err.get("index", -1)

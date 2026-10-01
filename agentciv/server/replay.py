@@ -104,6 +104,24 @@ class FrameStore:
         self._compact.append(zlib.compress(dumps(compact_view(view, self.static)), ZLEVEL))
         self.raw_bytes += len(view_bytes)
 
+    def append_blobs(self, zfull: bytes, zpublic: bytes | None = None) -> None:
+        """Append a frame from its compressed blobs (as returned by
+        :meth:`last_blobs`; ``zpublic`` None = same as the full view)."""
+        pub = zlib.decompress(zpublic if zpublic is not None else zfull)
+        view = json.loads(pub)
+        if self.static is None:
+            self.static = static_parts(view)
+        self._full.append(zfull)
+        self._public.append(zfull if zpublic is None else zpublic)
+        self._compact.append(zlib.compress(dumps(compact_view(view, self.static)), ZLEVEL))
+        self.raw_bytes += len(pub) if zpublic is None else len(zlib.decompress(zfull))
+
+    def last_blobs(self) -> tuple[bytes, bytes | None]:
+        """Compressed (full, public) blobs of the newest frame; public is None
+        when it equals the full view (used to persist frames of live games)."""
+        full, public = self._full[-1], self._public[-1]
+        return full, (None if public is full else public)
+
     def memory_bytes(self) -> int:
         extra = sum(len(p) for f, p in zip(self._full, self._public) if p is not f)
         return sum(map(len, self._full)) + sum(map(len, self._compact)) + extra

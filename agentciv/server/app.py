@@ -163,11 +163,17 @@ class AgentCivServer(ThreadingHTTPServer):
 
 def create_server(host: str = "127.0.0.1", port: int = 8765, data_dir: str = "data",
                   web_dir: str | Path | None = None, open_ratings: bool = False,
-                  spectator_key: str | None = None) -> AgentCivServer:
+                  spectator_key: str | None = None, restore: bool = True) -> AgentCivServer:
     """Create (but don't start) a server. ``port=0`` picks a free port.
-    ``open_ratings`` rates every ``rated`` game (see GameManager)."""
-    return AgentCivServer((host, port), GameManager(data_dir, open_ratings=open_ratings), web_dir,
+    ``open_ratings`` rates every ``rated`` game (see GameManager).
+    ``restore`` resumes the games checkpointed in ``<data_dir>/live`` by an
+    earlier server process (their ids and tokens stay valid)."""
+    manager = GameManager(data_dir, open_ratings=open_ratings, restore=False)
+    srv = AgentCivServer((host, port), manager, web_dir,  # bind first: a failed start must not touch the games
                          spectator_key=spectator_key)
+    if restore:
+        manager.restore_games()
+    return srv
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -266,7 +272,7 @@ class Handler(BaseHTTPRequestHandler):
         found = self.server.manager.resolve_token(token)
         if found is None:
             raise ApiError(401, "invalid token: use the token returned by POST /api/quickmatch or "
-                                "/api/games/{id}/join (tokens do not survive a server restart)")
+                                "/api/games/{id}/join")
         if found[0] != game_id:
             raise ApiError(403, f"this token belongs to game {found[0]}, not {game_id}")
         return found[1]
@@ -538,17 +544,37 @@ class Handler(BaseHTTPRequestHandler):
 
 def serve(host: str = "127.0.0.1", port: int = 8765, data_dir: str = "data",
           web_dir: str | Path | None = None, open_ratings: bool = False,
-          spectator_key: str | None = None) -> None:
-    """Run the server in the foreground until Ctrl-C."""
-    srv = create_server(host, port, data_dir, web_dir, open_ratings=open_ratings, spectator_key=spectator_key)
+          spectator_key: str | None = None, restore: bool = True) -> None:
+    """Run the server in the foreground until Ctrl-C (or SIGTERM): games in
+    progress are checkpointed and resume on the next start."""
+    srv = create_server(host, port, data_dir, web_dir, open_ratings=open_ratings,
+                        spectator_key=spectator_key, restore=restore)
     log.info("AgentCiv server on %s (data: %s, web: %s)", srv.url, data_dir, srv.web_dir)
+    if srv.manager.restored:
+        log.info("resumed %d game(s) from checkpoints: %s", len(srv.manager.restored),
+                 ", ".join(srv.manager.restored))
+    _handle_sigterm()
     print(f"AgentCiv server listening on http://{host}:{srv.server_address[1]}  "
           f"(GUI: {srv.url}/ , API index: {srv.url}/api)", flush=True)
     try:
         srv.serve_forever(poll_interval=0.25)
     except KeyboardInterrupt:
-        print("\nshutting down…", flush=True)
+        print("\nshutting down (games in progress are checkpointed)…", flush=True)
     finally:
         srv.manager.shutdown()
         srv.server_close()
         time.sleep(0.05)
+
+
+def _handle_sigterm() -> None:
+    """Treat SIGTERM like Ctrl-C, so ``kill``/systemd/docker stops write the
+    final checkpoints (only possible from the main thread)."""
+    import signal
+
+    def raise_interrupt(signum, frame):
+        raise KeyboardInterrupt
+
+    try:
+        signal.signal(signal.SIGTERM, raise_interrupt)
+    except (ValueError, OSError, AttributeError):  # not the main thread / unsupported platform
+        pass

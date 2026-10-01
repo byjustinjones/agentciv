@@ -24,6 +24,12 @@ Deal propose/counter/reject ``message`` fields have a 300-character limit;
 say/message text has a 500-character limit. ``deal --help`` prints this help.
 State summaries print factual ALERT lines first. Compact summaries include
 changes from the latest turn events and the previous saved view.
+
+Server restarts are ridden out: every command retries while the server is
+unreachable (up to ``$AGENTCIV_RETRY_SECONDS``, default 600) and prints one
+"server unavailable, retrying..." line to stderr. Running games resume with the
+same credentials; if a restart lost orders you had submitted, ``next`` returns
+at once for that turn so you can submit again.
 """
 from __future__ import annotations
 
@@ -45,6 +51,21 @@ HOME = Path(os.environ.get("AGENTCIV_HOME", Path.home() / ".agentciv"))
 FIX_WINDOW = float(os.environ.get("AGENTCIV_FIX_WINDOW", "60"))
 
 
+_retry_noted = False
+
+
+def _retry_notice(message: str) -> None:
+    """Called by the client before each retry: say so once per command."""
+    global _retry_noted
+    if not _retry_noted:
+        _retry_noted = True
+        print("server unavailable, retrying...", file=sys.stderr, flush=True)
+
+
+def _new_client(**kw) -> AgentCivClient:
+    return AgentCivClient(URL, on_retry=_retry_notice, **kw)
+
+
 def _creds_path(name: str) -> Path:
     return HOME / f"{name}.json"
 
@@ -54,7 +75,7 @@ def _client(name: str) -> tuple[AgentCivClient, dict]:
     if not path.exists():
         sys.exit(f"no credentials for {name!r}; run: join {name} GAME_ID")
     creds = json.loads(path.read_text())
-    c = AgentCivClient(URL, token=creds["token"])
+    c = _new_client(token=creds["token"])
     c.game_id, c.player_id = creds["game_id"], creds["player_id"]
     return c, creds
 
@@ -102,7 +123,7 @@ def cmd_join(name: str, game_id: str) -> None:
         if creds.get("game_id") == game_id:
             print(f"already joined {game_id} as {creds['player_id']}; use next")
             return
-    c = AgentCivClient(URL)
+    c = _new_client()
     res = c.join(game_id, name)
     creds = {"game_id": res["game_id"], "player_id": res["player_id"], "token": res["token"]}
     _save(name, creds)  # retain the token even if the initial state request fails
@@ -203,6 +224,7 @@ def cmd_inbox(name: str, seconds: float = 0.0, all_history: bool = False) -> Non
         _save(name, creds)
     res = c.inbox(since=0 if all_history else creds["seq"], timeout=seconds)
     items = res.get("items", [])
+    # the server's seq (it may be lower than ours after a restart from a checkpoint: follow it)
     creds["seq"] = res.get("seq", creds.get("seq", 0))
     _save(name, creds)
     if not items:
@@ -231,17 +253,30 @@ def cmd_next(name: str, compact: bool = False) -> None:
     c, creds = _client(name)
     acted = creds.get("acted_turn", -1)
     deadline = time.time() + 900
+    replayed = False
     while time.time() < deadline:
         view = c.state()
         if _print_eliminated(view, c.player_id):
             return
         status = view.get("status")
-        if status == "finished" or (status == "running" and view.get("turn", 0) > acted):
+        turn = view.get("turn", 0)
+        you = view.get("you") or {}
+        if status == "finished" or (status == "running" and turn > acted):
+            break
+        if status == "running" and you.get("alive", True) and you.get("submitted") is False:
+            # turn <= acted but no orders on the server: it restarted from a checkpoint taken before
+            # them, so this turn is being played again
+            replayed = True
+            creds["acted_turn"] = turn - 1
+            _save(name, creds)
             break
         if status == "lobby":
             time.sleep(2)
         else:
-            c.wait(since_turn=view.get("turn", 0), timeout=60)
+            c.wait(since_turn=turn, timeout=60)
+    if replayed:
+        print(f"Note: the server restarted and turn {view.get('turn')} is being played again; your orders "
+              "for it were lost. Submit them again.\n")
     view = _print_state(c, name, creds, compact, view)
     if view.get("status") == "finished":
         print("\nGAME OVER:", json.dumps(view.get("victory", {}).get("result")))
@@ -257,7 +292,7 @@ def main(argv: list[str]) -> None:
         return
     try:
         if cmd == "rules":
-            print(AgentCivClient(URL).rules())
+            print(_new_client().rules())
         elif cmd == "join":
             cmd_join(args[0], args[1])
         elif cmd == "state":
@@ -285,6 +320,8 @@ def main(argv: list[str]) -> None:
         sys.exit(f"missing argument for {cmd!r}\n{__doc__}")
     except ApiError as e:
         sys.exit(f"server error: {e}")
+    except OSError as e:
+        sys.exit(f"server unreachable ({URL}): {e}")
 
 
 if __name__ == "__main__":

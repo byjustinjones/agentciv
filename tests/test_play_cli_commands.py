@@ -113,7 +113,8 @@ def test_join_initializes_inbox_cursor_from_current_view(cli, capsys, previous_g
     }
     client.state.return_value = {"diplomacy_seq": 47}
     module.main(["join", "A", "new-game"])
-    factory.assert_called_once_with("http://unused.invalid")
+    factory.assert_called_once()
+    assert factory.call_args.args == ("http://unused.invalid",)   # plus retry settings (server restarts)
     client.join.assert_called_once_with("new-game", "A")
     client.state.assert_called_once_with()
     assert load_creds(module) == {
