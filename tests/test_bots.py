@@ -245,3 +245,38 @@ def test_world_follows_treaty_limits_and_the_break_notice():
     assert not w.break_notice("p1", "p2") and w.can_enter_fn("p1")(g.idx(7, 2))
     p = Plan(w)
     assert not p.propose("p2", 20) and not p.propose("p3", 20)     # cooldown; no bank for the bond
+
+
+def _raid_setup(streak):
+    g = sandbox(3)
+    g.add_city(2, 2, "p1", capital=True)
+    g.add_city(16, 16, "p2", capital=True)
+    g.add_city(6, 2, "p2")                       # a plain city close to p1
+    g.add_city(2, 16, "p3", capital=True)
+    g.player("p1").resources.update(gold=3000, food=2000, wood=1000, stone=500, influence=200)
+    g.player("p2").bank, g.player("p2").economic_streak = C.BANK_VICTORY, streak
+    g._invalidate()
+    bot = get_bot("strategist")
+    bot.trade_setup(World(g.player_view("p1")))
+    bot.etas, bot.my_eta = {"p2": {"economic": 40}, "p3": {}}, 60
+    return g, bot
+
+
+def test_strategist_raids_any_city_of_a_streaking_rival():
+    """Rules §11: the loss of any city resets a streak, so a plain city of a
+    rival on a streak is a raid target; without a streak it is not."""
+    g, bot = _raid_setup(0)
+    assert bot.choose_raid({}) is None
+    g, bot = _raid_setup(3)
+    raid = bot.choose_raid({})
+    assert raid and raid["owner"] == "p2" and g.xy(raid["tgt"]) == (6, 2)
+
+
+def test_bots_play_without_relic_thresholds():
+    g = new_game(3)
+    assert "relic_turns" not in g.player_view("p1")["victory"]["thresholds"]
+    bots = {p.id: get_bot(name) for p, name in zip(g.players, ("strategist", "economist", "turtle"))}
+    for _ in range(30):
+        for pid, bot in bots.items():
+            assert not g.submit_orders(pid, bot.act(g.player_view(pid)))
+        g.step()

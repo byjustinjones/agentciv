@@ -70,7 +70,7 @@ Resolution phases, in order:
 7. **Economy** — yields ×season, deposit depletion, influence income,
    contract instalments (§13.3), upkeep & starvation, storage caps, market
    reversion.
-8. **Bookkeeping** — eliminations, relic streaks, treaty expiry, treaty
+8. **Bookkeeping** — eliminations, economic and influence streaks, treaty expiry, treaty
    proposal and deal expiry (§13.2), victory checks, score. `turn += 1`.
 
 ## 3. Map
@@ -124,7 +124,9 @@ Resolution phases, in order:
   is (nearly) equidistant from the two capitals flanking it and every capital
   sees the same sorted relic distances, keeping the symmetries of the start
   layout; relics are ≥ 3 apart (Chebyshev). Relics are never claimed: they
-  are taken by occupation (§7).
+  are taken by occupation (§7). Placement still measures fairness over the
+  `ceil(R/2)` nearest relics (`rules.relics_needed`, kept from when relics
+  were a victory condition), so every seed's map is unchanged.
 * **How equal is it, per player count?** Exact equality needs a grid
   symmetry mapping every start onto every other; odd `n ≥ 7` (and to a
   lesser degree 10 and 12) have none, so there the relic and nearest-rival
@@ -176,8 +178,8 @@ Resources: `food`, `wood`, `stone`, `gold` (tradable) and `influence`
   If food would go below 0, food becomes 0 and the player loses
   `ceil(deficit / 2)` units (highest-upkeep units first, from their largest
   stack first). This is **starvation**.
-* **Influence income**: city 1 (+1 capital), temple 1, each relic owned 2
-  (guarded or not).
+* **Influence income**: city 1 (+1 capital), temple 1, each relic owned 3
+  while guarded (owner's units on it at the end of the turn), 1 otherwise.
 
 ### Tile improvements (one per owned non-city tile)
 
@@ -316,21 +318,26 @@ subject to the walls multiplier.
 4. **Capture**: after battles all units left on a tile belong to players at
    peace with each other. If the tile is owned by Q, Q has no units there and
    some of them are hostile to Q, the tile becomes P's, where P is the one of
-   those hostile to Q with the largest military power (Σ count·strength; ties:
-   lowest seat) — so allies attacking a city together capture it. A city is
+   those hostile to Q with the largest military power (Σ count·strength; if
+   the two largest are equal, nobody captures the tile that turn) — so allies
+   attacking a city together capture it. A city is
    captured only if its garrison was defeated. On city capture: the city's
    walls drop one level; tiles owned by Q in the city's Chebyshev radius 1
    transfer to P (except tiles holding units of another player); a wonder in
    the city is destroyed; if it was Q's original capital, P plunders 50%
    (floored) of Q's food, wood, stone and gold. Relic tiles are never
-   transferred with a city. Captures are checked on every tile holding units,
+   transferred with a city. The capture of any city sets the economic and
+   influence streaks of the player who lost it to 0 (`streak_ended` with
+   `reason: "city_lost"`, §8). Captures are checked on every tile holding units,
    so units left on a hostile tile capture it on the next turn.
 5. **Relics** change hands only by occupation: if units stand on a relic
    tile, its owner (if any) has none there and some of them are hostile to
    the owner (anyone, for an unowned relic), P chosen as in 4 becomes its owner (`tile_captured` event with
    `"relic": true`, `from` may be null). A relic is **guarded** while its
-   owner has units on it; owned relics give influence and score whether
-   guarded or not, but only guarded relics count for the relic victory.
+   owner has units on it. Owned relics give 15 score and influence (3 per
+   turn guarded, 1 unguarded); they are not a victory condition (they were
+   one, 3 of 6 guarded for 16 turns, until the g7–g10 retune: see
+   BALANCE.md).
 
 **Treaties.** `propose_treaty {to, turns (20–40), bond?}`; the target may
 `accept_treaty {from, bond?}` on the next turn. While active, the two players
@@ -352,8 +359,8 @@ Treaties are scarce and breaking one is priced (constants `TREATY_*`):
   plus 50 × its `betrayals`. At signing or renewal, pledges on all of a
   player's treaties together must not exceed its bank; later bank losses
   (a capture, a default seizure, another break) do not reduce a bond, which a
-  break then pays from bank, gold and `influence_debt`. Pledged gold stays in the bank (it counts for the
-  bank victory and earns interest); it is recorded, not moved. Bonds are public
+  break by its pledger then removes from bank, gold and `influence_debt`. Pledged gold stays in the bank (it counts for the
+  bank victory); it is recorded, not moved. Bonds are public
   (`treaties[].bond`). A renewal without a new offer keeps the old bond (raised
   to the required minimum).
 * **One check.** `Game.treaty_sign_problem(a, b, bonds)` (cooldown, slots
@@ -365,28 +372,38 @@ Treaties are scarce and breaking one is priced (constants `TREATY_*`):
   `released`, the new public `treaty_released {a, b}`).
 * **Breaking.** `break_treaty {with}` ends it in phase 2. With b = earlier
   betrayals and p = min(40, 10·(1+b)) %: pay 50·(1+b) influence (must be
-  held); lose p% of legacy; pay the partner, as gold, p% of the bank, the own
-  bond on the treaty, and for each deal that signed or renewed the treaty the
-  net start-price value of the lump resources the partner handed over times the
-  unexpired share of that deal's peace (`deals.peace_refund`), from the bank,
-  then gold, the rest as `influence_debt` (1 per 2 gold); bank gold paid
-  beyond the bank share and 50·b of the bond (the offered bond and the
-  refunds) also costs `bank_fee` = 1 influence per 2 gold, from influence
-  left after the break cost, then `influence_debt`. That fee prices a break
-  arranged with an ally (a large offered bond, or a peace deal refunded from
-  the bank) like a contract default, the other way bank gold leaves the
-  bank; without it, a break moved the whole bank to an ally's spendable gold
-  for 50 influence. Cancel that deal's
-  contracts the partner pays the breaker (`contract_cancelled`, parties only);
-  end the influence streak (the break turn's end does not count); betrayals +1.
-  The pair cannot sign again for 15 turns (`treaty_cooldowns`) and stays
-  movement-restricted during the break turn and the next. If both partners
-  break in the same turn, each pays in full and each is paid by the other.
-  `you.treaty.break_preview` lists these amounts per own treaty. Under fog,
-  `treaty_broken` shows `refund`, `paid`, `bank_fee`, `debt` and `cancelled`
-  only to the two parties; the public bank still shows the bank part of the
-  payment, so when the bank covers it all a third party can derive them
-  (RULES §14 lists this).
+  held); lose p% of legacy; pay the partner, as gold, for each deal that signed
+  or renewed the treaty the net start-price value of the lump resources the
+  partner handed over times the unexpired share of that deal's peace
+  (`deals.peace_refund`, the `refund`); then p% of the bank and the own bond on
+  the treaty are **removed from the game** (`removed`; nobody receives them).
+  Refunds are paid first, then the removed amounts, from the bank, then gold,
+  the rest as `influence_debt` (1 per 2 gold). Bank gold used for refunds also
+  costs `bank_fee` = 1 influence per 2 gold, from influence left after the
+  break cost, then `influence_debt`. That fee prices a break arranged with an
+  ally (a peace deal refunded from the bank) like a contract default, the other
+  way bank gold leaves the bank. Removing the share and bond (rather than paying
+  them to the partner, as before the g7–g10 retune) keeps a break from feeding
+  the victim's bank race and makes a large bond useless for moving bank gold to
+  an ally. Cancel that deal's contracts the partner pays the breaker
+  (`contract_cancelled`, parties only); end the influence streak (the break
+  turn's end does not count); betrayals +1. The pair cannot sign again for 15
+  turns (`treaty_cooldowns`) and stays movement-restricted during the break turn
+  and the next (`treaty_cooldowns[].notice_until`). If both partners break in
+  the same turn, each pays its own bill.
+* **Free break.** If the partner shows `economic_streak` or `influence_streak`
+  ≥ 1 at the start of the turn (the set is taken before any break of the phase
+  is processed), the break costs no influence, legacy, bank share or bond,
+  adds no betrayal and does not end the breaker's influence streak; refunds are
+  still paid (`"free": true`), and the movement block lasts for the break turn
+  only (`Game.break_notice_turns[pair] = 0`). A treaty is no shield for a
+  player one streak away from winning: anyone at peace with the leader can turn
+  on it at once and at no cost. `you.treaty.break_preview` lists these amounts
+  per own treaty (`free`, `gold_to_partner` = refunds, `gold_removed`). Under
+  fog, `treaty_broken` shows `refund`, `paid`, `removed`, `bank_fee`, `debt`
+  and `cancelled` only to the two parties; the public bank still shows the bank
+  part of the payment, so when the bank covers it all a third party can derive
+  them (RULES §14 lists this).
 
 **Disband** `{at, units}` removes your units (no refund).
 
@@ -400,14 +417,20 @@ or after `max_turns` (default 150). Thresholds for n players:
 | conquest   | own ≥ `floor(n/2)+1` original capitals (a majority; n ≥ 4) or all of them (n ≤ 3), or be the last player standing |
 | wonder     | complete wonder stage 5 |
 | influence  | legacy ≥ L at 10 consecutive turn-ends while owning the original capital |
-| relics     | own **and guard** (units on the tile) ≥ `ceil(R/2)` relics (`floor(R/2)+1` if R < 4) at 16 consecutive turn-ends |
 | economic   | bank ≥ B at 10 consecutive turn-ends while owning the original capital |
 | score      | highest score when `max_turns` is reached |
 
 **Bank and legacy.** The `bank` order moves gold from stock into the bank
-(at most 10·cities + 10·cities-with-market_hall per turn, shared by all `bank`
-orders of the turn). Banked gold cannot be spent, traded or withdrawn; it pays
-floor(bank/100) gold interest in phase 7 (part of `income.gold`). Legacy is the
+(at most 50 + 10·cities-with-market_hall per turn while owning a city,
+`you.bank_limit`, shared by all `bank` orders of the turn). Banked gold cannot
+be spent, traded or withdrawn and pays no interest. A turn end counts toward
+the economic streak only if at least `you.streak_deposit` = ceil(bank_limit/2)
+gold was banked that turn (the limit as of the start of phase 4); otherwise the
+streak keeps its value and a public `streak_paused {player, condition,
+reason: "deposit", banked, needed}` is emitted (only while the streak is ≥ 1).
+A leader cannot bank 3600 and then stop: it has to keep paying in every turn of
+the hold. Losing any city in a turn sets both streaks to 0 (`reason:
+"city_lost"`, also when the player takes a city the same turn). Legacy is the
 total seasoned influence income received (added in phase 7 before contract
 instalments); spending influence never lowers it. Capturing an original capital
 from its original owner moves floor(bank·0.5) to the captor as gold
@@ -420,19 +443,19 @@ pool_init gold/resource), not the spot price, so neither party can move the
 seizure with same-turn market orders. Because the seizure is paid as gold on
 hand, a default with a cooperating payee is the one way banked gold leaves the
 bank; the fine (1 influence per 2 gold of that value) is what prices it.
-Elimination ends every streak (`streak_ended` with `reason: "eliminated"`). B = 3600 and L = 3000 at max_turns 150, scaled by
+Elimination ends every streak (`streak_ended` with `reason: "eliminated"`). B = 3600 and L = 2700 at max_turns 150, scaled by
 min(1, max(0.5, max_turns/150)) and floored to a multiple of 10. Streaks
-(`economic_streak`, `influence_streak`) update in phase 8 after relic streaks;
-`streak_started` / `streak_ended` are public events. Bank, legacy and streaks
-are public in fog games too (interest in the public income reveals the bank;
-legacy is the running total of public income).
+(`economic_streak`, `influence_streak`) update in phase 8 after eliminations;
+`streak_started` / `streak_ended` / `streak_paused` are public events. Bank,
+legacy and streaks are public in fog games too (legacy is the running total of
+public income).
 
 Balance rationale and measurements: docs/BALANCE.md (each peaceful race takes
 roughly 70–110 turns when played well).
 
 Several players meeting conditions on the same turn → highest score wins
 (then lowest seat index). The reported condition is the first met in the order
-conquest, wonder, relics, influence, economic. Conquest needs n ≥ 2 players.
+conquest, wonder, influence, economic. Conquest needs n ≥ 2 players.
 
 **Score** = 2·tiles + 15·cities + 50·capitals_held + 60·wonder_stage +
 floor(influence/6) + floor(gold/25) + 15·relics_held + floor(military_power/20)
@@ -445,8 +468,7 @@ eliminated players, latest-eliminated first.
 
 **Victory progress** reported per player as 0.0–1.0 per condition (conquest:
 capitals/required, wonder: stage/5, influence: 0.8·min(1, legacy/L) +
-0.2·influence_streak/10, relics: streak/16 if currently guarding the required
-count else 0, economic: 0.8·min(1, bank/B) + 0.2·economic_streak/10, score:
+0.2·influence_streak/10, economic: 0.8·min(1, bank/B) + 0.2·economic_streak/10, score:
 turn/max_turns).
 
 ## 9. Orders (JSON)
@@ -504,7 +526,7 @@ diplomacy). Once the game is finished — or with `full=True` (offline
 tournaments, finished replays) — it shows all messages, offers, proposals and
 events. Views are freshly built on
 every call (callers may mutate them). Additional fields beyond the example:
-top-level `name`; `you.alive`, `you.market_fee`, `you.bank_limit`, `you.capital` ([x,y]);
+top-level `name`; `you.alive`, `you.market_fee`, `you.bank_limit`, `you.streak_deposit`, `you.capital` ([x,y]);
 `players[].bank`, `.legacy`, `.economic_streak`, `.influence_streak` (§8);
 `players[].upkeep`; `players[].relics_guarded` and
 `map.relics[].guarded` (relics whose owner has units on them);
@@ -529,9 +551,9 @@ deals (no tiles, contract or peace) the viewer may see, as
     {"id":"p1","name":"Alpha","color":"#e6194b","alive":true,"eliminated_turn":null,
      "resources":{...}, "income":{...}, "cities":2,"tiles":14,"capitals_held":1,
      "military_power":30,"units":{"infantry":3,"archer":0,"cavalry":0,"siege":0},
-     "wonder_stage":0,"relics_held":0,"relics_guarded":0,"relic_streak":0,"betrayals":0,"score":61,
+     "wonder_stage":0,"relics_held":0,"relics_guarded":0,"betrayals":0,"score":61,
      "submitted": true,
-     "victory_progress":{"conquest":0.33,"wonder":0.0,"influence":0.02,"relics":0.0,"economic":0.03,"score":0.08}}
+     "victory_progress":{"conquest":0.33,"wonder":0.0,"influence":0.02,"economic":0.03,"score":0.08}}
   ],
   "map": {"width":22,"height":22,
           "terrain":["..ff.h~~...", "..."],
@@ -547,15 +569,14 @@ deals (no tiles, contract or peace) the viewer may see, as
              "pools":{"food":{"resource":2400,"gold":2400}, "...":{}},
              "history":[{"turn":11,"prices":{"food":1.0,"wood":1.5,"stone":2.0}}]},
   "treaties": [{"a":"p1","b":"p2","until_turn":40,"signed_turn":12,"bond":{"p1":0,"p2":30}}],
-  "treaty_cooldowns": [{"a":"p2","b":"p3","until_turn":27}],
+  "treaty_cooldowns": [{"a":"p2","b":"p3","until_turn":27,"notice_until":13}],
   "treaty_proposals": [{"from":"p3","to":"p1","turns":20,"turn":11}],
   "trade_offers": [{"id":"d7","from":"p2","to":"p1","give":{"wood":50},"want":{"gold":40},"turn":12,"expires_turn":14}],
   "deals": {"open":[...], "recent":[...], "log":[...]}, "contracts": [...], "diplomacy_seq": 57,
   "messages": [{"turn":11,"from":"p2","to":"all","text":"hello"}],
   "events": [{"turn":11,"type":"battle","x":5,"y":5,"sides":["p1","p2"],"winner":"p1","losses":{...}}],
-  "victory": {"thresholds":{"conquest_capitals":4,"wonder_stage":5,"legacy":3000,
-                            "relics_needed":3,"relics_total":6,"relic_turns":16,
-                            "bank":3600,"streak_turns":10,"max_turns":150},
+  "victory": {"thresholds":{"conquest_capitals":4,"wonder_stage":5,"legacy":2700,
+                            "relics_total":6,"bank":3600,"streak_turns":10,"max_turns":150},
               "result": null},
   "costs": { "units":{...}, "buildings":{...} }
 }

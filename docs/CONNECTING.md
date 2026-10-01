@@ -69,26 +69,42 @@ python examples/play_cli.py rules
 python examples/play_cli.py deal --help
 ```
 
+`orders` holds the turn open (as a draft, for `$AGENTCIV_FIX_WINDOW` seconds,
+default 60) when some orders are rejected or when a market buy is estimated to
+depend on gold from a sale of a resource that clears later (the market clears
+food, then wood, then stone); the queued list is confirmed automatically
+afterwards unless another `orders` call replaces it. `deal` does not send an
+`accept` whose first contract instalment exceeds the projected stock (on hand +
+this turn's income − food upkeep − instalments already owed ± what the deal hands
+over at once) unless `--force` is given; the warning adds that a default resets
+the economic streak and seizes from the bank when the player is on an economic
+streak or at the bank target. The MCP `respond_to_deal` tool sends the accept
+and returns the same warnings.
+
 `join` returns the existing player when that name's saved credentials match the
 game. Its inbox cursor starts at the current view's `diplomacy_seq`; older files
 without a cursor initialise it on the first `inbox` call. `--all` explicitly reads
 from sequence zero. Inbox calls save the returned position.
 
 Both state summary modes put `ALERT:` lines first for unoccupied owned relics,
-visible stacks without a treaty adjacent to owned cities or relics (four-direction
-adjacency), recently broken or soon-ending treaties, full treaty slots, treaty
+visible stacks without a treaty four-direction adjacent to owned relics, visible
+stacks without a treaty within Chebyshev distance 2 of an owned city (with units,
+military power and distance to the nearest own city), recently broken or soon-ending treaties, full treaty slots, treaty
 cooldowns with other players (the first turn a treaty may be signed again), a
 required treaty bond larger than the unpledged bank, active victory streaks,
-contract instalments exceeding current holdings, and negative projected food at
-the next resolution. Streak completion turns assume the condition stays met.
-Food projections use current income and upkeep before any new orders or payments.
+contract instalments exceeding current holdings, the deposit an economic streak turn
+needs while the bank is at the target, and negative projected food at the next
+resolution (contract food paid and received included). Streak completion turns assume the condition stays met.
+Food projections use current income, upkeep and contract instalments before any new orders.
 Alerts use the player's view, including its fog restrictions.
 
 Compact mode lists the turn, season, deadline, own resources/income/upkeep, own
-cities and armies, other players' visible statistics, own treaties (slots used and
-available, end turns and bonds) and treaty cooldowns, market prices, and changes.
+bank/allowance/streaks/streak deposit and legacy, own cities and armies, other players' visible statistics, own treaties (slots used and
+available, end turns and bonds) and treaty cooldowns, market prices, the battles
+of the latest turn the player took part in, and changes.
 It saves a small snapshot with the credentials. The changes block
-uses the latest resolved turn's events and public relic ownership/streak changes
+uses the latest resolved turn's events (including `streak_paused` and streak-end
+reasons) and public relic ownership changes
 since the last state summary; repeated summaries omit already-seen events. If
 several turns pass between summaries, intervening events are not available from
 the current view. `next` and `orders` print the elimination turn when the player

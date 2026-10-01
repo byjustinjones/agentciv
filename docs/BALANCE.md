@@ -27,6 +27,9 @@ Measured with the mixed field `strategist,economist,rusher,turtle,random,random`
 
 ### Relics (placement, control, victory)
 
+(The relic victory below was removed in the g7–g10 retune, §9; placement and
+control are unchanged, income is now 3 guarded / 1 unguarded.)
+
 | | before | now |
 |---|---|---|
 | count | `n//2 + 2` | `n` — one relic in every gap between two neighbouring capitals |
@@ -391,11 +394,7 @@ B). The
 * **5-player positional fairness** (one short run): slot 3 won 35% of
   5-strategist games. 5 starts on a diamond have only a mirror symmetry;
   relic distances per slot are (5,5,8) / (5,5,9) / (5,6,9).
-* **Early relic wins.** Relic victories come early (median turn ~32): when
-  nobody contests the relics near a strategist it can hold three by turn ~16.
-  The peaceful bots only react once a streak runs (and never through a
-  treaty partner's land). Stronger counter-play in the specialists, or relics
-  that only start counting after some turns, would push them later.
+* **Early relic wins** (resolved by removing the relic victory, §9).
 * **Odd player counts ≥ 7** have no start symmetry: at 9 players relic
   distances differ by up to 4 steps between capitals (DESIGN §3 table).
 * **Influence and wonder are knife-edge.** Small changes of the influence
@@ -417,6 +416,10 @@ B). The
   (field B: strategist 57.5% instead of 54.2%).
 
 ## 7. Economic and influence victories: bank, legacy and streaks
+
+(Superseded in part by the g7–g10 retune, §9: allowance 50 + 10 per market
+hall, no interest, a deposit needed for every streak turn, city loss resets the
+streaks, L = 2700.)
 
 The stock thresholds (13500 gold, 3350 influence) were out of reach for LLM
 players (the best reached 13.5% of the gold target) and gave no warning. They
@@ -493,6 +496,10 @@ six-field mix is the balance reference.
 
 
 ## 8. Treaties: slots, bonds and priced breaks
+
+(Since the g7–g10 retune, §9, the bank share and bond of a break are removed
+from the game instead of paid to the victim, and a break against a partner on
+a victory streak is free.)
 
 Bots signed ~23 treaties per 6-player game and a leader was at peace with
 about half the field; breaking cost a flat 50 influence, so the rational

@@ -6,14 +6,16 @@ every turn and adapts:
 * **Victory ETA model.** For itself and every rival it estimates how many
   turns each victory condition is away (economic and influence from the
   observed per-turn growth of gold/influence, wonder from the value of the
-  remaining stages and the observed stage pace, relics from walking
-  distances and guarded relics, conquest from capitals held). Its own race is
-  the fastest of economic / wonder / influence (relics only when clearly
-  faster: relic streaks get contested), with hysteresis; once the ETA is
+  remaining stages and the observed stage pace, conquest from capitals held;
+  under the old rules with a relic victory also relics, from walking
+  distances and guarded relics). Its own race is the fastest of economic /
+  wonder / influence (old rules: relics only when clearly faster, relic
+  streaks get contested), with hysteresis; once the ETA is
   close it commits (reserves wonder stages and buys what they need, builds
   temples everywhere, or hoards gold).
 * **Raids.** It captures a rival capital (plunder: half the victim's
-  resources, conquest progress) or a wonder city (the wonder is destroyed)
+  resources, conquest progress), a wonder city (the wonder is destroyed) or
+  any city of a rival on an economic/influence streak (the loss resets it)
   only when the value clearly exceeds the cost of a strike force that beats
   the defenders, their neighbours and one turn of emergency recruiting. The
   force gathers out of the target's sight and strikes in one go (breaking a

@@ -2,7 +2,7 @@
 
 A competitive, turn-based **resource-management strategy game for AI agents**.
 5–8 agents (2–12 supported) share a map, grow economies, expand, trade and
-negotiate — and fight only if they choose to. There are six ways to win, so
+negotiate — and fight only if they choose to. There are five ways to win, so
 builders, traders, diplomats and conquerors can all come out on top.
 
 The game is built so that **skill beats luck**: combat has no dice, all resources,
@@ -21,8 +21,9 @@ server, the SDK or the MCP server.
 * **Expansion.** Claim adjacent tiles with influence; settle new cities.
 * **Market & diplomacy.** A shared batch-auction market per resource, messages, and
   binding peace treaties. Each player holds at most about half as many treaties
-  as it has opponents; breaking one costs influence and legacy, pays the partner
-  from the breaker's bank and bonds, and is public (rules §9).
+  as it has opponents; breaking one costs influence and legacy, removes part of the
+  breaker's bank and its bond from the game, and is public — except that breaking
+  with a player on a victory streak is free (rules §9).
 * **Barter.** Agents haggle live within a turn — propose, counter, accept, reject —
   over resources, land, per-turn contracts (loans, tribute, rent) and peace. Accepted
   deals settle at once; executed deals and each player's reputation (deals honoured,
@@ -31,12 +32,13 @@ server, the SDK or the MCP server.
   rock-paper-scissors counter system, deterministic Lanchester-style battles, city
   walls and capture.
 * **Victory.** First to reach any of: **conquest** (hold a majority of the original
-  capitals), **wonder** (complete 5 costly stages), **influence** (a legacy of 3000
+  capitals), **wonder** (complete 5 costly stages), **influence** (a legacy of 2700
   total influence income, held for 10 consecutive turns with your original capital),
-  **relics** (guard half the relics with your units for 16 consecutive turns),
   **economic** (3600 gold moved into your bank with `bank` orders, held for 10
-  consecutive turns with your original capital) — or the best **score** when the turn
-  limit (150) is reached. Thresholds are tuned so a well-played path takes ~70–100 turns and
+  consecutive turns with your original capital while still banking at least half the
+  per-turn allowance each turn) — or the best **score** when the turn limit (150) is
+  reached. Losing any city resets both streaks. Relics are contested sources of
+  influence and score, not a victory condition. Thresholds are tuned so a well-played path takes ~70–100 turns and
   every race is visible and contestable (see [docs/BALANCE.md](docs/BALANCE.md)).
 
 Full rules for agents: [docs/RULES.md](docs/RULES.md) (also served at

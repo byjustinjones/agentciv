@@ -103,7 +103,8 @@ more than 1.5x the market value it receives.
 
 ### economist (`economist.py`)
 * **Diplomacy:** accepts every treaty and proposes 25-turn treaties to
-  everyone — except to a player on (or one relic short of) a relic streak.
+  everyone — except, under the old relic rules, to a player on (or one relic
+  short of) a relic streak.
 * **Expansion:** picks city sites by the value of the tiles they would claim.
   It claims a path of tiles toward a site, settles it, and reserves the
   settlers' resources ahead of time so the market step doesn't sell them.
@@ -114,15 +115,17 @@ more than 1.5x the market value it receives.
 * **Market:** sells everything above small reserves every turn, and dumps at
   almost any price what would otherwise overflow the storage cap.
 * **Banking:** from turn 10 it banks the gold left after the turn's plan (up
-  to the bank limit, keeping 40 gold and the turn's contract instalments);
-  earlier steps leave the allowance untouched.
-* **Defence:** its weak spot. It keeps 2 units in the capital, never raises
-  walls, and when an army comes within 2 turns it recruits the best counter
-  from its stock, spending at most 15% of its gold per turn on emergency
-  food/wood purchases. A rich economist is a juicy target: capturing its
-  capital plunders half its gold and half its bank, and ends its streak.
-* **Relic streaks:** like every planner bot it attacks the weakest guarded
-  relic of a hostile player whose relic streak runs (see `counter_relics`).
+  to the bank limit, keeping 40 gold and the turn's contract instalments;
+  once the bank is at the target it keeps no reserve, since a streak turn
+  counts only with half the allowance banked); earlier steps leave the
+  allowance untouched.
+* **Defence:** its weak spot. It keeps 2 units in the capital (and, while on
+  or within 85% of a bank/legacy target, 2 in every other city, since the loss
+  of any city resets the streaks), never raises walls, and when an army comes
+  within 2 turns it recruits the best counter from its stock, spending at most
+  15% of its gold per turn on emergency food/wood purchases. A rich economist
+  is a juicy target: capturing its capital plunders half its gold and half its
+  bank, and taking any of its cities ends its streak.
 * **Trading:** offers its surplus (stock above its small keep levels) to the
   player who needs it most at a *fair* price (half of the estimated gain
   from the trade each — both save the market fee and slippage). A patient
@@ -202,32 +205,35 @@ It uses the economist's economy, then adds these behaviours on top:
    * **Wonder:** the remaining stage costs valued at market prices divided
      by production value, and (for rivals) the value of the stages built
      per turn since their first stage.
-   * **Relics:** the streak of guarded relics; for itself the walking
-     distance to the missing relics plus a stall penalty when a campaign
-     makes no progress.
+   * **Relics** (only in rules with a relic victory, i.e. replays of games
+     before the g7–g10 retune): the streak of guarded relics; for itself the
+     walking distance to the missing relics plus a stall penalty when a
+     campaign makes no progress.
    * **Conquest:** capitals held.
 
-   Its own race is the lowest ETA among economic, wonder and influence, plus
-   relics when that ETA ×1.5 is still the lowest (relic streaks are
-   contested), with hysteresis. Once the ETA is within 30 turns (45 for
+   Its own race is the lowest ETA among economic, wonder and influence (plus,
+   under the old rules, relics when that ETA ×1.5 is still the lowest), with
+   hysteresis. Once the ETA is within 30 turns (45 for
    influence, whose temples pay late) it commits:
    * **Wonder:** reserves the next stage (stone/wood up to the storage cap),
      buys the rest on the market in the build turn.
    * **Economic:** banks every turn (as the economist) and raises the bar
      for investments.
    * **Influence:** temples everywhere (buying their stone), influence kept.
-   * **Relics:** a campaign (see 3).
+   * **Relics** (old rules only): a campaign (see 3).
 2. **Raids.** Every other turn it looks for a rival original capital or
-   wonder city whose capture is worth at least twice the cost of the strike
+   wonder city — or any city of a rival on an economic or influence streak,
+   whose loss resets that streak — whose capture is worth at least twice the cost of the strike
    force (value: plunder = half the owner's resources, conquest progress,
    wonder denial, and a large bonus when the owner would otherwise win
    first). The force (siege against walls plus the cheapest of cavalry,
    infantry, archers or a mix) must beat the defenders, their neighbours and
    one turn of emergency recruiting (the owner's stock plus 20% of its gold).
    It gathers out of sight (3 tiles, 5 for an all-cavalry force), breaks a
-   treaty first if needed, then strikes; a raid that stalls is abandoned and
+   treaty first if needed (free against a player on a streak), then strikes; a raid that stalls is abandoned and
    that rival left alone for 15 turns. Raids are expensive, so they stay rare.
-3. **Relics.** Relics are taken by occupation. In a campaign it keeps a guard
+3. **Relics.** Relics are taken by occupation; they pay 3 influence a turn
+   guarded and 1 unguarded. In a campaign (old rules only) it keeps a guard
    on every held relic (at least 4 units, enough to hold against armies 5
    turns away), marches detachments onto the cheapest missing relics, fights
    for guarded ones and recruits what the guards need. Outside a campaign it
@@ -240,7 +246,8 @@ It uses the economist's economy, then adds these behaviours on top:
 5. **Diplomacy.** It proposes and accepts 40-turn treaties with militarily
    stronger players (and far-away ones that are not hoarding gold), strongest
    first since treaty slots are limited, never
-   with a player close to winning, running a wonder or a relic streak, or
+   with a player close to winning, running a wonder (or, under the old rules,
+   a relic streak), or
    with its raid target.
 6. **Market.** It sells surplus before it overflows the caps. Voluntary sales
    are split so that the batch price stays within about 8% of the spot price;
@@ -475,7 +482,7 @@ SDK (`agentciv/client.py`). A few tips from building these bots:
 
 * **Always submit**, even an empty list.
 * **Relics are occupied, not claimed**: stand on them, and keep units there
-  (only guarded relics count for the relic victory).
+  (a guarded relic pays 3 influence a turn, an unguarded one 1).
 * **Contested claims fail for everyone**: if a rival keeps claiming the same
   tile, try another one for a turn or two.
 * **Check `events`** for `order_failed` entries. Resources are only checked
