@@ -7,6 +7,8 @@ Layout under ``data_dir``::
     leaderboard.json         {"format": 2, "players": {name: {"mu","sigma","games","wins","total_place"}},
                               "applied": [game ids already rated in this pool]}
     leaderboard_fog.json     the same for fog-of-war games (own pool)
+    leaderboard_<track>.json the same for each evaluation track (tracks.py), plus "rules_sha256":
+                             the rules hash pinned by the track's first game in this data dir
     names.json               {casefolded name: sha256(key)}   (names registered with a key)
     live/                    checkpoints of lobbies and running games (see persist.py)
 
@@ -25,6 +27,7 @@ from pathlib import Path
 
 from .. import ratings
 from .replay import envelope
+from .tracks import valid_pool_name
 
 log = logging.getLogger("agentciv.server")
 
@@ -43,6 +46,25 @@ def _dumps(obj) -> bytes:
     return json.dumps(obj, separators=(",", ":")).encode()
 
 
+class RulesChanged(Exception):
+    """A track pool is pinned to other rules than the server's (see :meth:`Storage.pin_rules`)."""
+
+    def __init__(self, pool: str, pinned: str):
+        super().__init__(pool, pinned)
+        self.pool = pool
+        self.pinned = pinned
+
+
+class _Pool:
+    """One rating pool: players, the ledger of applied game ids, its file
+    and (track pools) the pinned rules hash."""
+
+    __slots__ = ("table", "applied", "path", "rules_sha256")
+
+    def __init__(self, table: dict, applied: set, path: Path, rules_sha256: str | None = None):
+        self.table, self.applied, self.path, self.rules_sha256 = table, applied, path, rules_sha256
+
+
 class Storage:
     """Replays and leaderboard persistence. Thread-safe."""
 
@@ -54,12 +76,15 @@ class Storage:
         self.fog_leaderboard_path = self.root / "leaderboard_fog.json"   # fog-of-war games (own pool)
         self.names_path = self.root / "names.json"
         self._lock = threading.Lock()
+        self._pool_lock = threading.Lock()  # loading a track pool file (never held with _lock)
         self._write_lock = threading.Lock()  # serialises replay-file writes (outside the index lock)
         self.replay_dir.mkdir(parents=True, exist_ok=True)
         self.index: dict[str, dict] = self._load_index()
         self._legacy: set[Path] = set()  # flat (pre-format-2) leaderboard files, backed up before the first rewrite
-        self.table, self._applied = self._load_pool(self.leaderboard_path)
-        self.fog_table, self._fog_applied = self._load_pool(self.fog_leaderboard_path)
+        self._pools: dict[str, _Pool] = {
+            "standard": self._load_pool(self.leaderboard_path),
+            "fog": self._load_pool(self.fog_leaderboard_path),
+        }
         self.claims: dict[str, str] = self._load_json(self.names_path, {})
 
     # ------------------------------------------------------------ helpers
@@ -75,20 +100,26 @@ class Storage:
             log.warning("could not read %s (%s); starting fresh", path, e)
             return default
 
-    def _load_pool(self, path: Path) -> tuple[dict, set]:
-        """(players, applied game ids) of one leaderboard file. A legacy flat
-        file ({name: entry}, before format 2) or a missing one gets every
-        archived game in its ledger: those were rated (or not) by the old code.
-        The file is rewritten in format 2 on the next rated game."""
+    def _load_pool(self, path: Path, track: bool = False) -> _Pool:
+        """Players, applied game ids (and pinned rules hash) of one leaderboard
+        file. A legacy flat file ({name: entry}, before format 2) or a missing
+        open-ladder file gets every archived game in its ledger: those were
+        rated (or not) by the old code. The file is rewritten in format 2 on
+        the next rated game. A missing track file is an empty pool (tracks
+        are newer than format 2)."""
         data = self._load_json(path, {})
         if isinstance(data.get("format"), int):
             players = data.get("players")
             applied = data.get("applied")
-            return (players if isinstance(players, dict) else {},
-                    {g for g in applied if isinstance(g, str)} if isinstance(applied, list) else set())
+            pin = data.get("rules_sha256")
+            return _Pool(players if isinstance(players, dict) else {},
+                         {g for g in applied if isinstance(g, str)} if isinstance(applied, list) else set(),
+                         path, pin if isinstance(pin, str) else None)
+        if track:
+            return _Pool({}, set(), path)
         if data:
             self._legacy.add(path)
-        return data, set(self.index)
+        return _Pool(data, set(self.index), path)
 
     def _load_index(self) -> dict:
         index = self._load_json(self.index_path, {})
@@ -190,50 +221,85 @@ class Storage:
             return name.casefold() in self.claims
 
     # ------------------------------------------------------------ leaderboard
-    def _pool(self, pool: str) -> tuple[dict, Path]:
-        if pool == "standard":
-            return self.table, self.leaderboard_path
-        if pool == "fog":
-            return self.fog_table, self.fog_leaderboard_path
-        raise ValueError(f"unknown leaderboard pool {pool!r}")
+    @property
+    def table(self) -> dict:
+        """Players of the ``standard`` pool."""
+        return self._pools["standard"].table
 
-    def _ledger(self, pool: str) -> set:
-        return self._applied if pool == "standard" else self._fog_applied
+    @property
+    def fog_table(self) -> dict:
+        """Players of the ``fog`` pool."""
+        return self._pools["fog"].table
+
+    def _pool(self, pool: str) -> _Pool:
+        """The pool ``standard``, ``fog`` or a track id (loaded on first use; under or outside the lock)."""
+        p = self._pools.get(pool)
+        if p is not None:
+            return p
+        if not valid_pool_name(pool):
+            raise ValueError(f"unknown leaderboard pool {pool!r}")
+        with self._pool_lock:
+            p = self._pools.get(pool)
+            if p is None:
+                p = self._pools[pool] = self._load_pool(self.root / f"leaderboard_{pool}.json", track=True)
+        return p
 
     def is_applied(self, game_id: str, pool: str = "standard") -> bool:
         """Has ``game_id`` already changed the ``pool`` ratings?"""
-        self._pool(pool)
+        p = self._pool(pool)
         with self._lock:
-            return game_id in self._ledger(pool)
+            return game_id in p.applied
+
+    def pinned_rules(self, pool: str) -> str | None:
+        """The rules hash a track pool is pinned to (None: not used yet, or an open ladder)."""
+        p = self._pool(pool)
+        with self._lock:
+            return p.rules_sha256
+
+    def pin_rules(self, pool: str, sha: str) -> None:
+        """A track game is about to be created under rules ``sha``: the first
+        one pins the pool to it (written at once); later ones must match, else
+        :class:`RulesChanged` (the operator defines a new track version)."""
+        p = self._pool(pool)
+        with self._lock:
+            if p.rules_sha256 is None:
+                self._write_pool(p, p.table, p.applied, sha)
+                p.rules_sha256 = sha
+            elif p.rules_sha256 != sha:
+                raise RulesChanged(pool, p.rules_sha256)
+
+    def _write_pool(self, p: _Pool, players: dict, applied, pin: str | None) -> None:
+        doc = {"format": 2, "players": players, "applied": sorted(applied)}
+        if pin is not None:
+            doc["rules_sha256"] = pin
+        self._migrate_backup(p.path)
+        _atomic_write(p.path, json.dumps(doc, indent=1, sort_keys=True).encode())
 
     def record_result(self, game_id: str, placements: list[str], ranks: list[int] | None = None,
                       pool: str = "standard") -> bool:
         """Rate one game: ``placements`` holds one rating name per seat (winner
         first; a name may repeat, see :func:`ratings.update`), ``ranks``
         (optional, 1 = best, equal = tie). ``pool``: ``standard``
-        (leaderboard.json) or ``fog`` (leaderboard_fog.json, fog-of-war games).
+        (leaderboard.json), ``fog`` (leaderboard_fog.json, fog-of-war games)
+        or a track id (leaderboard_<id>.json).
 
         Idempotent: a ``game_id`` already in the pool's ledger changes nothing.
         The ratings and the ledger are written together in one atomic file and
         the in-memory table changes only once that write succeeded, so a failed
         write (OSError, raised) can simply be retried. Fewer than two distinct
         names is ignored. Returns True if the ratings changed."""
-        table, path = self._pool(pool)
+        p = self._pool(pool)
         if ranks is None:
             ranks = list(range(1, len(placements) + 1))
         if len(set(placements)) < 2:
             return False
         with self._lock:
-            applied = self._ledger(pool)
+            table, applied = p.table, p.applied
             if game_id in applied:
                 return False
             work = {name: dict(table[name]) for name in placements if name in table}
             ratings.update(work, list(placements), list(ranks))
-            players = {**table, **work}
-            ledger = sorted(applied | {game_id})
-            self._migrate_backup(path)
-            _atomic_write(path, json.dumps({"format": 2, "players": players, "applied": ledger},
-                                           indent=1, sort_keys=True).encode())
+            self._write_pool(p, {**table, **work}, applied | {game_id}, p.rules_sha256)
             table.update(work)
             applied.add(game_id)
             return True
@@ -249,9 +315,9 @@ class Storage:
         self._legacy.discard(path)
 
     def leaderboard(self, pool: str = "standard") -> list[dict]:
-        table, _ = self._pool(pool)
+        p = self._pool(pool)
         with self._lock:
-            rows = ratings.leaderboard(table)
+            rows = ratings.leaderboard(p.table)
             for r in rows:  # registered names can only be played with their key (see check_name)
                 r["verified"] = r["name"].casefold() in self.claims
             return rows

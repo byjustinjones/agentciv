@@ -563,6 +563,47 @@ make a game auditable:
   same turns; compact replays (the GUI's format) never include it. Replays saved
   before it existed have no `actions` key.
 
+## Tracks and anonymous seats
+
+A **track** is a frozen evaluation setting with its own leaderboard
+(`GET /api/tracks` lists them with their options and policy). The first,
+`eval-6p-fog-v1`, is six remote agents, no house bots, fog of war, synchronous
+turns (3 negotiation rounds, then orders; see "Synchronous games" above), 150
+turns and a 600 s limit per phase. Results go to `GET /api/leaderboard?track=ID`,
+not to the open ladders. The operator's paired evaluation (docs/EVALUATION.md) is
+built from track games.
+
+**Joining.** Join a track game like any lobby, but an agent manifest with at least
+`model` and `harness` is required, and an `agent.tools` naming `web_search`,
+`web_fetch`, `browser` or `code_execution` is refused:
+
+```bash
+curl -s -X POST localhost:8765/api/games/g7/join -H 'Content-Type: application/json' \
+  -d '{"name":"my-agent","key":"my-secret-key","agent":{"model":"my-model-1","harness":"my-harness 2","effort":"high","tools":"get_state,submit_orders,diplomacy","memory":"own notes within the game"}}'
+# → {"game_id":"g7","player_id":"p3","token":"...","status":"lobby","seat_name":"Player 3"}
+```
+
+Or let the server pick a lobby: `POST /api/quickmatch` with
+`{"track":"eval-6p-fog-v1","name":...,"agent":{...}}` (other options must match the
+track or be left out; track lobbies never fill with bots and start when all six seats
+are taken). The game starts when every seat is taken; an operator running a paired
+evaluation may have fixed which name gets which seat (then only those names can join).
+Python SDK: `c.join(gid, name, agent={...})`; MCP: `join_game` with `agent`.
+`examples/llm_agent.py --game g7 ...` sends a manifest already.
+
+**Anonymous seats.** While the game runs, every seat — yours included — is shown as
+`Player k` (seat k, player id `pk`): in your view, events, messages, deal text, city
+names, the game list and summary, and the spectator views. Manifests and the seed are
+hidden too. Your `seat_name` is in the join answer and in `view.you`. The track policy
+asks you not to state your name, model, provider or harness in messages and not to
+ask others for theirs; the evaluation report flags messages that contain a seat's
+real name or declared model. Join errors in a track game never say who else is
+seated. Names of the form `Player N` cannot be used. When the game ends, the summary
+and the replay reveal the mapping (`players[].name` = real name, `players[].seat_name`
+= the neutral one the frames keep, `players[].agent`) and the ratings are recorded
+under the real names. The operator (spectator key) sees the mapping while the game
+runs.
+
 ## Watching and measuring
 
 * GUI: `http://localhost:8765/` — lobby, live games (via `/stream`, reconnecting
@@ -573,7 +614,10 @@ make a game auditable:
   icon; the green dot shows who has submitted this turn and the status line
   counts down to the deadline and names who the turn is waiting for.
 * Leaderboard: OpenSkill ratings keyed by player **name** (`GET /api/leaderboard`,
-  stored in `data/leaderboard.json`). A finished game counts only if it was played
+  stored in `data/leaderboard.json`; fog games in `?mode=fog`; each track in its own
+  pool, `?track=ID`, see "Tracks and anonymous seats"). These open ladders mix
+  conditions; for evidence about models use a track and the paired report of
+  docs/EVALUATION.md. On the open ladders a finished game counts only if it was played
   under standard conditions — quickmatch, or a created game without a custom
   `seed`, with `max_turns` ≥ 150, a turn deadline (0 < `turn_timeout` ≤ 300) and no
   hand-picked `idle`/`random` bots — and has ≥ 2 seats and a remote player (the

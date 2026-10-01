@@ -321,6 +321,8 @@
       if (path === 'api/bots') return this.file('bots');
       if (path === 'api/leaderboard') return this.file('leaderboard');
       if (path === 'api/leaderboard?mode=fog') return [];
+      if (path === 'api/tracks') return [];
+      if (path.startsWith('api/leaderboard?track=')) return [];
       let m = path.match(/^api\/games\/([^/?]+)\/replay(\?.*)?$/);
       if (m) {
         const { frames } = await this.framesFor(decodeURIComponent(m[1]));
@@ -490,9 +492,22 @@
         if (sel && !sel.dataset.bound) {
           sel.dataset.bound = '1';
           sel.addEventListener('change', () => this.refreshLeaderboard());
+          try { // one option per evaluation track (its own pool)
+            const tracks = await api.get('api/tracks');
+            for (const t of tracks || []) {
+              if (!t || typeof t.id !== 'string') continue;
+              const o = document.createElement('option');
+              o.value = 'track:' + t.id;
+              o.textContent = 'Track ' + t.id;
+              o.title = t.title || '';
+              sel.appendChild(o);
+            }
+          } catch (_) { /* older server: no tracks */ }
         }
         const mode = sel ? sel.value : 'standard';
-        const rows = await api.get(mode === 'fog' ? 'api/leaderboard?mode=fog' : 'api/leaderboard');
+        const path = mode.startsWith('track:') ? 'api/leaderboard?track=' + encodeURIComponent(mode.slice(6))
+          : mode === 'fog' ? 'api/leaderboard?mode=fog' : 'api/leaderboard';
+        const rows = await api.get(path);
         const body = $('#lb-body');
         if (!rows || !rows.length) {
           body.innerHTML = '<tr><td colspan="8" class="muted">No rated games yet.</td></tr>';
@@ -756,6 +771,7 @@
         const meta = await api.get(`api/games/${encodeURIComponent(this.id)}`);
         if (session !== this.session || !meta) return;
         this.meta = meta;
+        if (meta.track && meta.status === 'finished') this.frames.forEach((f) => this.unmask(f));
         this.setTitle();
         const v = this.view;
         if (v) {
@@ -921,9 +937,25 @@
       }
     },
 
+    /** A finished track game: frames keep the anonymous seat names ("Player 3"); the summary maps them to
+     *  the real names, shown as "Real (Player 3)" (city names still use the seat name). Idempotent. */
+    unmask(v) {
+      const m = this.meta;
+      if (!v || !m || !m.track || m.status !== 'finished' || !Array.isArray(v.players)) return v;
+      for (const p of v.players) {
+        if (!p || typeof p !== 'object') continue;
+        const s = (m.players || []).find((x) => x.id === p.id);
+        if (s && s.seat_name && s.name && s.name !== s.seat_name && p.name === s.seat_name) {
+          p.name = `${s.name} (${s.seat_name})`;
+        }
+      }
+      return v;
+    },
+
     /** Insert/replace a frame by turn without re-rendering. Returns its index. */
     insertFrame(v) {
       if (!v || typeof v !== 'object' || typeof v.turn !== 'number') return -1;
+      this.unmask(v);
       Rules.use(v);
       let i = this.frames.findIndex((f) => f.turn === v.turn);
       if (i >= 0) this.frames[i] = v;
